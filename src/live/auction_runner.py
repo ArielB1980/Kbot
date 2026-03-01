@@ -23,6 +23,31 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _is_qty_synced_dust(issue_text: str) -> bool:
+    """
+    Treat tiny QTY_SYNCED residuals as non-blocking dust.
+
+    Example issue text:
+    "QTY_SYNCED: exit+0.001 local=0.002 exchange=0.001 price=1954.97"
+    """
+    if not isinstance(issue_text, str) or not issue_text.startswith("QTY_SYNCED:"):
+        return False
+    try:
+        import re
+
+        local_match = re.search(r"local=([0-9]*\.?[0-9]+)", issue_text)
+        exchange_match = re.search(r"exchange=([0-9]*\.?[0-9]+)", issue_text)
+        if not local_match or not exchange_match:
+            return False
+        local_qty = Decimal(local_match.group(1))
+        exchange_qty = Decimal(exchange_match.group(1))
+        delta = abs(local_qty - exchange_qty)
+        # Conservative dust gate: only tiny residuals should bypass open blocking.
+        return delta <= Decimal("0.01") and max(local_qty, exchange_qty) <= Decimal("0.05")
+    except (ArithmeticError, ValueError, TypeError):
+        return False
+
+
 def _split_reconcile_issues(issues: List) -> tuple[List, List]:
     """
     Split reconcile issues into (blocking, non_blocking).
@@ -31,7 +56,9 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
     - ORPHANED issues are often transient right after stop/TP-driven closes.
       They indicate registry/exchange convergence in progress and are
       persisted/handled by gateway reconciliation.
-    - Other issue classes (PHANTOM, QTY_MISMATCH, etc.) remain blocking.
+    - QTY_SYNCED dust residuals are non-blocking to avoid freezing opens on
+      tiny convergence lag.
+    - Other issue classes (PHANTOM, meaningful QTY drift, etc.) remain blocking.
     """
     blocking = []
     non_blocking = []
@@ -42,6 +69,13 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
             and len(issue) >= 2
             and isinstance(issue[1], str)
             and issue[1].startswith("ORPHANED:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and _is_qty_synced_dust(issue[1])
         ):
             non_blocking.append(issue)
         else:
@@ -1009,6 +1043,13 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                 reason=open_gate_reason,
                 planned_opens=len(plan.opens),
             )
+            if hasattr(lt, "_auction_open_block_reason_by_symbol"):
+                now_utc_gate = datetime.now(timezone.utc)
+                for planned_signal in plan.opens:
+                    lt._auction_open_block_reason_by_symbol[planned_signal.symbol] = {
+                        "reason": open_gate_reason,
+                        "at": now_utc_gate,
+                    }
 
         for signal in plan.opens:
             if open_gate_reason:
@@ -1074,6 +1115,8 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                     if result.get("order_placed", False):
                         opens_executed += 1
                         lt._auction_entry_log[signal.symbol] = datetime.now(timezone.utc)
+                        if hasattr(lt, "_auction_open_block_reason_by_symbol"):
+                            lt._auction_open_block_reason_by_symbol.pop(signal.symbol, None)
                         logger.info(
                             "Auction: Opened position",
                             symbol=signal.symbol,
@@ -1085,6 +1128,11 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                         for r in rejection_reasons:
                             rejection_counts[r] = rejection_counts.get(r, 0) + 1
                             funnel_rejections[f"OPEN_{r}"] += 1
+                        if hasattr(lt, "_auction_open_block_reason_by_symbol"):
+                            lt._auction_open_block_reason_by_symbol[signal.symbol] = {
+                                "reason": (rejection_reasons[0] if rejection_reasons else "OPEN_REJECTED"),
+                                "at": datetime.now(timezone.utc),
+                            }
                         logger.warning(
                             "Auction: Open rejected/failed",
                             symbol=signal.symbol,

@@ -474,6 +474,7 @@ async def run_winner_churn_monitor(
             # lt._auction_entry_log: Dict[symbol, datetime] populated by auction_runner
             win_log = getattr(lt, "_auction_win_log", {})
             entry_log = getattr(lt, "_auction_entry_log", {})
+            open_block_log = getattr(lt, "_auction_open_block_reason_by_symbol", {})
 
             # ---- Prune old win entries ----
             for sym in list(win_log):
@@ -502,16 +503,33 @@ async def run_winner_churn_monitor(
                     symbols_str = ", ".join(
                         f"{sym} ({count} wins)" for sym, count in new_churn
                     )
+                    blocker_parts = []
+                    blocker_summary = {}
+                    for sym, _count in new_churn:
+                        block_ctx = open_block_log.get(sym)
+                        reason = None
+                        if isinstance(block_ctx, dict):
+                            reason = block_ctx.get("reason")
+                        if reason:
+                            blocker_parts.append(f"{sym}: {reason}")
+                            blocker_summary[sym] = reason
+                    blocker_hint = (
+                        f"\nObserved blockers: {'; '.join(blocker_parts)}"
+                        if blocker_parts
+                        else ""
+                    )
                     msg = (
                         f"WINNER CHURN: {symbols_str} won the auction "
                         f">={max_wins_without_entry} times in {decay_hours:.0f}h "
                         f"without a single entry.\n"
                         f"Possible causes: persistent risk rejection, basis guard, "
                         f"exchange min-notional, missing futures mapping."
+                        f"{blocker_hint}"
                     )
                     logger.warning(
                         "WINNER_CHURN_DETECTED",
                         churn_symbols=[(s, c) for s, c in new_churn],
+                        observed_blockers=blocker_summary or None,
                         window_hours=decay_hours,
                     )
                     await send_alert("WINNER_CHURN", msg, urgent=False)

@@ -235,6 +235,8 @@ class LiveTrading:
         self._auction_win_log: Dict[str, list] = {}
         # Dict[symbol, datetime] — timestamp of last successful entry per symbol
         self._auction_entry_log: Dict[str, datetime] = {}
+        # Dict[symbol, {"reason": str, "at": datetime}] — last known open blocking cause.
+        self._auction_open_block_reason_by_symbol: Dict[str, Dict[str, Any]] = {}
         # Rebalancer cooldown tracking: symbol -> last cycle where a trim executed
         self._last_trim_cycle_by_symbol: Dict[str, int] = {}
         # Strategic no-signal persistence tracking (auction strategic closes only)
