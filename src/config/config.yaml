@@ -209,7 +209,7 @@ strategy:
   
   # SMC Parameters
   orderblock_lookback: 50
-  fvg_min_size_pct: 0.001  # 0.1% minimum gap size
+  fvg_min_size_pct: 0.0007  # promoted from canary: 0.07% minimum gap size
   bos_confirmation_candles: 3
   
   # V2.3: Market Structure Change Confirmation (4H Decision Authority)
@@ -227,15 +227,14 @@ strategy:
   min_score_wide_structure_aligned: 60.0  # Was 65.0
   min_score_wide_structure_neutral: 70.0
   fib_proximity_bps: 60.0
-  # FVG threshold canary override: canary symbols use 0.07% min gap vs global 0.10%.
-  fvg_min_size_pct_canary_enabled: true
-  fvg_min_size_pct_canary_symbols: ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD"]
-  fvg_min_size_pct_canary: 0.0007
-  # Signal cooldown canary override: reduce silent pre-auction suppression on canary symbols.
+  # Promoted globally from canary trial (BTC/ETH/SOL/XRP/ADA).
   signal_cooldown_hours: 1.0
-  signal_cooldown_canary_enabled: true
-  signal_cooldown_canary_symbols: ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD"]
-  signal_cooldown_hours_canary: 1.0
+  signal_cooldown_canary_enabled: false
+  signal_cooldown_canary_symbols: []
+  signal_cooldown_hours_canary: null
+  fvg_min_size_pct_canary_enabled: false
+  fvg_min_size_pct_canary_symbols: []
+  fvg_min_size_pct_canary: null
   signal_post_close_cooldown_enabled: true
   signal_post_close_lookback_hours: 24
   signal_post_close_cooldown_win_minutes: 15

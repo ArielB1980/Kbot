@@ -116,17 +116,6 @@ class SMCEngine:
         # Store score penalty for tolerance entries
         self.entry_zone_tolerance_score_penalty = getattr(config, 'entry_zone_tolerance_score_penalty', -5)
         self._fvg_min_size_pct_default = Decimal(str(getattr(config, "fvg_min_size_pct", 0.001)))
-        self._fvg_min_size_pct_canary_enabled = bool(
-            getattr(config, "fvg_min_size_pct_canary_enabled", False)
-        )
-        self._fvg_min_size_pct_canary_symbols = {
-            self._normalize_symbol_key(s)
-            for s in (getattr(config, "fvg_min_size_pct_canary_symbols", []) or [])
-        }
-        canary_override = getattr(config, "fvg_min_size_pct_canary", None)
-        if canary_override is None:
-            canary_override = self._fvg_min_size_pct_default
-        self._fvg_min_size_pct_canary = Decimal(str(canary_override))
         
         logger.info("SMC Engine initialized", config=config.model_dump())
 
@@ -137,12 +126,7 @@ class SMCEngine:
         return str(raw_symbol).strip().upper().split(":")[0]
 
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
-        if not self._fvg_min_size_pct_canary_enabled:
-            return self._fvg_min_size_pct_default
-        if not self._fvg_min_size_pct_canary_symbols:
-            return self._fvg_min_size_pct_canary
-        if self._normalize_symbol_key(symbol) in self._fvg_min_size_pct_canary_symbols:
-            return self._fvg_min_size_pct_canary
+        # Promoted policy: single global FVG minimum threshold.
         return self._fvg_min_size_pct_default
     
     def _get_cache_key(self, symbol: str, candles: List[Candle]) -> Tuple[str, datetime]:

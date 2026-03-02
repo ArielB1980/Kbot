@@ -81,26 +81,13 @@ def _normalize_symbol_key(symbol: str) -> str:
 
 def _resolve_signal_cooldown_params(strategy_config, symbol: str) -> Dict[str, Any]:
     """
-    Resolve signal cooldown hours for a symbol, with optional canary overrides.
+    Resolve signal cooldown hours (global policy).
     """
     base_hours = float(getattr(strategy_config, "signal_cooldown_hours", 4.0))
-    params: Dict[str, Any] = {
+    return {
         "cooldown_hours": base_hours,
         "canary_applied": False,
     }
-    if not bool(getattr(strategy_config, "signal_cooldown_canary_enabled", False)):
-        return params
-    canary_symbols = {
-        _normalize_symbol_key(s)
-        for s in (getattr(strategy_config, "signal_cooldown_canary_symbols", []) or [])
-    }
-    if canary_symbols and _normalize_symbol_key(symbol) not in canary_symbols:
-        return params
-    override_hours = getattr(strategy_config, "signal_cooldown_hours_canary", None)
-    if override_hours is not None:
-        params["cooldown_hours"] = float(override_hours)
-    params["canary_applied"] = True
-    return params
 
 
 def _resolve_post_close_cooldown_kind_and_minutes(

@@ -99,12 +99,9 @@ def test_smc_engine_no_4h_structure_returns_no_signal():
     assert "4H" in signal.reasoning or "no_4h_structure" in signal.regime
 
 
-def test_fvg_min_size_canary_override_applies_only_to_canary_symbols():
+def test_fvg_min_size_global_threshold_applies_to_all_symbols():
     config = StrategyConfig(
-        fvg_min_size_pct=0.001,  # 0.10%
-        fvg_min_size_pct_canary_enabled=True,
-        fvg_min_size_pct_canary_symbols=["BTC/USD"],
-        fvg_min_size_pct_canary=0.0007,  # 0.07%
+        fvg_min_size_pct=0.0007,  # promoted global threshold (0.07%)
     )
     engine = SMCEngine(config)
     base_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -141,7 +138,7 @@ def test_fvg_min_size_canary_override_applies_only_to_canary_symbols():
         ),
     ]
 
-    # Gap size is 0.0008 (0.08%): should pass canary threshold (0.07%).
+    # Gap size is 0.0008 (0.08%): should pass promoted global threshold (0.07%).
     assert engine._find_fair_value_gap(candles, "bullish", symbol="BTC/USD") is not None
-    # Same setup should fail default threshold (0.10%) for non-canary symbols.
-    assert engine._find_fair_value_gap(candles, "bullish", symbol="LINK/USD") is None
+    # Same setup should also pass for non-canary symbols under global threshold.
+    assert engine._find_fair_value_gap(candles, "bullish", symbol="LINK/USD") is not None
