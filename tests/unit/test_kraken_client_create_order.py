@@ -50,3 +50,27 @@ async def test_create_order_uses_explicit_leverage_when_provided():
 
     kwargs = client.place_futures_order.call_args.kwargs
     assert kwargs["leverage"] == Decimal("4")
+
+
+@pytest.mark.asyncio
+async def test_place_futures_order_resolves_plain_usd_symbol_to_unified():
+    client = _client()
+    fx = AsyncMock()
+    fx.markets = {
+        "PF_XMRUSD": {"id": "PF_XMRUSD", "symbol": "XMR/USD:USD"},
+    }
+    fx.create_order = AsyncMock(return_value={"id": "order-xmr"})
+    fx.price_to_precision = lambda symbol, price: str(price)
+    fx.set_leverage = AsyncMock(return_value=None)
+    client.futures_exchange = fx
+
+    await client.place_futures_order(
+        symbol="XMR/USD",
+        side="sell",
+        order_type="market",
+        size=Decimal("1"),
+        reduce_only=True,
+    )
+
+    kwargs = fx.create_order.call_args.kwargs
+    assert kwargs["symbol"] == "XMR/USD:USD"

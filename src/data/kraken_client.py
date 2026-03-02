@@ -1283,6 +1283,8 @@ class KrakenClient:
         await self._api_breaker.can_execute()
 
         try:
+            from src.data.symbol_utils import futures_candidate_symbols, pf_to_unified
+
             # Create params dict for extra options
             params = {}
             if reduce_only:
@@ -1299,14 +1301,42 @@ class KrakenClient:
             unified_symbol = symbol
             if not self.futures_exchange.markets:
                 await self.futures_exchange.load_markets()
-            
-            # Find the unified symbol from market ID
+
+            symbol_upper = str(symbol or "").upper()
+            id_to_unified = {}
+            sym_to_unified = {}
             for m in self.futures_exchange.markets.values():
-                if m['id'] == symbol or m['id'].upper() == symbol.upper():
-                    unified_symbol = m['symbol']
+                mid = str(m.get("id") or "").upper()
+                msym = str(m.get("symbol") or "")
+                msym_upper = msym.upper()
+                if mid and msym:
+                    id_to_unified[mid] = msym
+                if msym_upper and msym:
+                    sym_to_unified[msym_upper] = msym
+
+            candidates: List[str] = [symbol]
+            if symbol_upper.startswith("PF_"):
+                candidates.append(pf_to_unified(symbol_upper))
+            if "/" in symbol_upper:
+                candidates.extend(futures_candidate_symbols(symbol_upper))
+                if symbol_upper.endswith("/USD"):
+                    candidates.append(f"{symbol_upper}:USD")
+
+            seen = set()
+            ordered_candidates = []
+            for cand in candidates:
+                key = str(cand or "").strip().upper()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                ordered_candidates.append(key)
+
+            for cand_upper in ordered_candidates:
+                if cand_upper in sym_to_unified:
+                    unified_symbol = sym_to_unified[cand_upper]
                     break
-                elif m['symbol'] == symbol:
-                    unified_symbol = symbol  # Already unified
+                if cand_upper in id_to_unified:
+                    unified_symbol = id_to_unified[cand_upper]
                     break
             
             if stop_price:
