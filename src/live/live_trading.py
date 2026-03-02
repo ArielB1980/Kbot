@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import os
+import re
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -116,6 +117,53 @@ def _resolve_post_close_cooldown_kind_and_minutes(
         return "POST_CLOSE_LOSS", max(0, minutes)
     minutes = int(getattr(strategy_config, "signal_post_close_cooldown_win_minutes", 30))
     return "POST_CLOSE_WIN", max(0, minutes)
+
+
+def _resolve_canary_diagnostic_symbols(strategy_config) -> set[str]:
+    """
+    Build normalized canary symbol set from strategy canary allowlists.
+    """
+    symbols: list[str] = []
+    symbols.extend(getattr(strategy_config, "signal_cooldown_canary_symbols", []) or [])
+    symbols.extend(getattr(strategy_config, "fvg_min_size_pct_canary_symbols", []) or [])
+    return {_normalize_symbol_key(s) for s in symbols if s}
+
+
+def _build_4h_warmup_skip_diagnostic(
+    strategy_config,
+    symbol: str,
+    futures_symbol: Optional[str],
+    stage_b_reason: str,
+    candles_4h: List[Candle],
+    required_candles: int,
+    decision_tf: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build canary-only warmup diagnostic payload for stage-B insufficient-candle skips.
+    """
+    canary_symbols = _resolve_canary_diagnostic_symbols(strategy_config)
+    if not canary_symbols:
+        return None
+    normalized_symbol = _normalize_symbol_key(symbol)
+    if normalized_symbol not in canary_symbols:
+        return None
+
+    reason = str(stage_b_reason or "")
+    if not (reason.startswith(f"candles_{decision_tf}=") and "<" in reason):
+        return None
+
+    latest = candles_4h[-1].timestamp if candles_4h else None
+    return {
+        "symbol": symbol,
+        "normalized_symbol": normalized_symbol,
+        "resolved_futures_symbol": futures_symbol,
+        "candles_4h_count": len(candles_4h),
+        "required_candles_4h": int(required_candles),
+        "last_4h_ts": latest.isoformat() if isinstance(latest, datetime) else None,
+        "skip_reason": "insufficient_4h_history",
+        "stage_b_reason": reason,
+        "is_canary": True,
+    }
 
 
 class LiveTrading:
@@ -1904,6 +1952,21 @@ class LiveTrading:
                         thresholds=self.sanity_thresholds,
                     )
                     if not stage_b.passed:
+                        candles_4h = self.candle_manager.get_candles(
+                            spot_symbol,
+                            self.sanity_thresholds.decision_tf,
+                        )
+                        warmup_diag = _build_4h_warmup_skip_diagnostic(
+                            strategy_config=self.config.strategy,
+                            symbol=spot_symbol,
+                            futures_symbol=futures_symbol,
+                            stage_b_reason=stage_b.reason,
+                            candles_4h=candles_4h,
+                            required_candles=self.sanity_thresholds.min_decision_tf_candles,
+                            decision_tf=self.sanity_thresholds.decision_tf,
+                        )
+                        if warmup_diag:
+                            logger.info("4h_warmup_skip", **warmup_diag)
                         _af_skip(f"stage_b_{stage_b.reason or 'failed'}")
                         self.data_quality_tracker.record_result(
                             spot_symbol, passed=False, reason=stage_b.reason,
