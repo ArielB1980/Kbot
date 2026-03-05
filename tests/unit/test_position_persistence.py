@@ -102,3 +102,30 @@ def test_load_registry_repairs_missing_entry_fills_when_exit_exists(tmp_path):
     assert repaired.filled_entry_qty == Decimal("683")
     assert repaired.filled_exit_qty == Decimal("273")
     assert repaired.remaining_qty == Decimal("410")
+
+
+def test_save_fill_is_globally_idempotent_by_fill_id(tmp_path):
+    db_path = tmp_path / "positions.db"
+    persistence = PositionPersistence(db_path=str(db_path))
+
+    fill = FillRecord(
+        fill_id="dup-fill-1",
+        order_id="order-1",
+        side=Side.SHORT,
+        qty=Decimal("10"),
+        price=Decimal("1.23"),
+        timestamp=datetime.now(timezone.utc),
+        is_entry=True,
+    )
+
+    inserted_first = persistence._save_fill("pos-a", fill)
+    inserted_second = persistence._save_fill("pos-a", fill)
+
+    assert inserted_first is True
+    assert inserted_second is False
+
+    row = persistence._conn.execute(
+        "SELECT COUNT(*) AS cnt FROM position_fills WHERE fill_id = ?",
+        (fill.fill_id,),
+    ).fetchone()
+    assert row["cnt"] == 1

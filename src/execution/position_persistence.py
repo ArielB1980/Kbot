@@ -250,38 +250,57 @@ class PositionPersistence:
             for fill in position.exit_fills:
                 self._save_fill(position.position_id, fill)
     
-    def _save_fill(self, position_id: str, fill: FillRecord) -> None:
-        """Save a fill record, with post-write invariant check."""
-        cursor = self._conn.execute("""
-            INSERT OR IGNORE INTO position_fills (
-                fill_id, position_id, order_id, side, qty, price, timestamp, is_entry
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            fill.fill_id,
-            position_id,
-            fill.order_id,
-            fill.side.value,
-            str(fill.qty),
-            str(fill.price),
-            fill.timestamp.isoformat(),
-            1 if fill.is_entry else 0
-        ))
-
-        if cursor.rowcount == 0:
-            # Fill IDs must be globally unique. If this trips, we silently lose
-            # fill history for the current position and can violate invariants on restart.
-            existing = self._conn.execute(
-                "SELECT position_id FROM position_fills WHERE fill_id = ?",
-                (fill.fill_id,),
-            ).fetchone()
-            logger.error(
-                "FILL_ID_COLLISION: fill insert ignored",
+    def _save_fill(self, position_id: str, fill: FillRecord) -> bool:
+        """Save a fill record with global fill_id idempotency."""
+        existing = self._conn.execute(
+            "SELECT position_id FROM position_fills WHERE fill_id = ?",
+            (fill.fill_id,),
+        ).fetchone()
+        if existing is not None:
+            logger.warning(
+                "FILL_ID_COLLISION_IGNORED",
                 fill_id=fill.fill_id,
-                current_position_id=position_id,
-                existing_position_id=existing["position_id"] if existing else None,
+                position_id=position_id,
+                existing_position_id=existing["position_id"],
+                reason="already_exists",
                 is_entry=fill.is_entry,
                 qty=str(fill.qty),
             )
+            return False
+
+        cursor = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO position_fills (
+                fill_id, position_id, order_id, side, qty, price, timestamp, is_entry
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fill.fill_id,
+                position_id,
+                fill.order_id,
+                fill.side.value,
+                str(fill.qty),
+                str(fill.price),
+                fill.timestamp.isoformat(),
+                1 if fill.is_entry else 0,
+            ),
+        )
+        if cursor.rowcount == 0:
+            # Defensive fallback for race windows across concurrent writers.
+            existing_after = self._conn.execute(
+                "SELECT position_id FROM position_fills WHERE fill_id = ?",
+                (fill.fill_id,),
+            ).fetchone()
+            logger.warning(
+                "FILL_ID_COLLISION_IGNORED",
+                fill_id=fill.fill_id,
+                position_id=position_id,
+                existing_position_id=existing_after["position_id"] if existing_after else None,
+                reason="already_exists",
+                is_entry=fill.is_entry,
+                qty=str(fill.qty),
+            )
+            return False
 
         # Post-write invariant check: exit_qty must not exceed entry_qty
         if not fill.is_entry:
@@ -306,6 +325,7 @@ class PositionPersistence:
                     )
             except Exception as check_err:
                 logger.debug("Fill invariant check failed", error=str(check_err))
+        return True
     
     def load_position(self, position_id: str) -> Optional[ManagedPosition]:
         """Load a position by ID."""
