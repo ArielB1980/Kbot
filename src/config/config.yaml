@@ -72,7 +72,7 @@ risk:
   auction_max_per_cluster: 8  # Maximum positions per cluster (balanced for 25 positions)
   auction_max_per_symbol: 1  # Maximum positions per symbol
   auction_swap_threshold: 14.0  # Relaxed canary trial: allow more valid replacement opportunities
-  auction_min_hold_minutes: 30  # Relaxed canary trial: allow clean 30-45m intraday holds
+  auction_min_hold_minutes: 45  # Raise minimum hold to reduce fee-heavy short-lived exits
   auction_max_trades_per_cycle: 5  # Maximum total trades per cycle (anti-churn)
   auction_max_new_opens_per_cycle: 1  # Tighter cap to prevent bursty open churn
   auction_max_closes_per_cycle: 1  # Tighter cap to prevent bursty close/reopen churn
