@@ -26,6 +26,7 @@ from src.execution.position_state_machine import (
     check_invariant
 )
 from src.execution.instrument_specs import InstrumentSpecRegistry
+from src.data.symbol_utils import position_symbol_matches_order
 from src.domain.models import Side, OrderType, Signal, SignalType
 from src.monitoring.logger import get_logger
 
@@ -969,6 +970,55 @@ class PositionManagerV2:
     
     # ========== RECONCILIATION ==========
     
+    @staticmethod
+    def _has_live_reduce_only_stop_for_symbol(
+        symbol: str,
+        side: Side,
+        exchange_orders: List[Dict],
+    ) -> bool:
+        """Return True when a live, stop-like reduce-only order exists for symbol."""
+        expected_stop_side = "sell" if side == Side.LONG else "buy"
+        for order in exchange_orders or []:
+            order_symbol = str(order.get("symbol") or "")
+            if not position_symbol_matches_order(symbol, order_symbol):
+                continue
+            info = order.get("info") or {}
+            otype = str(
+                order.get("type")
+                or info.get("orderType")
+                or info.get("type")
+                or ""
+            ).lower()
+            if "take_profit" in otype or "take-profit" in otype:
+                continue
+            has_stop_shape = (
+                order.get("stopPrice") is not None
+                or order.get("triggerPrice") is not None
+                or info.get("stopPrice") is not None
+                or info.get("triggerPrice") is not None
+                or any(t in otype for t in ("stop", "stp", "stop_loss", "stop-loss"))
+            )
+            if not has_stop_shape:
+                continue
+            order_side = str(order.get("side") or "").lower()
+            if order_side and order_side != expected_stop_side:
+                continue
+            reduce_only_present = any(
+                k in order or k in info for k in ("reduceOnly", "reduce_only")
+            )
+            reduce_only = (
+                order.get("reduceOnly")
+                or order.get("reduce_only")
+                or info.get("reduceOnly")
+                or info.get("reduce_only")
+            )
+            if reduce_only_present and not reduce_only:
+                continue
+            status = str(order.get("status") or "").lower()
+            if status in {"open", "new", "untouched", "entered_book", "partiallyfilled", "partial"}:
+                return True
+        return False
+    
     def reconcile(
         self,
         exchange_positions: Dict[str, Dict],
@@ -981,6 +1031,7 @@ class PositionManagerV2:
         if issues is None:
             issues = self.registry.reconcile_with_exchange(exchange_positions, exchange_orders)
         actions: List[ManagementAction] = []
+        stop_bind_enqueued: set[str] = set()
         
         for symbol, issue in issues:
             if "ORPHANED" in issue:
@@ -1019,6 +1070,49 @@ class PositionManagerV2:
                 # Qty mismatch - log but don't auto-correct
                 logger.error(f"QTY MISMATCH: {symbol} - {issue}")
                 self.metrics["errors"] += 1
+            
+            elif "PENDING_ADOPTED" in issue or "QTY_SYNCED" in issue:
+                # Reconcile/adopt just mutated exposure. Ensure a protective stop is
+                # explicitly bound in the same reconciliation cycle.
+                pos = self.registry.get_position(symbol)
+                if not pos or pos.is_terminal or pos.remaining_qty <= 0:
+                    continue
+                if pos.symbol in stop_bind_enqueued:
+                    continue
+                stop_already_live = self._has_live_reduce_only_stop_for_symbol(
+                    pos.symbol, pos.side, exchange_orders
+                )
+                if stop_already_live:
+                    continue
+                if not pos.current_stop_price or pos.current_stop_price <= 0:
+                    logger.warning(
+                        "RECONCILE_STOP_BIND_SKIPPED_NO_STOP_PRICE",
+                        symbol=pos.symbol,
+                        position_id=pos.position_id,
+                        issue=issue,
+                    )
+                    continue
+                action = ManagementAction(
+                    type=ActionType.PLACE_STOP,
+                    symbol=pos.symbol,
+                    reason=f"Reconcile stop bind after {issue.split(':', 1)[0]}",
+                    side=pos.side,
+                    size=pos.remaining_qty,
+                    price=pos.current_stop_price,
+                    client_order_id=f"stop-reconcile-{pos.position_id}",
+                    position_id=pos.position_id,
+                    priority=99,
+                )
+                actions.append(action)
+                stop_bind_enqueued.add(pos.symbol)
+                logger.warning(
+                    "RECONCILE_ENSURE_STOP_BIND_QUEUED",
+                    symbol=pos.symbol,
+                    position_id=pos.position_id,
+                    reason=issue,
+                    stop_price=str(pos.current_stop_price),
+                    qty=str(pos.remaining_qty),
+                )
         
         return actions
     

@@ -91,6 +91,9 @@ class SafetyConfig:
     emergency_exit_on_stop_fail: bool = True
     # Grace window to avoid false "naked" alerts while stops are still attaching/visible
     stop_pending_grace_seconds: int = 90
+    # Short grace specifically for freshly reconciled/adopted positions before
+    # stop binding catches up in the same cycle.
+    reconcile_fresh_grace_seconds: int = 3
     
     # Event ordering
     reject_stale_events: bool = True
@@ -323,7 +326,9 @@ class ProtectionEnforcer:
     async def verify_protection(
         self,
         position: ManagedPosition,
-        exchange_orders: List[Dict]
+        exchange_orders: List[Dict],
+        *,
+        log_violation: bool = True,
     ) -> bool:
         """
         Verify position has protective stop.
@@ -377,7 +382,7 @@ class ProtectionEnforcer:
             has_stop = True
             break
         
-        if not has_stop:
+        if not has_stop and log_violation:
             logger.critical(
                 "INVARIANT K VIOLATION: Position has exposure but NO STOP!",
                 symbol=position.symbol,
@@ -898,6 +903,8 @@ class PositionProtectionMonitor:
         
         for position in self.registry.get_all_active():
             if position.remaining_qty > 0:
+                now = datetime.now(timezone.utc)
+                updated_age_seconds = max(0, int((now - position.updated_at).total_seconds()))
                 # CRITICAL CHECK: Verify position actually exists on exchange
                 normalized_sym = normalize_symbol_for_position_match(position.symbol)
                 exchange_size = exchange_position_map.get(normalized_sym, 0)
@@ -913,10 +920,28 @@ class PositionProtectionMonitor:
                     )
                     results[position.symbol] = True  # Treat as protected (closed)
                     continue
+
+                # Fresh reconcile/adopt grace: avoid tripping safety while stop bind
+                # runs in the same loop for newly updated positions.
+                if (
+                    updated_age_seconds <= self.enforcer.config.reconcile_fresh_grace_seconds
+                    and not position.stop_order_id
+                ):
+                    logger.warning(
+                        "INVARIANT_K_FRESH_RECONCILE_GRACE",
+                        symbol=position.symbol,
+                        qty=str(position.remaining_qty),
+                        exchange_qty=exchange_size,
+                        updated_age_seconds=updated_age_seconds,
+                        grace_seconds=self.enforcer.config.reconcile_fresh_grace_seconds,
+                    )
+                    results[position.symbol] = True
+                    continue
                 
                 layer1_protected = await self.enforcer.verify_protection(
                     position,
-                    exchange_orders
+                    exchange_orders,
+                    log_violation=False,
                 )
                 layer1_seen_orders_count = sum(
                     1
@@ -1002,6 +1027,13 @@ class PositionProtectionMonitor:
                     now = datetime.now(timezone.utc)
                     position_age_seconds = max(0, int((now - position.created_at).total_seconds()))
                     updated_age_seconds = max(0, int((now - position.updated_at).total_seconds()))
+                    logger.critical(
+                        "INVARIANT K VIOLATION: Position has exposure but NO STOP!",
+                        symbol=position.symbol,
+                        remaining_qty=str(position.remaining_qty),
+                        exchange_qty=exchange_size,
+                        expected_stop_id=position.stop_order_id or None,
+                    )
                     logger.critical(
                         "NAKED POSITION DETECTED",
                         symbol=position.symbol,

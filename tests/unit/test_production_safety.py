@@ -1115,6 +1115,41 @@ class TestStopPendingGrace:
         assert results.get("TIA/USD") is True
 
     @pytest.mark.asyncio
+    async def test_fresh_reconcile_grace_suppresses_invariant_k_log(self, mock_client, position_no_stop):
+        """
+        Newly updated reconciled positions get a short grace window before
+        emitting INVARIANT K, preventing false criticals during stop bind races.
+        """
+        reset_position_registry()
+        registry = get_position_registry()
+        registry.register_position(position_no_stop)
+
+        # Freshly reconciled now.
+        position_no_stop.updated_at = datetime.now(timezone.utc)
+        position_no_stop.stop_order_id = None
+
+        mock_client.get_futures_open_orders.return_value = []
+        mock_client.get_all_futures_positions.return_value = [
+            {"symbol": "PF_TIAUSD", "contracts": 100}
+        ]
+
+        enforcer = ProtectionEnforcer(
+            mock_client,
+            SafetyConfig(
+                stop_pending_grace_seconds=0,
+                reconcile_fresh_grace_seconds=3,
+            ),
+        )
+        monitor = PositionProtectionMonitor(mock_client, registry, enforcer)
+
+        with patch("src.execution.production_safety.logger") as mock_logger:
+            results = await monitor.check_all_positions()
+
+        assert results.get("TIA/USD") is True
+        critical_logs = [str(c) for c in mock_logger.critical.call_args_list]
+        assert not any("INVARIANT K VIOLATION" in c for c in critical_logs)
+
+    @pytest.mark.asyncio
     async def test_old_position_without_stop_still_flags_naked(self, mock_client, position_no_stop):
         reset_position_registry()
         registry = get_position_registry()
