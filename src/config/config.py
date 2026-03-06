@@ -394,6 +394,10 @@ class StrategyConfig(BaseSettings):
     # Higher-timeframe pyramid gate (1W -> 1D -> 4H)
     # Starts SOFT (score penalty only) so we can roll out safely.
     higher_tf_enabled: bool = Field(default=False, description="Enable weekly + daily context gate")
+    higher_tf_mode: Literal["soft", "hard"] = Field(
+        default="soft",
+        description="soft=apply score penalty outside weekly zone, hard=reject signal outside weekly zone",
+    )
     weekly_fib_confluence_weight: float = Field(default=0.25, ge=0.0, le=1.0)
     daily_bias_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     min_weekly_zone_width_pct: float = Field(default=1.5, ge=0.1, le=20.0)

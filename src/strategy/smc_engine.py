@@ -523,6 +523,7 @@ class SMCEngine:
                 reasoning_parts.append(f"📊 Market Regime: {regime_early}")
                 if getattr(self.config, "higher_tf_enabled", False):
                     higher_tf_context = self._detect_higher_tf_context(symbol)
+                    higher_tf_mode = str(getattr(self.config, "higher_tf_mode", "soft") or "soft").lower()
                     logger.info(
                         "higher_tf_context",
                         symbol=symbol,
@@ -530,8 +531,25 @@ class SMCEngine:
                         weekly_zone_high=str(higher_tf_context.weekly_fib_zone_high) if higher_tf_context.weekly_fib_zone_high is not None else None,
                         daily_bias=higher_tf_context.daily_bias,
                         allowed_entry=higher_tf_context.allowed_entry,
+                        mode=higher_tf_mode,
                     )
                     if not higher_tf_context.allowed_entry:
+                        if higher_tf_mode == "hard":
+                            logger.info(
+                                "higher_tf_hard_rejected",
+                                symbol=symbol,
+                                reason="outside_weekly_zone",
+                            )
+                            reasoning_parts.append("❌ Higher-TF hard reject: outside weekly zone")
+                            signal = self._no_signal(
+                                symbol,
+                                reasoning_parts,
+                                effective_decision_candles[-1] if effective_decision_candles else None,
+                                adx=adx_value,
+                                atr=atr_value,
+                                regime=regime_early,
+                            )
+                            return signal
                         higher_tf_penalty = float(getattr(self.config, "higher_tf_penalty_outside_zone", -18.0))
                         logger.info(
                             "higher_tf_penalty_applied",
