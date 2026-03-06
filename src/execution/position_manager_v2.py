@@ -10,7 +10,7 @@ State-machine-driven position management with:
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
 from datetime import datetime, timezone
 import uuid
 import os
@@ -29,6 +29,7 @@ from src.execution.instrument_specs import InstrumentSpecRegistry
 from src.data.symbol_utils import position_symbol_matches_order
 from src.domain.models import Side, OrderType, Signal, SignalType
 from src.monitoring.logger import get_logger
+from src.monitoring.alerting import send_alert_sync
 
 logger = get_logger(__name__)
 
@@ -151,6 +152,8 @@ class PositionManagerV2:
         registry: Optional[PositionRegistry] = None,
         multi_tp_config=None,
         instrument_spec_registry: Optional[InstrumentSpecRegistry] = None,
+        strategy_config: Optional[Any] = None,
+        institutional_memory: Optional[Any] = None,
     ):
         """
         Initialize with optional custom registry and multi-TP config.
@@ -163,6 +166,8 @@ class PositionManagerV2:
         self.registry = registry or get_position_registry()
         self._multi_tp_config = multi_tp_config
         self._instrument_spec_registry = instrument_spec_registry
+        self._strategy_config = strategy_config
+        self._institutional_memory = institutional_memory
         
         # Decision history for metrics / debugging
         self.decision_history: List[DecisionTick] = []
@@ -205,6 +210,57 @@ class PositionManagerV2:
         if not self._instrument_spec_registry:
             return Decimal("1")
         return self._instrument_spec_registry.get_effective_min_size(symbol)
+
+    def _thesis_management_enabled(self, symbol: str) -> bool:
+        cfg = self._strategy_config
+        if cfg is None:
+            return False
+        if not bool(getattr(cfg, "memory_enabled", False)):
+            return False
+        if bool(getattr(cfg, "thesis_observe_only", True)):
+            return False
+        if not bool(getattr(cfg, "thesis_management_enabled", False)):
+            return False
+        canary = set(getattr(cfg, "thesis_canary_symbols", []) or [])
+        return (not canary) or (symbol in canary)
+
+    def _thesis_alerts_enabled(self) -> bool:
+        cfg = self._strategy_config
+        if cfg is None:
+            return False
+        if not bool(getattr(cfg, "memory_enabled", False)):
+            return False
+        return bool(getattr(cfg, "thesis_alerts_enabled", False))
+
+    def _get_conviction_snapshot(self, symbol: str, current_price: Decimal) -> Optional[Dict[str, Any]]:
+        if not self._institutional_memory:
+            return None
+        return self._institutional_memory.update_conviction_for_symbol(
+            symbol,
+            current_price=current_price,
+            current_volume_avg=None,
+            emit_log=False,
+        )
+
+    def _conviction_partial_factor(self, conviction: Optional[float]) -> Decimal:
+        if conviction is None or self._strategy_config is None:
+            return Decimal("1")
+        neutral = float(getattr(self._strategy_config, "thesis_score_neutral_conviction", 60.0))
+        if conviction >= neutral + 15.0:
+            return Decimal(str(getattr(self._strategy_config, "thesis_partial_reduce_high_conviction_factor", 0.85)))
+        if conviction <= neutral - 20.0:
+            return Decimal(str(getattr(self._strategy_config, "thesis_partial_reduce_low_conviction_factor", 1.25)))
+        return Decimal("1")
+
+    def _conviction_trail_factor(self, conviction: Optional[float]) -> Decimal:
+        if conviction is None or self._strategy_config is None:
+            return Decimal("1")
+        neutral = float(getattr(self._strategy_config, "thesis_score_neutral_conviction", 60.0))
+        if conviction >= neutral + 15.0:
+            return Decimal(str(getattr(self._strategy_config, "thesis_high_conviction_relax_factor", 1.1)))
+        if conviction <= neutral - 20.0:
+            return Decimal(str(getattr(self._strategy_config, "thesis_low_conviction_tighten_factor", 0.75)))
+        return Decimal("1")
     
     # ========== ENTRY EVALUATION ==========
     
@@ -240,6 +296,28 @@ class PositionManagerV2:
             ), None
         
         # Check if position can be opened
+        if self._thesis_management_enabled(symbol):
+            conviction_snapshot = self._get_conviction_snapshot(symbol, entry_price)
+            conviction = float(conviction_snapshot["conviction"]) if conviction_snapshot else None
+            if conviction is not None and self._institutional_memory.should_block_reentry(symbol, conviction):
+                if self._thesis_alerts_enabled():
+                    send_alert_sync(
+                        "THESIS_REENTRY_BLOCKED",
+                        (
+                            f"[THESIS] {symbol} re-entry blocked at conviction {conviction:.1f}%\n"
+                            f"Threshold: {float(getattr(self._strategy_config, 'thesis_reentry_block_threshold', 25.0)):.1f}%"
+                        ),
+                        rate_limit_key=f"THESIS_REENTRY_BLOCKED:{symbol}",
+                        rate_limit_seconds=1800,
+                    )
+                return ManagementAction(
+                    type=ActionType.REJECT_ENTRY,
+                    symbol=symbol,
+                    reason=f"Thesis re-entry blocked (conviction={conviction:.1f})",
+                    side=side,
+                    priority=-1,
+                ), None
+
         can_open, reason = self.registry.can_open_position(symbol, side)
         
         if not can_open:
@@ -425,6 +503,41 @@ class PositionManagerV2:
             return []
         
         # ========== INTENT CONFIRMATION (market confirmation, not entry ACK) ==========
+        conviction_snapshot: Optional[Dict[str, Any]] = None
+        conviction: Optional[float] = None
+        if self._thesis_management_enabled(symbol):
+            conviction_snapshot = self._get_conviction_snapshot(symbol, current_price)
+            conviction = float(conviction_snapshot["conviction"]) if conviction_snapshot else None
+            if conviction is not None:
+                reason_codes.append(f"THESIS_CONVICTION:{conviction:.1f}")
+                early_exit_threshold = float(getattr(self._strategy_config, "thesis_early_exit_threshold", 35.0))
+                if conviction <= early_exit_threshold:
+                    if self._thesis_alerts_enabled():
+                        send_alert_sync(
+                            "THESIS_EARLY_EXIT_TRIGGERED",
+                            (
+                                f"[THESIS] {symbol} early exit triggered at conviction {conviction:.1f}%\n"
+                                f"Threshold: {early_exit_threshold:.1f}% | Position: {position.position_id}"
+                            ),
+                            rate_limit_key=f"THESIS_EARLY_EXIT_TRIGGERED:{symbol}",
+                            rate_limit_seconds=1800,
+                        )
+                    client_order_id = f"exit-thesis-{position.position_id}"
+                    actions.append(ManagementAction(
+                        type=ActionType.CLOSE_FULL,
+                        symbol=symbol,
+                        reason=f"Thesis conviction below threshold ({conviction:.1f})",
+                        side=position.side,
+                        size=position.remaining_qty,
+                        order_type=OrderType.MARKET,
+                        client_order_id=client_order_id,
+                        position_id=position.position_id,
+                        exit_reason=ExitReason.PREMISE_INVALIDATION,
+                        priority=89,
+                    ))
+                    self._record_decision(symbol, current_price, position, actions, reason_codes)
+                    return actions
+
         if not position.intent_confirmed:
             price_crossed = False
             if confirmation_price is not None:
@@ -526,6 +639,7 @@ class PositionManagerV2:
                     )
                     if position.trailing_active and current_atr:
                         tighter_mult = position.tighten_trail_atr_mult
+                        tighter_mult = tighter_mult * self._conviction_trail_factor(conviction)
                         new_trail = self._calculate_trailing_stop(
                             position, current_price, current_atr,
                             atr_mult_override=tighter_mult,
@@ -552,6 +666,7 @@ class PositionManagerV2:
                 if not position.final_target_touched:
                     position.final_target_touched = True
                     partial_size = position.remaining_qty * Decimal("0.5")
+                    partial_size *= self._conviction_partial_factor(conviction)
                     spec_symbol = position.futures_symbol or symbol
                     min_size = self._get_min_size_for_partial(spec_symbol)
                     # Only emit partial close if size meets venue minimum (per InstrumentSpec or 1).
@@ -611,7 +726,7 @@ class PositionManagerV2:
                             
                             new_trail = self._calculate_trailing_stop(
                                 position, current_price, current_atr,
-                                atr_mult_override=atr_m,
+                                atr_mult_override=(atr_m * self._conviction_trail_factor(conviction)),
                             )
                             if new_trail and position._validate_stop_move(new_trail):
                                 client_order_id = f"stop-prog-trail-{float(r_thresh):.0f}r-{position.position_id}"
@@ -645,6 +760,7 @@ class PositionManagerV2:
                     partial_size = min(position.tp2_qty_target, position.remaining_qty)
                 else:
                     partial_size = position.remaining_qty * self.tp2_partial_pct
+                partial_size *= self._conviction_partial_factor(conviction)
                 spec_symbol = position.futures_symbol or symbol
                 min_size = self._get_min_size_for_partial(spec_symbol)
                 if partial_size >= min_size:
@@ -680,6 +796,7 @@ class PositionManagerV2:
                     partial_size = min(position.tp1_qty_target, position.remaining_qty)
                 else:
                     partial_size = position.remaining_qty * self.tp1_partial_pct
+                partial_size *= self._conviction_partial_factor(conviction)
                 spec_symbol = position.futures_symbol or symbol
                 min_size = self._get_min_size_for_partial(spec_symbol)
                 if partial_size >= min_size:
@@ -718,6 +835,11 @@ class PositionManagerV2:
             if os.environ.get("TRADING_TRAILING_ENABLED", "true").lower() == "true":
                 # Use progressive trail ATR mult if set, otherwise default
                 trail_override = position.current_trail_atr_mult if position.current_trail_atr_mult is not None else None
+                trail_factor = self._conviction_trail_factor(conviction)
+                if trail_override is not None:
+                    trail_override = trail_override * trail_factor
+                elif trail_factor != Decimal("1"):
+                    trail_override = self.trailing_atr_multiple * trail_factor
                 new_trail = self._calculate_trailing_stop(position, current_price, current_atr, atr_mult_override=trail_override)
                 
                 if new_trail and position._validate_stop_move(new_trail):

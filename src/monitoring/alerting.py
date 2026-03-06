@@ -22,6 +22,12 @@ logger = get_logger(__name__)
 # Rate limit: max 1 alert per event type per 5 minutes
 _last_alert_times: dict[str, datetime] = {}
 _RATE_LIMIT_SECONDS = 300
+_THESIS_ALLOWED_EVENT_TYPES = {
+    "THESIS_CONVICTION_COLLAPSE",
+    "THESIS_INVALIDATED",
+    "THESIS_EARLY_EXIT_TRIGGERED",
+    "THESIS_REENTRY_BLOCKED",
+}
 
 
 def fmt_price(value) -> str:
@@ -78,7 +84,14 @@ def _is_discord(url: str) -> bool:
     return "discord.com/api/webhooks" in url or "discordapp.com/api/webhooks" in url
 
 
-async def send_alert(event_type: str, message: str, urgent: bool = False) -> None:
+async def send_alert(
+    event_type: str,
+    message: str,
+    urgent: bool = False,
+    *,
+    rate_limit_key: Optional[str] = None,
+    rate_limit_seconds: int = _RATE_LIMIT_SECONDS,
+) -> None:
     """
     Send an alert notification.
     
@@ -95,14 +108,21 @@ async def send_alert(event_type: str, message: str, urgent: bool = False) -> Non
         logger.info("Alert (no webhook configured)", event_type=event_type, message=message)
         return
     
+    # Suppress all non-thesis Telegram alerts (requested ops mode).
+    # Existing alert callsites are preserved but muted here.
+    if event_type not in _THESIS_ALLOWED_EVENT_TYPES:
+        logger.info("Alert suppressed (non-thesis event)", event_type=event_type)
+        return
+
     # Rate limiting (unless urgent)
     now = datetime.now(timezone.utc)
+    key = rate_limit_key or event_type
     if not urgent:
-        last = _last_alert_times.get(event_type)
-        if last and (now - last).total_seconds() < _RATE_LIMIT_SECONDS:
+        last = _last_alert_times.get(key)
+        if last and (now - last).total_seconds() < max(1, int(rate_limit_seconds)):
             return  # Rate limited, skip
     
-    _last_alert_times[event_type] = now
+    _last_alert_times[key] = now
     
     # Format message
     timestamp = now.strftime("%H:%M:%S UTC")
@@ -143,11 +163,34 @@ async def send_alert(event_type: str, message: str, urgent: bool = False) -> Non
         logger.warning("Alert send failed (non-fatal)", event_type=event_type, error=str(e), error_type=type(e).__name__)
 
 
-def send_alert_sync(event_type: str, message: str, urgent: bool = False) -> None:
+def send_alert_sync(
+    event_type: str,
+    message: str,
+    urgent: bool = False,
+    *,
+    rate_limit_key: Optional[str] = None,
+    rate_limit_seconds: int = _RATE_LIMIT_SECONDS,
+) -> None:
     """Synchronous wrapper for send_alert (for use outside async context)."""
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(send_alert(event_type, message, urgent))
+        loop.create_task(
+            send_alert(
+                event_type,
+                message,
+                urgent,
+                rate_limit_key=rate_limit_key,
+                rate_limit_seconds=rate_limit_seconds,
+            )
+        )
     except RuntimeError:
         # No running loop — run directly
-        asyncio.run(send_alert(event_type, message, urgent))
+        asyncio.run(
+            send_alert(
+                event_type,
+                message,
+                urgent,
+                rate_limit_key=rate_limit_key,
+                rate_limit_seconds=rate_limit_seconds,
+            )
+        )

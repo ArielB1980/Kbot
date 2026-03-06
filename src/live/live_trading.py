@@ -79,6 +79,20 @@ def _normalize_symbol_key(symbol: str) -> str:
     return key
 
 
+def _attach_thesis_trace_fields(trace_details: Dict[str, Any], thesis_snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Enrich DECISION_TRACE payload with thesis conviction telemetry."""
+    if not thesis_snapshot:
+        return trace_details
+    trace_details["thesis_conviction"] = thesis_snapshot.get("conviction")
+    trace_details["thesis_status"] = thesis_snapshot.get("status")
+    trace_details["thesis_decay"] = {
+        "time_decay": thesis_snapshot.get("time_decay"),
+        "zone_rejection": thesis_snapshot.get("zone_rejection"),
+        "volume_fade": thesis_snapshot.get("volume_fade"),
+    }
+    return trace_details
+
+
 def _resolve_signal_cooldown_params(strategy_config, symbol: str) -> Dict[str, Any]:
     """
     Resolve signal cooldown hours (global policy).
@@ -229,7 +243,17 @@ class LiveTrading:
         )
         
         from src.storage.repository import record_event
-        self.smc_engine = SMCEngine(config.strategy, event_recorder=record_event)
+        from src.memory.institutional_memory import InstitutionalMemoryManager
+        self.institutional_memory_manager = (
+            InstitutionalMemoryManager(config.strategy)
+            if getattr(config.strategy, "memory_enabled", False)
+            else None
+        )
+        self.smc_engine = SMCEngine(
+            config.strategy,
+            event_recorder=record_event,
+            institutional_memory=self.institutional_memory_manager,
+        )
         self.risk_manager = RiskManager(config.risk, liquidity_filters=config.liquidity_filters, event_recorder=record_event)
         from src.execution.instrument_specs import InstrumentSpecRegistry
         self.instrument_spec_registry = InstrumentSpecRegistry(
@@ -356,6 +380,8 @@ class LiveTrading:
                 registry=self.position_registry,
                 multi_tp_config=getattr(self.config, "multi_tp", None),
                 instrument_spec_registry=getattr(self, "instrument_spec_registry", None),
+                strategy_config=self.config.strategy,
+                institutional_memory=self.institutional_memory_manager,
             )
             
             # Initialize Execution Gateway - ALL orders flow through here
@@ -2157,6 +2183,14 @@ class LiveTrading:
                                 "structure": signal.structure_info,
                                 "meta": signal.meta_info
                             }
+                            if self.institutional_memory_manager and self.institutional_memory_manager.is_enabled_for_symbol(spot_symbol):
+                                thesis_snapshot = self.institutional_memory_manager.update_conviction_for_symbol(
+                                    spot_symbol,
+                                    current_price=spot_price,
+                                    current_volume_avg=None,
+                                    emit_log=True,
+                                )
+                                _attach_thesis_trace_fields(trace_details, thesis_snapshot)
                             if signal.signal_type != SignalType.NO_SIGNAL:
                                 trace_details["skipped"] = not is_tradable
                                 if not is_tradable:
@@ -2433,6 +2467,13 @@ class LiveTrading:
             
             net_pnl = trade.net_pnl
             setup_type = getattr(position, "setup_type", None)
+            if self.institutional_memory_manager:
+                self.institutional_memory_manager.on_trade_recorded(
+                    symbol=position.symbol,
+                    trade_id=trade.trade_id,
+                    net_pnl=trade.net_pnl,
+                    exited_at=trade.exited_at,
+                )
             
             # Get current equity for risk manager
             balance = await self.client.get_futures_balance()

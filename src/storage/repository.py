@@ -206,6 +206,33 @@ class AccountStateModel(Base):
     unrealized_pnl = Column(Numeric(precision=20, scale=2), nullable=False)
 
 
+class ThesisModel(Base):
+    """ORM model for institutional memory theses."""
+    __tablename__ = "theses"
+    __table_args__ = (
+        Index("idx_thesis_symbol_status_updated", "symbol", "status", "last_updated"),
+        Index("idx_thesis_symbol_formed", "symbol", "formed_at"),
+    )
+
+    thesis_id = Column(String, primary_key=True)
+    symbol = Column(String, nullable=False)
+    formed_at = Column(DateTime, nullable=False)
+    weekly_zone_low = Column(Numeric(precision=30, scale=10), nullable=False)
+    weekly_zone_high = Column(Numeric(precision=30, scale=10), nullable=False)
+    daily_bias = Column(String, nullable=False)
+    initial_conviction = Column(Numeric(precision=8, scale=4), nullable=False, default=100.0)
+    current_conviction = Column(Numeric(precision=8, scale=4), nullable=False, default=100.0)
+    last_updated = Column(DateTime, nullable=False)
+    last_price_respect_ts = Column(DateTime, nullable=True)
+    original_signal_id = Column(String, nullable=False)
+    original_volume_avg = Column(Numeric(precision=30, scale=10), nullable=True)
+    status = Column(String, nullable=False, default="active")
+    invalidated_reason = Column(String, nullable=True)
+    last_trade_id = Column(String, nullable=True)
+    last_trade_pnl = Column(Numeric(precision=20, scale=8), nullable=True)
+    last_trade_at = Column(DateTime, nullable=True)
+
+
 # Repository Functions
 def save_candle(candle: Candle) -> None:
     """Save a candle to the database."""
@@ -1095,6 +1122,47 @@ def get_event_stats(symbol: str) -> Dict[str, Any]:
 def record_metrics_snapshot(details: Dict) -> None:
     """Write a metrics snapshot to system_events for /api/metrics. Worker calls this periodically."""
     record_event("METRICS_SNAPSHOT", "system", details)
+
+
+def upsert_thesis(payload: Dict[str, Any]) -> None:
+    """
+    Insert or update a thesis row.
+    Expects payload keys to match ThesisModel columns.
+    """
+    db = get_db()
+    with db.get_session() as session:
+        existing = session.query(ThesisModel).filter(ThesisModel.thesis_id == payload["thesis_id"]).first()
+        if existing:
+            for key, value in payload.items():
+                setattr(existing, key, value)
+        else:
+            session.add(ThesisModel(**payload))
+
+
+def get_latest_thesis_for_symbol(
+    symbol: str,
+    statuses: Optional[List[str]] = None,
+) -> Optional[ThesisModel]:
+    """Return newest thesis for a symbol, optionally filtered by statuses."""
+    db = get_db()
+    with db.get_session() as session:
+        q = session.query(ThesisModel).filter(ThesisModel.symbol == symbol)
+        if statuses:
+            q = q.filter(ThesisModel.status.in_(statuses))
+        return q.order_by(ThesisModel.formed_at.desc()).first()
+
+
+def list_active_theses(limit: int = 500) -> List[ThesisModel]:
+    """Return active/decaying theses for monitoring."""
+    db = get_db()
+    with db.get_session() as session:
+        return (
+            session.query(ThesisModel)
+            .filter(ThesisModel.status.in_(["active", "decaying"]))
+            .order_by(ThesisModel.last_updated.desc())
+            .limit(limit)
+            .all()
+        )
 
 
 def get_latest_metrics_snapshot() -> Optional[Dict]:

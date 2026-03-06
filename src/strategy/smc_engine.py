@@ -20,6 +20,7 @@ from src.monitoring.logger import get_logger
 from src.domain.protocols import EventRecorder, _noop_event_recorder
 from src.exceptions import OperationalError, DataError
 from src.storage.repository import count_recent_stopouts
+from src.memory.institutional_memory import InstitutionalMemoryManager
 import uuid
 
 logger = get_logger(__name__)
@@ -91,7 +92,13 @@ class SMCEngine:
     - All parameters configurable (no hardcoded values)
     """
     
-    def __init__(self, config: StrategyConfig, *, event_recorder: EventRecorder = _noop_event_recorder):
+    def __init__(
+        self,
+        config: StrategyConfig,
+        *,
+        event_recorder: EventRecorder = _noop_event_recorder,
+        institutional_memory: Optional[InstitutionalMemoryManager] = None,
+    ):
         """
         Initialize SMC engine.
         
@@ -110,6 +117,9 @@ class SMCEngine:
         self._signal_fingerprint_last_seen: Dict[str, datetime] = {}
         self._signal_fingerprint_cache_max_size = 5000
         self._higher_tf_candle_context: Dict[str, Dict[str, List[Candle]]] = {}
+        self._memory_manager = institutional_memory
+        if self._memory_manager is None and bool(getattr(config, "memory_enabled", False)):
+            self._memory_manager = InstitutionalMemoryManager(config)
 
         # Fibonacci engine for confluence scoring
         self.fibonacci_engine = FibonacciEngine(lookback_bars=100)
@@ -412,6 +422,8 @@ class SMCEngine:
         used_tolerance = False  # Track if entry zone tolerance was used
         higher_tf_context: Optional[HigherTFContext] = None
         higher_tf_penalty = 0.0
+        thesis_snapshot: Optional[Dict[str, Any]] = None
+        thesis_score_adj = 0.0
         
         # Logic Flow
         signal = None
@@ -533,6 +545,32 @@ class SMCEngine:
                         allowed_entry=higher_tf_context.allowed_entry,
                         mode=higher_tf_mode,
                     )
+                    if (
+                        self._memory_manager
+                        and self._memory_manager.is_enabled_for_symbol(symbol)
+                        and higher_tf_context.weekly_fib_zone_low is not None
+                        and higher_tf_context.weekly_fib_zone_high is not None
+                        and effective_decision_candles
+                    ):
+                        latest_price = effective_decision_candles[-1].close
+                        recent = effective_decision_candles[-20:] if len(effective_decision_candles) >= 20 else effective_decision_candles
+                        avg_volume = (
+                            sum((c.volume for c in recent), Decimal("0")) / Decimal(str(len(recent)))
+                            if recent else None
+                        )
+                        self._memory_manager.create_or_refresh_thesis(
+                            symbol=symbol,
+                            weekly_zone_low=higher_tf_context.weekly_fib_zone_low,
+                            weekly_zone_high=higher_tf_context.weekly_fib_zone_high,
+                            daily_bias=higher_tf_context.daily_bias,
+                            signal_id=decision_id,
+                            current_volume_avg=avg_volume,
+                        )
+                        thesis_snapshot = self._memory_manager.update_conviction_for_symbol(
+                            symbol,
+                            current_price=latest_price,
+                            current_volume_avg=avg_volume,
+                        )
                     if not higher_tf_context.allowed_entry:
                         if higher_tf_mode == "hard":
                             logger.info(
@@ -901,6 +939,18 @@ class SMCEngine:
                         reasoning_parts.append(
                             f"📊 Higher-TF penalty applied: {higher_tf_penalty:.2f}"
                         )
+                    if (
+                        self._memory_manager
+                        and bool(getattr(self.config, "thesis_score_enabled", False))
+                        and not bool(getattr(self.config, "thesis_observe_only", True))
+                        and thesis_snapshot is not None
+                    ):
+                        conviction_val = float(thesis_snapshot.get("conviction", 0.0))
+                        thesis_score_adj = self._memory_manager.conviction_score_adjustment(conviction_val)
+                        score_obj.total_score += thesis_score_adj
+                        reasoning_parts.append(
+                            f"📊 Thesis conviction adjustment: {thesis_score_adj:+.2f} (conv={conviction_val:.1f})"
+                        )
                     
                     # Apply tolerance penalty if entry used zone tolerance
                     if used_tolerance:
@@ -920,6 +970,8 @@ class SMCEngine:
                             "cost": float(score_obj.cost_efficiency),
                             "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                             "higher_tf_penalty": float(higher_tf_penalty),
+                            "thesis_conviction": float(thesis_snapshot.get("conviction", 0.0)) if thesis_snapshot else 0.0,
+                            "thesis_score_adj": float(thesis_score_adj),
                             "total": float(score_obj.total_score),
                             "threshold": float(threshold),
                         }
@@ -974,7 +1026,9 @@ class SMCEngine:
                                 "adx": score_obj.adx_strength,
                                 "cost": score_obj.cost_efficiency,
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
-                                "higher_tf_penalty": higher_tf_penalty
+                                "higher_tf_penalty": higher_tf_penalty,
+                                "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else 0.0,
+                                "thesis_score_adj": thesis_score_adj,
                             },
                             structure_info=structure_signal or {},
                             meta_info={
@@ -982,7 +1036,8 @@ class SMCEngine:
                                 "filters": {
                                     "adx": float(adx_value),
                                     "atr": float(atr_value) if isinstance(atr_value, Decimal) else atr_value
-                                }
+                                },
+                                "thesis": thesis_snapshot or {},
                             }
                         )
                 elif signal is None:
@@ -1084,7 +1139,9 @@ class SMCEngine:
                     "tp_candidates": [float(tp) for tp in signal.tp_candidates],
                     "decision_tf": "4H",
                     "structure_type": structure_type,
-                    "stop_tf": "4H_ATR"
+                    "stop_tf": "4H_ATR",
+                    "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else None,
+                    "thesis_status": thesis_snapshot.get("status") if thesis_snapshot else None,
                 },
                 decision_id=decision_id
             )

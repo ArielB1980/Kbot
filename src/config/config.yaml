@@ -235,6 +235,27 @@ strategy:
   daily_bias_weight: 0.15
   min_weekly_zone_width_pct: 1.5  # only consider meaningful weekly zones
   higher_tf_penalty_outside_zone: -18.0
+  # Persistent institutional memory rollout
+  memory_enabled: true
+  thesis_observe_only: true
+  thesis_score_enabled: false
+  thesis_management_enabled: false
+  thesis_canary_symbols: []   # empty = all symbols
+  thesis_time_decay_max_points: 45.0
+  thesis_time_decay_window_hours: 12.0
+  thesis_zone_breach_penalty_points: 35.0
+  thesis_volume_fade_penalty_points: 15.0
+  thesis_conviction_floor: 5.0
+  thesis_score_neutral_conviction: 60.0
+  thesis_score_max_bonus: 8.0
+  thesis_score_max_penalty: 12.0
+  thesis_early_exit_threshold: 35.0
+  thesis_reentry_block_threshold: 25.0
+  thesis_alerts_enabled: true
+  thesis_low_conviction_tighten_factor: 0.75
+  thesis_high_conviction_relax_factor: 1.1
+  thesis_partial_reduce_high_conviction_factor: 0.85
+  thesis_partial_reduce_low_conviction_factor: 1.25
   # Promoted globally from canary trial (BTC/ETH/SOL/XRP/ADA).
   signal_cooldown_hours: 1.0
   signal_cooldown_canary_enabled: false

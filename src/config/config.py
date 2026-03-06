@@ -403,6 +403,28 @@ class StrategyConfig(BaseSettings):
     min_weekly_zone_width_pct: float = Field(default=1.5, ge=0.1, le=20.0)
     higher_tf_penalty_outside_zone: float = Field(default=-18.0)
 
+    # Persistent institutional memory (thesis + conviction decay)
+    memory_enabled: bool = Field(default=False, description="Enable thesis memory tracking")
+    thesis_observe_only: bool = Field(default=True, description="Observe-only mode (no behavior changes)")
+    thesis_score_enabled: bool = Field(default=False, description="Apply conviction score adjustment")
+    thesis_management_enabled: bool = Field(default=False, description="Apply conviction-driven position management")
+    thesis_canary_symbols: List[str] = Field(default_factory=list, description="Optional symbol allowlist for thesis behaviors")
+    thesis_time_decay_max_points: float = Field(default=45.0, ge=0.0, le=100.0)
+    thesis_time_decay_window_hours: float = Field(default=12.0, ge=1.0, le=168.0)
+    thesis_zone_breach_penalty_points: float = Field(default=35.0, ge=0.0, le=100.0)
+    thesis_volume_fade_penalty_points: float = Field(default=15.0, ge=0.0, le=100.0)
+    thesis_conviction_floor: float = Field(default=5.0, ge=0.0, le=50.0)
+    thesis_score_neutral_conviction: float = Field(default=60.0, ge=1.0, le=99.0)
+    thesis_score_max_bonus: float = Field(default=8.0, ge=0.0, le=30.0)
+    thesis_score_max_penalty: float = Field(default=12.0, ge=0.0, le=30.0)
+    thesis_early_exit_threshold: float = Field(default=35.0, ge=1.0, le=99.0)
+    thesis_reentry_block_threshold: float = Field(default=25.0, ge=1.0, le=99.0)
+    thesis_alerts_enabled: bool = Field(default=False, description="Enable thesis-only Telegram alerts")
+    thesis_low_conviction_tighten_factor: float = Field(default=0.75, ge=0.25, le=1.0)
+    thesis_high_conviction_relax_factor: float = Field(default=1.1, ge=1.0, le=2.0)
+    thesis_partial_reduce_high_conviction_factor: float = Field(default=0.85, ge=0.5, le=1.0)
+    thesis_partial_reduce_low_conviction_factor: float = Field(default=1.25, ge=1.0, le=2.0)
+
 
     # Market Structure Change Confirmation (4H Decision Authority)
     # Now uses 4H candles - 1 candle = 4 hours, 2 candles = 8 hours

@@ -1,7 +1,7 @@
 from src.storage.db import get_db, Base
 # CRITICAL: Import all ORM models so they're registered with Base.metadata before create_all()
 from src.storage.repository import (
-    CandleModel, TradeModel, PositionModel, SystemEventModel, AccountStateModel
+    CandleModel, TradeModel, PositionModel, SystemEventModel, AccountStateModel, ThesisModel
 )
 from sqlalchemy import text
 import os
