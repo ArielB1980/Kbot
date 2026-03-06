@@ -783,6 +783,12 @@ class TestReconciliation:
         exchange_positions = {}
         
         issues = registry.reconcile_with_exchange(exchange_positions, [])
+        assert len(issues) == 1
+        assert "MISSING_ON_EXCHANGE_PENDING" in issues[0][1]
+        assert "BTC/USD:USD" in registry._positions, "First miss should not orphan immediately"
+        
+        # Second consecutive miss should mark ORPHANED
+        issues = registry.reconcile_with_exchange(exchange_positions, [])
         
         assert len(issues) == 1
         assert "ORPHANED" in issues[0][1]
@@ -985,6 +991,13 @@ class TestReconciliation:
         # Exchange has NO positions
         exchange_positions = {}
         
+        issues = registry.reconcile_with_exchange(exchange_positions, [])
+        
+        assert len(issues) == 1
+        assert "MISSING_ON_EXCHANGE_PENDING" in issues[0][1]
+        assert "ADA/USD" in registry._positions
+        
+        # Second miss crosses orphan hysteresis threshold.
         issues = registry.reconcile_with_exchange(exchange_positions, [])
         
         assert len(issues) == 1

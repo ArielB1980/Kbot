@@ -903,7 +903,7 @@ class TestReconciliationRule:
         reset_position_registry()
     
     def test_registry_open_exchange_flat_marks_orphaned(self):
-        """If registry says OPEN but exchange is flat, mark ORPHANED."""
+        """If registry says OPEN but exchange is flat across consecutive checks, mark ORPHANED."""
         registry = get_position_registry()
         
         pos = ManagedPosition(
@@ -935,6 +935,12 @@ class TestReconciliationRule:
         # Exchange shows NO position
         exchange_positions = {}
         
+        issues = registry.reconcile_with_exchange(exchange_positions, [])
+        assert len(issues) == 1
+        assert "MISSING_ON_EXCHANGE_PENDING" in issues[0][1]
+        assert registry.get_position("BTC/USD:USD") is not None
+        
+        # Second miss should mark orphaned and archive.
         issues = registry.reconcile_with_exchange(exchange_positions, [])
         
         assert len(issues) == 1

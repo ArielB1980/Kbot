@@ -1147,6 +1147,10 @@ class PositionRegistry:
         self._lock = threading.RLock()
         self._pending_reversals: Dict[str, Side] = {}  # symbol -> pending new side
         self._closed_positions: List[ManagedPosition] = []  # History
+        # Orphan hysteresis: require consecutive "missing on exchange" observations
+        # before marking ORPHANED to avoid transient API/sync blips.
+        self._orphan_miss_counts: Dict[str, int] = {}
+        self._orphan_miss_threshold: int = 2
         # Exchange-side positions snapshot (updated by reconcile_with_exchange).
         # Used as defense-in-depth guard: even if the registry loses track of a
         # position, we still know the exchange has one and block duplicate entries.
@@ -1459,7 +1463,9 @@ class PositionRegistry:
         with self._lock:
             # Check for orphaned positions (registry has, exchange doesn't)
             for symbol, pos in self._positions.items():
+                symbol_norm = normalize_symbol_for_position_match(symbol)
                 if pos.is_terminal:
+                    self._orphan_miss_counts.pop(symbol_norm, None)
                     continue
                 
                 # Try exact match first, then normalized match
@@ -1479,15 +1485,34 @@ class PositionRegistry:
                     matched_exchange_keys.add(matched_key)
                 
                 if exchange_pos is None and pos.remaining_qty > 0:
+                    miss_count = self._orphan_miss_counts.get(symbol_norm, 0) + 1
+                    self._orphan_miss_counts[symbol_norm] = miss_count
+                    if miss_count < self._orphan_miss_threshold:
+                        issues.append(
+                            (
+                                symbol,
+                                f"MISSING_ON_EXCHANGE_PENDING: miss_count={miss_count}/{self._orphan_miss_threshold}",
+                            )
+                        )
+                        logger.warning(
+                            "Orphan hysteresis pending",
+                            symbol=symbol,
+                            miss_count=miss_count,
+                            threshold=self._orphan_miss_threshold,
+                            remaining_qty=str(pos.remaining_qty),
+                        )
+                        continue
                     pos.mark_orphaned()
                     orphaned_symbols.append(symbol)
                     issues.append((symbol, "ORPHANED: Registry has position, exchange does not"))
                 elif exchange_pos is None and pos.remaining_qty <= 0:
+                    self._orphan_miss_counts.pop(symbol_norm, None)
                     # Position has no remaining qty and exchange has nothing - mark as closed
                     pos._mark_closed(ExitReason.RECONCILIATION)
                     orphaned_symbols.append(symbol)
                     issues.append((symbol, "STALE: Registry has empty position, marking closed"))
                 elif exchange_pos is not None:
+                    self._orphan_miss_counts.pop(symbol_norm, None)
                     # Verify qty matches
                     exchange_qty = Decimal(str(exchange_pos.get('qty', 0)))
                     if pos.remaining_qty <= qty_epsilon and exchange_qty > qty_epsilon:
@@ -1564,6 +1589,7 @@ class PositionRegistry:
             
             # Move orphaned positions to closed history (so they don't reappear)
             for symbol in orphaned_symbols:
+                self._orphan_miss_counts.pop(normalize_symbol_for_position_match(symbol), None)
                 pos = self._positions.pop(symbol, None)
                 if pos:
                     self._closed_positions.append(pos)
