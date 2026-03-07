@@ -1139,30 +1139,57 @@ def upsert_thesis(payload: Dict[str, Any]) -> None:
             session.add(ThesisModel(**payload))
 
 
+def _thesis_model_to_payload(model: ThesisModel) -> Dict[str, Any]:
+    """Convert ORM thesis row to detached-safe plain payload."""
+    return {
+        "thesis_id": model.thesis_id,
+        "symbol": model.symbol,
+        "formed_at": model.formed_at,
+        "weekly_zone_low": model.weekly_zone_low,
+        "weekly_zone_high": model.weekly_zone_high,
+        "daily_bias": model.daily_bias,
+        "initial_conviction": model.initial_conviction,
+        "current_conviction": model.current_conviction,
+        "last_updated": model.last_updated,
+        "last_price_respect_ts": model.last_price_respect_ts,
+        "original_signal_id": model.original_signal_id,
+        "original_volume_avg": model.original_volume_avg,
+        "status": model.status,
+        "invalidated_reason": model.invalidated_reason,
+        "last_trade_id": model.last_trade_id,
+        "last_trade_pnl": model.last_trade_pnl,
+        "last_trade_at": model.last_trade_at,
+    }
+
+
 def get_latest_thesis_for_symbol(
     symbol: str,
     statuses: Optional[List[str]] = None,
-) -> Optional[ThesisModel]:
-    """Return newest thesis for a symbol, optionally filtered by statuses."""
+) -> Optional[Dict[str, Any]]:
+    """Return newest thesis payload for a symbol, optionally filtered by statuses."""
     db = get_db()
     with db.get_session() as session:
         q = session.query(ThesisModel).filter(ThesisModel.symbol == symbol)
         if statuses:
             q = q.filter(ThesisModel.status.in_(statuses))
-        return q.order_by(ThesisModel.formed_at.desc()).first()
+        model = q.order_by(ThesisModel.formed_at.desc()).first()
+        if not model:
+            return None
+        return _thesis_model_to_payload(model)
 
 
-def list_active_theses(limit: int = 500) -> List[ThesisModel]:
-    """Return active/decaying theses for monitoring."""
+def list_active_theses(limit: int = 500) -> List[Dict[str, Any]]:
+    """Return active/decaying thesis payloads for monitoring."""
     db = get_db()
     with db.get_session() as session:
-        return (
+        models = (
             session.query(ThesisModel)
             .filter(ThesisModel.status.in_(["active", "decaying"]))
             .order_by(ThesisModel.last_updated.desc())
             .limit(limit)
             .all()
         )
+        return [_thesis_model_to_payload(model) for model in models]
 
 
 def get_latest_metrics_snapshot() -> Optional[Dict]:

@@ -68,31 +68,44 @@ class InstitutionalMemoryManager:
             return fallback
 
     def _to_thesis(self, model: Any) -> Thesis:
+        get = model.get if isinstance(model, dict) else lambda key: getattr(model, key)
+        formed_at = get("formed_at")
+        last_updated = get("last_updated")
+        last_price_respect_ts = get("last_price_respect_ts")
+        last_trade_at = get("last_trade_at")
         return Thesis(
-            thesis_id=model.thesis_id,
-            symbol=model.symbol,
-            formed_at=model.formed_at.replace(tzinfo=timezone.utc) if model.formed_at.tzinfo is None else model.formed_at,
-            weekly_zone_low=self._to_decimal(model.weekly_zone_low),
-            weekly_zone_high=self._to_decimal(model.weekly_zone_high),
-            daily_bias=str(model.daily_bias),
-            initial_conviction=self._to_float(model.initial_conviction, 100.0),
-            current_conviction=self._to_float(model.current_conviction, 100.0),
-            last_updated=model.last_updated.replace(tzinfo=timezone.utc) if model.last_updated and model.last_updated.tzinfo is None else model.last_updated,
+            thesis_id=get("thesis_id"),
+            symbol=get("symbol"),
+            formed_at=formed_at.replace(tzinfo=timezone.utc) if formed_at and formed_at.tzinfo is None else formed_at,
+            weekly_zone_low=self._to_decimal(get("weekly_zone_low")),
+            weekly_zone_high=self._to_decimal(get("weekly_zone_high")),
+            daily_bias=str(get("daily_bias")),
+            initial_conviction=self._to_float(get("initial_conviction"), 100.0),
+            current_conviction=self._to_float(get("current_conviction"), 100.0),
+            last_updated=last_updated.replace(tzinfo=timezone.utc) if last_updated and last_updated.tzinfo is None else last_updated,
             last_price_respect_ts=(
-                model.last_price_respect_ts.replace(tzinfo=timezone.utc)
-                if model.last_price_respect_ts is not None and model.last_price_respect_ts.tzinfo is None
-                else model.last_price_respect_ts
+                last_price_respect_ts.replace(tzinfo=timezone.utc)
+                if last_price_respect_ts is not None and last_price_respect_ts.tzinfo is None
+                else last_price_respect_ts
             ),
-            original_signal_id=model.original_signal_id,
-            original_volume_avg=self._to_decimal(model.original_volume_avg, Decimal("0")) if model.original_volume_avg is not None else None,
-            status=str(model.status),
-            invalidated_reason=model.invalidated_reason,
-            last_trade_id=model.last_trade_id,
-            last_trade_pnl=self._to_decimal(model.last_trade_pnl, Decimal("0")) if model.last_trade_pnl is not None else None,
+            original_signal_id=get("original_signal_id"),
+            original_volume_avg=(
+                self._to_decimal(get("original_volume_avg"), Decimal("0"))
+                if get("original_volume_avg") is not None
+                else None
+            ),
+            status=str(get("status")),
+            invalidated_reason=get("invalidated_reason"),
+            last_trade_id=get("last_trade_id"),
+            last_trade_pnl=(
+                self._to_decimal(get("last_trade_pnl"), Decimal("0"))
+                if get("last_trade_pnl") is not None
+                else None
+            ),
             last_trade_at=(
-                model.last_trade_at.replace(tzinfo=timezone.utc)
-                if model.last_trade_at is not None and model.last_trade_at.tzinfo is None
-                else model.last_trade_at
+                last_trade_at.replace(tzinfo=timezone.utc)
+                if last_trade_at is not None and last_trade_at.tzinfo is None
+                else last_trade_at
             ),
         )
 
