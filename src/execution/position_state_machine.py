@@ -1531,6 +1531,26 @@ class PositionRegistry:
                             remaining_qty=str(pos.remaining_qty),
                         )
                         continue
+                    # If we are already in an explicit exit flow and the exchange still
+                    # reports no position after grace + hysteresis, treat as confirmed close
+                    # instead of escalating to ORPHANED.
+                    if pos.state in (PositionState.EXIT_PENDING, PositionState.CANCEL_PENDING):
+                        pos._mark_closed(ExitReason.RECONCILIATION)
+                        orphaned_symbols.append(symbol)
+                        issues.append(
+                            (
+                                symbol,
+                                "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT: "
+                                f"miss_count={miss_count}",
+                            )
+                        )
+                        logger.info(
+                            "Exchange close confirmed after exit pending hysteresis",
+                            symbol=symbol,
+                            miss_count=miss_count,
+                            state=pos.state.value,
+                        )
+                        continue
                     pos.mark_orphaned()
                     orphaned_symbols.append(symbol)
                     issues.append((symbol, "ORPHANED: Registry has position, exchange does not"))

@@ -12,7 +12,7 @@ Tests cover:
 """
 import pytest
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import tempfile
 import os
 
@@ -1005,6 +1005,53 @@ class TestReconciliation:
         assert "ADA/USD" not in registry._positions
         orphaned = [p for p in registry._closed_positions if p.symbol == "ADA/USD"]
         assert len(orphaned) == 1
+
+    def test_exit_pending_missing_after_grace_closes_instead_of_orphan(self):
+        """Exit-pending positions should close cleanly after grace+hysteresis."""
+        registry = get_position_registry()
+        registry._positions.clear()
+        registry._closed_positions.clear()
+
+        pos = ManagedPosition(
+            symbol="XMR/USD",
+            side=Side.SHORT,
+            position_id="test-xmr-exit-pending",
+            initial_size=Decimal("0.17"),
+            initial_entry_price=Decimal("340"),
+            initial_stop_price=Decimal("351"),
+            initial_tp1_price=Decimal("330"),
+            initial_tp2_price=None,
+            initial_final_target=None,
+        )
+        pos.entry_fills.append(FillRecord(
+            fill_id="entry-fill-1",
+            order_id="entry-order-1",
+            side=Side.SHORT,
+            qty=Decimal("0.17"),
+            price=Decimal("340"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        ))
+        pos.state = PositionState.EXIT_PENDING
+        # Force this position past exit-pending grace so hysteresis path is exercised.
+        pos.updated_at = datetime.now(timezone.utc) - timedelta(seconds=31)
+        registry.register_position(pos)
+
+        # First miss remains pending.
+        issues = registry.reconcile_with_exchange({}, [])
+        assert len(issues) == 1
+        assert "MISSING_ON_EXCHANGE_PENDING" in issues[0][1]
+        assert registry.get_position_any_state("XMR/USD") is not None
+
+        # Second miss closes (reconciliation) instead of orphaning.
+        issues = registry.reconcile_with_exchange({}, [])
+        assert len(issues) == 1
+        assert "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT" in issues[0][1]
+        assert "ORPHANED" not in issues[0][1]
+
+        closed = [p for p in registry._closed_positions if p.symbol == "XMR/USD"]
+        assert len(closed) == 1
+        assert closed[0].state == PositionState.CLOSED
 
 
 if __name__ == "__main__":
