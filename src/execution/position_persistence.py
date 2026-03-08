@@ -16,7 +16,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 from pathlib import Path
 
 from src.execution.position_state_machine import (
@@ -42,6 +42,8 @@ class PositionPersistence:
         """Initialize persistence with database path."""
         self.db_path = db_path
         self._local = threading.local()
+        # Suppress repeated duplicate-fill logs for the same fill_id.
+        self._logged_fill_collisions: Set[str] = set()
         
         # Ensure directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -193,6 +195,7 @@ class PositionPersistence:
     
     def save_position(self, position: ManagedPosition) -> None:
         """Save or update position."""
+        self._ensure_stop_bound(position)
         with self._conn:
             self._conn.execute("""
                 INSERT OR REPLACE INTO positions (
@@ -249,6 +252,49 @@ class PositionPersistence:
                 self._save_fill(position.position_id, fill)
             for fill in position.exit_fills:
                 self._save_fill(position.position_id, fill)
+
+    def _ensure_stop_bound(self, position: ManagedPosition) -> bool:
+        """
+        Guardrail: non-terminal positions should normally have a stop order bound.
+        This does not place orders (execution lives elsewhere), but surfaces
+        missing-stop conditions early and consistently in persistence flow.
+        """
+        if position.is_terminal:
+            return True
+        if position.stop_order_id:
+            return True
+        logger.warning(
+            "stop_missing_after_reconcile",
+            position_id=position.position_id,
+            symbol=position.symbol,
+            state=position.state.value,
+        )
+        return False
+
+    def _log_fill_collision_once(
+        self,
+        *,
+        fill_id: str,
+        position_id: str,
+        existing_position_id: Optional[str],
+        fill: FillRecord,
+    ) -> None:
+        """
+        Emit at most one collision log per fill_id to avoid reconciliation spam.
+        The fill remains globally idempotent either way.
+        """
+        if fill_id in self._logged_fill_collisions:
+            return
+        self._logged_fill_collisions.add(fill_id)
+        logger.info(
+            "FILL_ID_COLLISION_IGNORED",
+            fill_id=fill_id,
+            position_id=position_id,
+            existing_position_id=existing_position_id,
+            reason="already_exists",
+            is_entry=fill.is_entry,
+            qty=str(fill.qty),
+        )
     
     def _save_fill(self, position_id: str, fill: FillRecord) -> bool:
         """Save a fill record with global fill_id idempotency."""
@@ -257,14 +303,11 @@ class PositionPersistence:
             (fill.fill_id,),
         ).fetchone()
         if existing is not None:
-            logger.warning(
-                "FILL_ID_COLLISION_IGNORED",
+            self._log_fill_collision_once(
                 fill_id=fill.fill_id,
                 position_id=position_id,
                 existing_position_id=existing["position_id"],
-                reason="already_exists",
-                is_entry=fill.is_entry,
-                qty=str(fill.qty),
+                fill=fill,
             )
             return False
 
@@ -291,14 +334,11 @@ class PositionPersistence:
                 "SELECT position_id FROM position_fills WHERE fill_id = ?",
                 (fill.fill_id,),
             ).fetchone()
-            logger.warning(
-                "FILL_ID_COLLISION_IGNORED",
+            self._log_fill_collision_once(
                 fill_id=fill.fill_id,
                 position_id=position_id,
                 existing_position_id=existing_after["position_id"] if existing_after else None,
-                reason="already_exists",
-                is_entry=fill.is_entry,
-                qty=str(fill.qty),
+                fill=fill,
             )
             return False
 
