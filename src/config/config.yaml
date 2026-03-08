@@ -230,7 +230,7 @@ strategy:
   # Higher-timeframe pyramid gate (1W -> 1D -> 4H)
   # v1 = SOFT (score penalty only) — set to true after monitoring
   higher_tf_enabled: true
-  higher_tf_mode: "hard"
+  higher_tf_mode: "soft"
   weekly_fib_confluence_weight: 0.25
   daily_bias_weight: 0.15
   min_weekly_zone_width_pct: 1.5  # only consider meaningful weekly zones
