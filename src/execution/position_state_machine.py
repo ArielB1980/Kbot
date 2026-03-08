@@ -1151,6 +1151,8 @@ class PositionRegistry:
         # before marking ORPHANED to avoid transient API/sync blips.
         self._orphan_miss_counts: Dict[str, int] = {}
         self._orphan_miss_threshold: int = 2
+        # Additional ghost-killer grace windows for fast close/reconcile races.
+        self._orphan_exit_pending_grace_seconds: int = 30
         # Exchange-side positions snapshot (updated by reconcile_with_exchange).
         # Used as defense-in-depth guard: even if the registry loses track of a
         # position, we still know the exchange has one and block duplicate entries.
@@ -1485,6 +1487,33 @@ class PositionRegistry:
                     matched_exchange_keys.add(matched_key)
                 
                 if exchange_pos is None and pos.remaining_qty > 0:
+                    now = datetime.now(timezone.utc)
+                    age_since_update = (
+                        max(0.0, (now - pos.updated_at).total_seconds())
+                        if pos.updated_at is not None
+                        else 999999.0
+                    )
+                    # Avoid false orphaning while close/replace events are still settling.
+                    if (
+                        pos.state in (PositionState.EXIT_PENDING, PositionState.CANCEL_PENDING)
+                        and age_since_update <= self._orphan_exit_pending_grace_seconds
+                    ):
+                        self._orphan_miss_counts[symbol_norm] = 0
+                        issues.append(
+                            (
+                                symbol,
+                                f"MISSING_ON_EXCHANGE_EXIT_GRACE: age={age_since_update:.1f}s",
+                            )
+                        )
+                        logger.info(
+                            "Orphan grace active (exit pending)",
+                            symbol=symbol,
+                            state=pos.state.value,
+                            age_seconds=round(age_since_update, 3),
+                            grace_seconds=self._orphan_exit_pending_grace_seconds,
+                            remaining_qty=str(pos.remaining_qty),
+                        )
+                        continue
                     miss_count = self._orphan_miss_counts.get(symbol_norm, 0) + 1
                     self._orphan_miss_counts[symbol_norm] = miss_count
                     if miss_count < self._orphan_miss_threshold:
