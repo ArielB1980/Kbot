@@ -237,7 +237,7 @@ strategy:
   higher_tf_penalty_outside_zone: -18.0
   # Persistent institutional memory rollout
   memory_enabled: true
-  thesis_observe_only: true
+  thesis_observe_only: false
   thesis_score_enabled: false
   thesis_management_enabled: true
   thesis_canary_symbols: []   # empty = all symbols
