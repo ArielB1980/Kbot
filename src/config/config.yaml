@@ -239,7 +239,7 @@ strategy:
   memory_enabled: true
   thesis_observe_only: true
   thesis_score_enabled: false
-  thesis_management_enabled: false
+  thesis_management_enabled: true
   thesis_canary_symbols: []   # empty = all symbols
   thesis_time_decay_max_points: 45.0
   thesis_time_decay_window_hours: 12.0
