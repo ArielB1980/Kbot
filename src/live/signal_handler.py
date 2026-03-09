@@ -278,7 +278,7 @@ async def handle_signal_v2(
             },
         )
 
-    # Send alert for new position (urgent=True to bypass rate limit — each open matters)
+    # Send thesis-aware open alert (urgent=True so opens are never rate-limited).
     try:
         from src.monitoring.alerting import send_alert_sync, fmt_price, fmt_size
 
@@ -289,15 +289,27 @@ async def handle_signal_v2(
                 tp_line += f" | TP2: ${fmt_price(tp2_price)}"
             tp_line += "\n"
 
+        thesis_line = "Thesis: unavailable"
+        memory = getattr(lt, "institutional_memory_manager", None)
+        if memory and memory.is_enabled_for_symbol(signal.symbol):
+            thesis = memory.get_latest_thesis(signal.symbol)
+            if thesis:
+                thesis_line = (
+                    f"Thesis: {thesis.daily_bias} bias | "
+                    f"Zone ${fmt_price(thesis.weekly_zone_low)}-${fmt_price(thesis.weekly_zone_high)} | "
+                    f"Conviction {float(thesis.current_conviction):.1f}% ({thesis.status})"
+                )
+
         send_alert_sync(
-            "NEW_POSITION",
-            f"New {signal.signal_type.value.upper()} position\n"
+            "THESIS_TRADE_OPENED",
+            f"[THESIS] New {signal.signal_type.value.upper()} trade plan\n"
             f"Symbol: {signal.symbol}\n"
-            f"Size: {fmt_size(position_size)} @ ${fmt_price(mark_price)}\n"
-            f"Notional: ${float(decision.position_notional):.2f} ({decision.leverage}x)\n"
+            f"{thesis_line}\n"
+            f"Entry: ${fmt_price(mark_price)}\n"
             f"Stop: ${fmt_price(position.initial_stop_price)}\n"
             f"{tp_line}"
-            f"{'Boosted' if decision.utilisation_boost_applied else 'Base sizing'}",
+            f"Size: {fmt_size(position_size)} | Notional: ${float(decision.position_notional):.2f} ({decision.leverage}x)\n"
+            f"Plan: {'Boosted sizing' if decision.utilisation_boost_applied else 'Base sizing'}",
             urgent=True,
         )
     except (OperationalError, ImportError, OSError):

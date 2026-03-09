@@ -2474,6 +2474,59 @@ class LiveTrading:
                     net_pnl=trade.net_pnl,
                     exited_at=trade.exited_at,
                 )
+
+            strategy_cfg = getattr(self.config, "strategy", None)
+            if bool(getattr(strategy_cfg, "thesis_alerts_enabled", False)):
+                from src.monitoring.alerting import send_alert, fmt_price, fmt_size
+
+                thesis_outcome = "inconclusive"
+                thesis_context = "Thesis: unavailable"
+                threshold = float(
+                    getattr(strategy_cfg, "thesis_early_exit_threshold", 35.0)
+                    if strategy_cfg is not None
+                    else 35.0
+                )
+                if self.institutional_memory_manager and self.institutional_memory_manager.is_enabled_for_symbol(position.symbol):
+                    thesis = self.institutional_memory_manager.get_latest_thesis(position.symbol)
+                    if thesis:
+                        conviction = float(thesis.current_conviction)
+                        thesis_context = (
+                            f"Thesis: {thesis.daily_bias} bias | "
+                            f"Zone ${fmt_price(thesis.weekly_zone_low)}-${fmt_price(thesis.weekly_zone_high)} | "
+                            f"Conviction {conviction:.1f}% ({thesis.status})"
+                        )
+                        if trade.net_pnl > 0 and conviction > threshold and thesis.status in ("active", "decaying"):
+                            thesis_outcome = "worked: thesis held and produced positive P&L"
+                        elif conviction <= threshold or thesis.status == "invalidated":
+                            thesis_outcome = "failed: conviction collapsed / thesis invalidated"
+                        elif trade.net_pnl <= 0:
+                            thesis_outcome = "mixed: thesis stayed live but trade closed red"
+                        else:
+                            thesis_outcome = "mixed: closed without clear thesis confirmation"
+                else:
+                    if trade.net_pnl > 0:
+                        thesis_outcome = "worked: positive close (no thesis snapshot)"
+                    elif trade.net_pnl < 0:
+                        thesis_outcome = "failed: negative close (no thesis snapshot)"
+
+                pnl_pct = Decimal("0")
+                if getattr(trade, "size_notional", Decimal("0")):
+                    try:
+                        pnl_pct = (trade.net_pnl / trade.size_notional) * Decimal("100")
+                    except Exception:
+                        pnl_pct = Decimal("0")
+
+                await send_alert(
+                    "THESIS_TRADE_CLOSED",
+                    f"[THESIS] Trade closed\n"
+                    f"Symbol: {position.symbol}\n"
+                    f"P&L: ${trade.net_pnl:.2f} ({pnl_pct:.2f}%)\n"
+                    f"Exit reason: {trade.exit_reason}\n"
+                    f"Entry: ${fmt_price(trade.entry_price)} | Exit: ${fmt_price(trade.exit_price)} | Size: {fmt_size(trade.size)}\n"
+                    f"{thesis_context}\n"
+                    f"Outcome: {thesis_outcome}",
+                    urgent=True,
+                )
             
             # Get current equity for risk manager
             balance = await self.client.get_futures_balance()

@@ -4,6 +4,7 @@ from decimal import Decimal
 from src.config.config import StrategyConfig
 from src.memory.institutional_memory import InstitutionalMemoryManager
 from src.memory.thesis import Thesis
+from src.monitoring.alerting import _THESIS_ALLOWED_EVENT_TYPES
 
 
 def _thesis() -> Thesis:
@@ -72,3 +73,8 @@ def test_thesis_alerts_emit_with_open_position(monkeypatch):
     event_types = [args[0] for args, _ in sent]
     assert "THESIS_CONVICTION_COLLAPSE" in event_types
     assert "THESIS_INVALIDATED" in event_types
+
+
+def test_trade_open_close_events_are_allowed():
+    assert "THESIS_TRADE_OPENED" in _THESIS_ALLOWED_EVENT_TYPES
+    assert "THESIS_TRADE_CLOSED" in _THESIS_ALLOWED_EVENT_TYPES
