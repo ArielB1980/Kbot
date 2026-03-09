@@ -148,6 +148,18 @@ class SMCEngine:
             return ""
         return str(raw_symbol).strip().upper().split(":")[0]
 
+    def _conviction_stop_sizing_enabled_for_symbol(self, symbol: str) -> bool:
+        if not bool(getattr(self.config, "conviction_stop_sizing_enabled", False)):
+            return False
+        canary = set(
+            self._normalize_symbol_key(s)
+            for s in (getattr(self.config, "conviction_stop_sizing_canary_symbols", []) or [])
+            if s
+        )
+        if not canary:
+            return True
+        return self._normalize_symbol_key(symbol) in canary
+
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
         # Promoted policy: single global FVG minimum threshold.
         return self._fvg_min_size_pct_default
@@ -1039,6 +1051,35 @@ class SMCEngine:
                                 regime=regime,
                             )
                             return signal
+
+                        if conviction_entry_gate_enabled and thesis_snapshot is not None and self._conviction_stop_sizing_enabled_for_symbol(symbol):
+                            high_threshold = float(getattr(self.config, "conviction_stop_high_threshold", 60.0))
+                            high_multiplier = Decimal(str(getattr(self.config, "conviction_stop_high_multiplier", 1.5)))
+                            if conviction_val >= high_threshold and high_multiplier > Decimal("1"):
+                                original_stop = stop_loss
+                                risk_distance = abs(entry_price - original_stop)
+                                widened_distance = risk_distance * high_multiplier
+                                if signal_type == SignalType.LONG:
+                                    widened_stop = entry_price - widened_distance
+                                else:
+                                    widened_stop = entry_price + widened_distance
+                                if widened_stop > Decimal("0"):
+                                    stop_loss = widened_stop
+                                    reasoning_parts.append(
+                                        f"📈 Conviction stop widening applied: x{float(high_multiplier):.2f} "
+                                        f"(conv={conviction_val:.1f}, stop {original_stop} -> {stop_loss})"
+                                    )
+                                    logger.info(
+                                        "CONVICTION_STOP_WIDENED",
+                                        symbol=symbol,
+                                        conviction=conviction_val,
+                                        threshold=high_threshold,
+                                        multiplier=float(high_multiplier),
+                                        signal_type=signal_type.value,
+                                        entry=str(entry_price),
+                                        old_stop=str(original_stop),
+                                        new_stop=str(stop_loss),
+                                    )
 
                         reasoning_parts.append(f"✓ Score Passed: {score_obj.total_score:.1f} >= {threshold}")
                         

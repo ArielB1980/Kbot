@@ -180,3 +180,40 @@ def test_entry_blocked_when_conviction_below_minimum() -> None:
 
     assert sig.signal_type == SignalType.NO_SIGNAL
     assert "Entry blocked by thesis conviction gate" in sig.reasoning
+
+
+def test_high_conviction_widens_stop_in_canary() -> None:
+    cfg = StrategyConfig(
+        higher_tf_enabled=True,
+        higher_tf_mode="soft",
+        require_ms_change_confirmation=False,
+        memory_enabled=True,
+        thesis_observe_only=False,
+        thesis_management_enabled=True,
+        conviction_min_for_entry=35.0,
+        conviction_stop_sizing_enabled=True,
+        conviction_stop_sizing_canary_symbols=["BTC/USD"],
+        conviction_stop_high_threshold=60.0,
+        conviction_stop_high_multiplier=1.5,
+    )
+    engine = SMCEngine(cfg, institutional_memory=_FakeMemory(conviction=82.0))
+    _patch_engine_for_signal(engine)
+    engine._detect_higher_tf_context = lambda symbol: HigherTFContext(
+        weekly_fib_zone_low=Decimal("95"),
+        weekly_fib_zone_high=Decimal("110"),
+        daily_bias="bullish",
+        allowed_entry=True,
+        weekly_confluence_bonus=0.25,
+    )
+
+    sig = engine.generate_signal(
+        "BTC/USD",
+        regime_candles_1d=_candles("BTC/USD", "1d", 40),
+        decision_candles_4h=_candles("BTC/USD", "4h", 260),
+        refine_candles_1h=_candles("BTC/USD", "1h", 260),
+        refine_candles_15m=_candles("BTC/USD", "15m", 260),
+    )
+
+    assert sig.signal_type == SignalType.LONG
+    assert sig.stop_loss == Decimal("98.0")
+    assert "Conviction stop widening applied" in sig.reasoning

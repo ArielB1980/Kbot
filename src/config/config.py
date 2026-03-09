@@ -423,6 +423,26 @@ class StrategyConfig(BaseSettings):
         le=99.0,
         description="Minimum thesis conviction required to allow new entry when thesis management is enabled",
     )
+    conviction_stop_sizing_enabled: bool = Field(
+        default=False,
+        description="Enable conviction-aware stop widening for high-conviction entries",
+    )
+    conviction_stop_sizing_canary_symbols: List[str] = Field(
+        default_factory=list,
+        description="Optional symbol allowlist for conviction-aware stop sizing (empty = all symbols)",
+    )
+    conviction_stop_high_threshold: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=99.0,
+        description="Conviction threshold for applying high-conviction stop multiplier",
+    )
+    conviction_stop_high_multiplier: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=3.0,
+        description="Multiplier applied to stop distance when conviction is above high threshold",
+    )
     thesis_early_exit_threshold: float = Field(default=35.0, ge=1.0, le=99.0)
     thesis_reentry_block_threshold: float = Field(default=25.0, ge=1.0, le=99.0)
     thesis_alerts_enabled: bool = Field(default=False, description="Enable thesis-only Telegram alerts")
