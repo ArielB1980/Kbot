@@ -249,6 +249,7 @@ strategy:
   thesis_score_neutral_conviction: 60.0
   thesis_score_max_bonus: 8.0
   thesis_score_max_penalty: 12.0
+  conviction_min_for_entry: 45.0
   thesis_early_exit_threshold: 35.0
   thesis_reentry_block_threshold: 25.0
   thesis_alerts_enabled: true

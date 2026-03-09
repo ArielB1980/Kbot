@@ -31,8 +31,9 @@ def _candles(symbol: str, tf: str, count: int, base: Decimal = Decimal("100")) -
 
 
 class _FakeMemory:
-    def __init__(self):
+    def __init__(self, conviction: float = 82.0):
         self.created = 0
+        self.conviction = conviction
 
     def is_enabled_for_symbol(self, symbol: str) -> bool:
         return True
@@ -44,7 +45,7 @@ class _FakeMemory:
         return {
             "thesis_id": "thesis-abc",
             "symbol": symbol,
-            "conviction": 82.0,
+            "conviction": self.conviction,
             "status": "active",
             "time_decay": 3.0,
             "zone_rejection": 0.0,
@@ -147,3 +148,35 @@ def test_hard_mode_outside_zone_returns_no_signal() -> None:
 
     assert sig.signal_type == SignalType.NO_SIGNAL
     assert "Higher-TF hard reject" in sig.reasoning
+
+
+def test_entry_blocked_when_conviction_below_minimum() -> None:
+    cfg = StrategyConfig(
+        higher_tf_enabled=True,
+        higher_tf_mode="soft",
+        require_ms_change_confirmation=False,
+        memory_enabled=True,
+        thesis_observe_only=False,
+        thesis_management_enabled=True,
+        conviction_min_for_entry=45.0,
+    )
+    engine = SMCEngine(cfg, institutional_memory=_FakeMemory(conviction=40.0))
+    _patch_engine_for_signal(engine)
+    engine._detect_higher_tf_context = lambda symbol: HigherTFContext(
+        weekly_fib_zone_low=Decimal("95"),
+        weekly_fib_zone_high=Decimal("110"),
+        daily_bias="bullish",
+        allowed_entry=True,
+        weekly_confluence_bonus=0.25,
+    )
+
+    sig = engine.generate_signal(
+        "BTC/USD",
+        regime_candles_1d=_candles("BTC/USD", "1d", 40),
+        decision_candles_4h=_candles("BTC/USD", "4h", 260),
+        refine_candles_1h=_candles("BTC/USD", "1h", 260),
+        refine_candles_15m=_candles("BTC/USD", "15m", 260),
+    )
+
+    assert sig.signal_type == SignalType.NO_SIGNAL
+    assert "Entry blocked by thesis conviction gate" in sig.reasoning

@@ -998,6 +998,48 @@ class SMCEngine:
                             score_breakdown=score_breakdown,
                         )
                     else:
+                        conviction_entry_gate_enabled = bool(getattr(self.config, "thesis_management_enabled", False)) and not bool(
+                            getattr(self.config, "thesis_observe_only", True)
+                        )
+                        conviction_min_for_entry = float(getattr(self.config, "conviction_min_for_entry", 35.0))
+                        conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
+                        if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
+                            score_breakdown = {
+                                "smc": float(score_obj.smc_quality),
+                                "fib": float(score_obj.fib_confluence),
+                                "htf": float(score_obj.htf_alignment),
+                                "adx": float(score_obj.adx_strength),
+                                "cost": float(score_obj.cost_efficiency),
+                                "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
+                                "higher_tf_penalty": float(higher_tf_penalty),
+                                "thesis_conviction": conviction_val,
+                                "thesis_score_adj": float(thesis_score_adj),
+                                "conviction_min_for_entry": conviction_min_for_entry,
+                                "total": float(score_obj.total_score),
+                                "threshold": float(threshold),
+                            }
+                            logger.info(
+                                "ENTRY_BLOCKED_LOW_CONVICTION",
+                                symbol=symbol,
+                                conviction=conviction_val,
+                                conviction_min_for_entry=conviction_min_for_entry,
+                                setup=setup_type.value,
+                                score=float(score_obj.total_score),
+                            )
+                            signal = self._no_signal(
+                                symbol,
+                                reasoning_parts
+                                + [
+                                    f"❌ Entry blocked by thesis conviction gate ({conviction_val:.1f} < {conviction_min_for_entry:.1f})"
+                                ],
+                                current_candle,
+                                score_breakdown=score_breakdown,
+                                adx=adx_value,
+                                atr=atr_value,
+                                regime=regime,
+                            )
+                            return signal
+
                         reasoning_parts.append(f"✓ Score Passed: {score_obj.total_score:.1f} >= {threshold}")
                         
                         # Create FINAL signal

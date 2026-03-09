@@ -417,6 +417,12 @@ class StrategyConfig(BaseSettings):
     thesis_score_neutral_conviction: float = Field(default=60.0, ge=1.0, le=99.0)
     thesis_score_max_bonus: float = Field(default=8.0, ge=0.0, le=30.0)
     thesis_score_max_penalty: float = Field(default=12.0, ge=0.0, le=30.0)
+    conviction_min_for_entry: float = Field(
+        default=35.0,
+        ge=1.0,
+        le=99.0,
+        description="Minimum thesis conviction required to allow new entry when thesis management is enabled",
+    )
     thesis_early_exit_threshold: float = Field(default=35.0, ge=1.0, le=99.0)
     thesis_reentry_block_threshold: float = Field(default=25.0, ge=1.0, le=99.0)
     thesis_alerts_enabled: bool = Field(default=False, description="Enable thesis-only Telegram alerts")
