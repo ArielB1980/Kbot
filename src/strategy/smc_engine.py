@@ -160,6 +160,20 @@ class SMCEngine:
             return True
         return self._normalize_symbol_key(symbol) in canary
 
+    def _resolve_conviction_min_for_entry(self, symbol: str) -> float:
+        base = float(getattr(self.config, "conviction_min_for_entry", 35.0))
+        canary_threshold = getattr(self.config, "conviction_min_for_entry_canary", None)
+        if canary_threshold is None:
+            return base
+        canary_symbols = set(
+            self._normalize_symbol_key(s)
+            for s in (getattr(self.config, "conviction_canary_symbols", []) or [])
+            if s
+        )
+        if not canary_symbols:
+            return float(canary_threshold)
+        return float(canary_threshold) if self._normalize_symbol_key(symbol) in canary_symbols else base
+
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
         # Promoted policy: single global FVG minimum threshold.
         return self._fvg_min_size_pct_default
@@ -1013,7 +1027,7 @@ class SMCEngine:
                         conviction_entry_gate_enabled = bool(getattr(self.config, "thesis_management_enabled", False)) and not bool(
                             getattr(self.config, "thesis_observe_only", True)
                         )
-                        conviction_min_for_entry = float(getattr(self.config, "conviction_min_for_entry", 35.0))
+                        conviction_min_for_entry = self._resolve_conviction_min_for_entry(symbol)
                         conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
                         if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
                             score_breakdown = {
@@ -1684,7 +1698,7 @@ class SMCEngine:
                     original_mult=float(original_mult),
                     new_mult=float(stop_mult)
                 )
-            
+
         tp_candidates = []
         entry_price = Decimal("0")
         invalid_level = Decimal("0")

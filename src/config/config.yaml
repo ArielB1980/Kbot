@@ -250,6 +250,8 @@ strategy:
   thesis_score_max_bonus: 8.0
   thesis_score_max_penalty: 12.0
   conviction_min_for_entry: 45.0
+  conviction_min_for_entry_canary: 35.0
+  conviction_canary_symbols: ["BTC/USD", "ETH/USD"]
   conviction_stop_sizing_enabled: true
   conviction_stop_sizing_canary_symbols: ["ETH/USD", "SOL/USD", "XMR/USD"]
   conviction_stop_high_threshold: 60.0

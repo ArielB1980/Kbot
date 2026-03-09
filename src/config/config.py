@@ -423,6 +423,16 @@ class StrategyConfig(BaseSettings):
         le=99.0,
         description="Minimum thesis conviction required to allow new entry when thesis management is enabled",
     )
+    conviction_min_for_entry_canary: Optional[float] = Field(
+        default=None,
+        ge=1.0,
+        le=99.0,
+        description="Optional lower conviction entry threshold for canary symbols",
+    )
+    conviction_canary_symbols: List[str] = Field(
+        default_factory=list,
+        description="Optional symbol allowlist for conviction_min_for_entry_canary override",
+    )
     conviction_stop_sizing_enabled: bool = Field(
         default=False,
         description="Enable conviction-aware stop widening for high-conviction entries",

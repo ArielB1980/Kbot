@@ -217,3 +217,45 @@ def test_high_conviction_widens_stop_in_canary() -> None:
     assert sig.signal_type == SignalType.LONG
     assert sig.stop_loss == Decimal("98.0")
     assert "Conviction stop widening applied" in sig.reasoning
+
+
+def test_conviction_min_entry_canary_override_applies_only_to_listed_symbols() -> None:
+    cfg = StrategyConfig(
+        higher_tf_enabled=True,
+        higher_tf_mode="soft",
+        require_ms_change_confirmation=False,
+        memory_enabled=True,
+        thesis_observe_only=False,
+        thesis_management_enabled=True,
+        conviction_min_for_entry=45.0,
+        conviction_min_for_entry_canary=35.0,
+        conviction_canary_symbols=["ETH/USD"],
+    )
+    engine = SMCEngine(cfg, institutional_memory=_FakeMemory(conviction=40.0))
+    _patch_engine_for_signal(engine)
+    engine._detect_higher_tf_context = lambda symbol: HigherTFContext(
+        weekly_fib_zone_low=Decimal("95"),
+        weekly_fib_zone_high=Decimal("110"),
+        daily_bias="bullish",
+        allowed_entry=True,
+        weekly_confluence_bonus=0.25,
+    )
+
+    btc_sig = engine.generate_signal(
+        "BTC/USD",
+        regime_candles_1d=_candles("BTC/USD", "1d", 40),
+        decision_candles_4h=_candles("BTC/USD", "4h", 260),
+        refine_candles_1h=_candles("BTC/USD", "1h", 260),
+        refine_candles_15m=_candles("BTC/USD", "15m", 260),
+    )
+    eth_sig = engine.generate_signal(
+        "ETH/USD",
+        regime_candles_1d=_candles("ETH/USD", "1d", 40),
+        decision_candles_4h=_candles("ETH/USD", "4h", 260),
+        refine_candles_1h=_candles("ETH/USD", "1h", 260),
+        refine_candles_15m=_candles("ETH/USD", "15m", 260),
+    )
+
+    assert btc_sig.signal_type == SignalType.NO_SIGNAL
+    assert "Entry blocked by thesis conviction gate" in btc_sig.reasoning
+    assert eth_sig.signal_type == SignalType.LONG
