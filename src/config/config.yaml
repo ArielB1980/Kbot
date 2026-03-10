@@ -256,6 +256,13 @@ strategy:
   conviction_stop_sizing_canary_symbols: ["ETH/USD", "SOL/USD", "XMR/USD"]
   conviction_stop_high_threshold: 60.0
   conviction_stop_high_multiplier: 1.5
+  # Phase C1: EV + Bayesian shadow logging (no gating/sizing behavior change)
+  ev_layer_enabled: true
+  ev_shadow_mode: true
+  ev_canary_symbols: []
+  bayes_enabled: true
+  bayes_prior_blend: 0.5
+  bayes_decay_hours: 72.0
   thesis_early_exit_threshold: 35.0
   thesis_reentry_block_threshold: 25.0
   thesis_alerts_enabled: true

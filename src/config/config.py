@@ -453,6 +453,18 @@ class StrategyConfig(BaseSettings):
         le=3.0,
         description="Multiplier applied to stop distance when conviction is above high threshold",
     )
+    ev_layer_enabled: bool = Field(default=False, description="Enable EV/Bayesian layer")
+    ev_shadow_mode: bool = Field(
+        default=True,
+        description="Shadow-only EV mode; computes and logs without changing behavior",
+    )
+    ev_canary_symbols: List[str] = Field(
+        default_factory=list,
+        description="Optional symbol allowlist for EV layer (empty = all symbols)",
+    )
+    bayes_enabled: bool = Field(default=True, description="Enable Bayesian posterior computation in EV layer")
+    bayes_prior_blend: float = Field(default=0.5, ge=0.0, le=1.0)
+    bayes_decay_hours: float = Field(default=72.0, ge=1.0, le=720.0)
     thesis_early_exit_threshold: float = Field(default=35.0, ge=1.0, le=99.0)
     thesis_reentry_block_threshold: float = Field(default=25.0, ge=1.0, le=99.0)
     thesis_alerts_enabled: bool = Field(default=False, description="Enable thesis-only Telegram alerts")

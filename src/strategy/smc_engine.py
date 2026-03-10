@@ -15,6 +15,7 @@ from src.strategy.indicators import Indicators
 from src.strategy.fibonacci_engine import FibonacciEngine
 from src.strategy.signal_scorer import SignalScorer
 from src.strategy.market_structure_tracker import MarketStructureTracker
+from src.strategy.ev_engine import EVEngine
 from src.config.config import StrategyConfig
 from src.monitoring.logger import get_logger
 from src.domain.protocols import EventRecorder, _noop_event_recorder
@@ -139,6 +140,7 @@ class SMCEngine:
         # Store score penalty for tolerance entries
         self.entry_zone_tolerance_score_penalty = getattr(config, 'entry_zone_tolerance_score_penalty', -5)
         self._fvg_min_size_pct_default = Decimal(str(getattr(config, "fvg_min_size_pct", 0.001)))
+        self.ev_engine = EVEngine(config)
         
         logger.info("SMC Engine initialized", config=config.model_dump())
 
@@ -177,6 +179,20 @@ class SMCEngine:
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
         # Promoted policy: single global FVG minimum threshold.
         return self._fvg_min_size_pct_default
+
+    def _ev_shadow_enabled_for_symbol(self, symbol: str) -> bool:
+        if not bool(getattr(self.config, "ev_layer_enabled", False)):
+            return False
+        if not bool(getattr(self.config, "ev_shadow_mode", True)):
+            return False
+        canary = set(
+            self._normalize_symbol_key(s)
+            for s in (getattr(self.config, "ev_canary_symbols", []) or [])
+            if s
+        )
+        if not canary:
+            return True
+        return self._normalize_symbol_key(symbol) in canary
     
     def _get_cache_key(self, symbol: str, candles: List[Candle]) -> Tuple[str, datetime]:
         """Generate cache key from symbol and last candle timestamp."""
@@ -983,6 +999,17 @@ class SMCEngine:
                         penalty = self.entry_zone_tolerance_score_penalty
                         score_obj.total_score += penalty  # penalty is negative
                         reasoning_parts.append(f"📊 Tolerance penalty applied: {penalty} points")
+
+                    # Phase C1: EV/Bayesian shadow trace (no behavior changes).
+                    if self._ev_shadow_enabled_for_symbol(symbol):
+                        ev_inputs = {
+                            "symbol": symbol,
+                            "conviction": float(thesis_snapshot.get("conviction", 20.0)) if thesis_snapshot else 20.0,
+                            "regime": regime,
+                            "risk_r": 1.0,  # placeholder for C1
+                        }
+                        ev_result = self.ev_engine.compute(ev_inputs)
+                        self.ev_engine.log_ev_trace(ev_result, ev_inputs)
                     
                     # GATE: Check score
                     passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias)
