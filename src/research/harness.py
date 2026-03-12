@@ -115,7 +115,7 @@ class SandboxAutoresearchHarness:
                             f"Candidate <code>{result.candidate_id}</code> improves return "
                             f"{result.metrics.net_return_pct:+.2f}% but worsens drawdown to "
                             f"{result.metrics.max_drawdown_pct:.2f}%. "
-                            "Approve for ranking? Reply with /approve <token> or /reject <token>."
+                            "Approve for ranking? Reply with /approve &lt;token&gt; or /reject &lt;token&gt;."
                         ),
                     )
                     if approved:
