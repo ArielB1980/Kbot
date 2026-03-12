@@ -39,7 +39,11 @@ class TelegramCommandHandler:
     command handling failures.
     """
     
-    def __init__(self, data_provider: Callable[..., Awaitable[dict]]):
+    def __init__(
+        self,
+        data_provider: Optional[Callable[..., Awaitable[dict]]] = None,
+        command_router: Optional[Callable[[str], Awaitable[Optional[str]]]] = None,
+    ):
         """
         Args:
             data_provider: Async callable that returns system state dict with keys:
@@ -48,6 +52,7 @@ class TelegramCommandHandler:
                 universe_size
         """
         self._data_provider = data_provider
+        self._command_router = command_router
         self._bot_token: Optional[str] = None
         self._chat_id: Optional[str] = None
         self._last_update_id: int = 0
@@ -112,6 +117,16 @@ class TelegramCommandHandler:
             if chat_id != self._chat_id:
                 continue
             
+            if self._command_router and (
+                text.startswith("/research_")
+                or text.startswith("/approve ")
+                or text.startswith("/reject ")
+            ):
+                response = await self._command_router(text)
+                if response:
+                    await self._send_message(response)
+                continue
+
             if text in ("/status", "/s"):
                 await self._handle_status()
             elif text in ("/positions", "/pos", "/p"):
@@ -141,16 +156,33 @@ class TelegramCommandHandler:
     
     async def _handle_help(self) -> None:
         """Respond to /help."""
-        await self._send_message(
-            "🤖 <b>KBot Commands</b>\n\n"
-            "/status - Equity, margin, system state\n"
-            "/positions - Open positions with P&L\n"
-            "/trades - Last 5 closed trades\n"
-            "/help - This message"
-        )
+        lines = [
+            "🤖 <b>KBot Commands</b>\n",
+            "/status - Equity, margin, system state",
+            "/positions - Open positions with P&L",
+            "/trades - Last 5 closed trades",
+            "/help - This message",
+        ]
+        if self._command_router is not None:
+            lines.extend(
+                [
+                    "",
+                    "🔬 <b>Research Commands</b>",
+                    "/research_status - Current run status",
+                    "/research_top - Top 3 candidates",
+                    "/research_diff <id> - Candidate vs baseline",
+                    "/research_pause | /research_resume | /research_stop",
+                    "/research_promote <id> - Queue for review",
+                    "/approve <token> | /reject <token>",
+                ]
+            )
+        await self._send_message("\n".join(lines))
     
     async def _handle_status(self) -> None:
         """Respond to /status with system overview."""
+        if self._data_provider is None:
+            await self._send_message("ℹ️ System status provider is not available in this process.")
+            return
         try:
             data = await self._data_provider()
         except (OperationalError, DataError, OSError) as e:
@@ -193,6 +225,9 @@ class TelegramCommandHandler:
     
     async def _handle_positions(self) -> None:
         """Respond to /positions with detailed position list."""
+        if self._data_provider is None:
+            await self._send_message("ℹ️ Position status provider is not available in this process.")
+            return
         try:
             data = await self._data_provider()
         except (OperationalError, DataError, OSError) as e:

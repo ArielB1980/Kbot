@@ -570,6 +570,93 @@ def report(
     generate_activity_report(hours=hours, format_type=format)
 
 
+@app.command()
+def research(
+    iterations: int = typer.Option(12, "--iterations", min=1, help="Number of candidate iterations"),
+    days: int = typer.Option(30, "--days", min=1, help="Backtest lookback window in days"),
+    symbols: str = typer.Option(
+        "BTC/USD,ETH/USD,SOL/USD",
+        "--symbols",
+        help="Comma-separated symbol list for evaluation",
+    ),
+    mode: str = typer.Option(
+        "backtest",
+        "--mode",
+        help="Evaluation backend: backtest or mock",
+    ),
+    digest_every: int = typer.Option(5, "--digest-every", min=1, help="Telegram digest interval"),
+    out_dir: Path = typer.Option("data/research", "--out-dir", help="Output directory"),
+    state_file: Path = typer.Option("data/research/state.json", "--state-file", help="Research state file"),
+    telegram: bool = typer.Option(True, "--telegram/--no-telegram", help="Enable Telegram notifications and control commands"),
+    config_path: Path = typer.Option("src/config/config.yaml", "--config", help="Path to config file"),
+):
+    """
+    Run sandbox autoresearch loop for strategy parameter optimization.
+    """
+    config = _load_config(config_path)
+    _setup_logging_from_config(config)
+    symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
+    if not symbol_tuple:
+        typer.secho("❌ At least one symbol is required.", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    if mode not in {"backtest", "mock"}:
+        typer.secho("❌ --mode must be one of: backtest, mock", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+
+    from src.research.harness import HarnessConfig, run_sandbox_autoresearch
+    from src.research.state_store import ResearchStateStore
+    from src.research.telegram_router import ResearchTelegramRouter
+    from src.monitoring.telegram_bot import TelegramCommandHandler
+
+    async def _run() -> None:
+        store = ResearchStateStore(state_file)
+        cfg = HarnessConfig(
+            iterations=iterations,
+            digest_every=digest_every,
+            out_dir=str(out_dir),
+            lookback_days=days,
+            symbols=symbol_tuple,
+            evaluation_mode=mode,
+            enable_telegram=telegram,
+        )
+
+        telegram_task = None
+        telegram_handler = None
+        if telegram:
+            router = ResearchTelegramRouter(store)
+
+            async def _empty_status_provider() -> dict:
+                return {}
+
+            telegram_handler = TelegramCommandHandler(
+                data_provider=_empty_status_provider,
+                command_router=router.handle_command,
+            )
+            telegram_task = asyncio.create_task(telegram_handler.run())
+
+        try:
+            leaderboard_path, summary_path = await run_sandbox_autoresearch(
+                base_config=config,
+                harness_config=cfg,
+                state_store=store,
+            )
+            typer.echo(f"Leaderboard: {leaderboard_path}")
+            typer.echo(f"Summary: {summary_path}")
+            typer.echo(f"State: {state_file}")
+        finally:
+            if telegram_handler is not None:
+                telegram_handler.stop()
+            if telegram_task is not None:
+                telegram_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await telegram_task
+
+    import asyncio
+    import contextlib
+
+    asyncio.run(_run())
+
+
 
 @app.callback()
 def main(
