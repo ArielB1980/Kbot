@@ -64,6 +64,74 @@ python -m src.tools.check_tp_coverage  # identify gaps
 | `/positions` | Detailed position list |
 | `/help` | Available commands |
 
+## Sandbox Autoresearch Runbook
+
+Use `scripts/research_control.sh` (or `make research-*`) for a repeatable workflow.
+
+### Safety defaults
+
+- Runs in isolated per-run directory under `data/research/<run_id>/`.
+- Uses per-run SQLite DB (`DATABASE_URL=sqlite:///.../research.db`) to avoid touching production DB.
+- Supports pause/resume/stop/promote via state file control.
+- Optional Telegram control plane is available, but using a dedicated Telegram bot/chat is strongly recommended to avoid update polling contention with live bot process.
+- Nightly scheduling uses `scripts/research_nightly.sh` with lockfile (`data/research/nightly.lock`) to prevent overlapping runs.
+
+### Standard workflow
+
+```bash
+# 1) Start (safe default: mock + paused start)
+make research-start RESEARCH_MODE=mock RESEARCH_ITER=500 RESEARCH_PAUSED_START=1 RESEARCH_TELEGRAM=1
+
+# 2) Inspect state
+make research-status
+
+# 3) Resume run
+make research-resume
+
+# 4) Monitor
+make research-logs FOLLOW=1
+
+# 5) Queue a candidate for promotion review
+make research-promote CID=c042
+
+# 6) Pause or stop
+make research-pause
+make research-stop
+
+# 7) Cleanup temp artifacts when done
+make research-cleanup
+
+# 8) Install nightly schedule (default: 02:15 UTC daily)
+make research-schedule-install
+make research-schedule-status
+```
+
+### Direct script usage
+
+```bash
+./scripts/research_control.sh start --mode mock --iterations 500 --telegram --paused-start
+./scripts/research_control.sh status
+./scripts/research_control.sh resume
+./scripts/research_control.sh logs --follow
+./scripts/research_control.sh promote --candidate c042
+./scripts/research_control.sh stop
+./scripts/research_control.sh cleanup
+./scripts/research_control.sh install-schedule --cron "15 2 * * *"
+./scripts/research_control.sh schedule-status
+./scripts/research_control.sh remove-schedule
+```
+
+### Nightly tuning knobs (server `.env`)
+
+`scripts/research_nightly.sh` reads optional env vars:
+
+- `RESEARCH_NIGHTLY_MODE` (`backtest` or `mock`, default `backtest`)
+- `RESEARCH_NIGHTLY_ITER` (default `30`)
+- `RESEARCH_NIGHTLY_DAYS` (default `30`)
+- `RESEARCH_NIGHTLY_SYMBOLS` (default `BTC/USD,ETH/USD,SOL/USD`)
+- `RESEARCH_NIGHTLY_TELEGRAM` (`0`/`1`, default `0`)
+- `RESEARCH_NIGHTLY_DIGEST_EVERY` (default `10`)
+
 ## Log Patterns
 
 | Pattern | Meaning |

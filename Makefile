@@ -8,7 +8,7 @@ DEPLOY_SSH_KEY ?= $(HOME)/.ssh/trading_droplet
 DEPLOY_TRADING_USER ?= trading
 DEPLOY_TRADING_DIR ?= /home/trading/TradingSystem
 
-.PHONY: help venv install run smoke logs smoke-logs test test-server lint format integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
+.PHONY: help venv install run smoke logs smoke-logs test test-server lint format integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep research-start research-status research-pause research-resume research-stop research-promote research-logs research-cleanup research-schedule-install research-schedule-status research-schedule-remove audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
 
 help:
 	@echo "Available commands:"
@@ -21,6 +21,17 @@ help:
 	@echo "  make replay          Run all 6 replay episodes (SEED=42 default)"
 	@echo "  make replay-episode  Run a single episode: make replay-episode EP=1_normal SEED=42"
 	@echo "  make replay-sweep    Run all episodes across seeds 1-5 (robustness)"
+	@echo "  make research-start   Start isolated sandbox autoresearch session on server"
+	@echo "  make research-status  Show current sandbox autoresearch state"
+	@echo "  make research-pause   Pause current sandbox autoresearch run"
+	@echo "  make research-resume  Resume current sandbox autoresearch run"
+	@echo "  make research-stop    Request graceful stop for current research run"
+	@echo "  make research-promote Queue candidate for review (CID=<candidate_id>)"
+	@echo "  make research-logs    Show/tail current research run logs (FOLLOW=1 optional)"
+	@echo "  make research-cleanup Stop and remove current research run artifacts"
+	@echo "  make research-schedule-install Install nightly research cron on server"
+	@echo "  make research-schedule-status  Show nightly schedule on server"
+	@echo "  make research-schedule-remove  Remove nightly schedule on server"
 	@echo "  make run           Run bot in local mode (dry-run)"
 	@echo "  make smoke         Run smoke test (30s)"
 	@echo "  make integration   Run integration test (5 mins, tests all code paths)"
@@ -104,6 +115,66 @@ replay-sweep:
 		$(MAKE) replay SEED=$$s || exit 1; \
 	done
 	@echo ""; echo "All seeds passed."
+
+RESEARCH_MODE ?= mock
+RESEARCH_ITER ?= 500
+RESEARCH_DAYS ?= 30
+RESEARCH_SYMBOLS ?= BTC/USD,ETH/USD,SOL/USD
+RESEARCH_TELEGRAM ?= 0
+RESEARCH_PAUSED_START ?= 1
+CID ?=
+FOLLOW ?= 0
+RESEARCH_CRON ?= 15 2 * * *
+
+research-start:
+	@TELEGRAM_FLAG=""; \
+	PAUSE_FLAG=""; \
+	if [ "$(RESEARCH_TELEGRAM)" = "1" ]; then TELEGRAM_FLAG="--telegram"; fi; \
+	if [ "$(RESEARCH_PAUSED_START)" = "1" ]; then PAUSE_FLAG="--paused-start"; fi; \
+	./scripts/research_control.sh start \
+		--mode "$(RESEARCH_MODE)" \
+		--iterations "$(RESEARCH_ITER)" \
+		--days "$(RESEARCH_DAYS)" \
+		--symbols "$(RESEARCH_SYMBOLS)" \
+		$$TELEGRAM_FLAG $$PAUSE_FLAG
+
+research-status:
+	./scripts/research_control.sh status
+
+research-pause:
+	./scripts/research_control.sh pause
+
+research-resume:
+	./scripts/research_control.sh resume
+
+research-stop:
+	./scripts/research_control.sh stop
+
+research-promote:
+	@if [ -z "$(CID)" ]; then \
+		echo "Usage: make research-promote CID=c123"; \
+		exit 1; \
+	fi
+	./scripts/research_control.sh promote --candidate "$(CID)"
+
+research-logs:
+	@if [ "$(FOLLOW)" = "1" ]; then \
+		./scripts/research_control.sh logs --follow; \
+	else \
+		./scripts/research_control.sh logs; \
+	fi
+
+research-cleanup:
+	./scripts/research_control.sh cleanup
+
+research-schedule-install:
+	./scripts/research_control.sh install-schedule --cron "$(RESEARCH_CRON)"
+
+research-schedule-status:
+	./scripts/research_control.sh schedule-status
+
+research-schedule-remove:
+	./scripts/research_control.sh remove-schedule
 
 venv:
 	python3 -m venv .venv
