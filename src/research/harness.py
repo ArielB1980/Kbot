@@ -34,6 +34,8 @@ class HarnessConfig:
     lookback_days: int = 30
     symbols: tuple[str, ...] = ("BTC/USD", "ETH/USD", "SOL/USD")
     enable_telegram: bool = True
+    evaluation_window_offsets_days: tuple[int, ...] = (0, 30, 60)
+    holdout_ratio: float = 0.30
 
 
 class SandboxAutoresearchHarness:
@@ -62,6 +64,8 @@ class SandboxAutoresearchHarness:
                 lookback_days=self.cfg.lookback_days,
                 starting_equity=base_config.backtest.starting_equity,
                 mode=self.cfg.evaluation_mode,
+                window_offsets_days=self.cfg.evaluation_window_offsets_days,
+                holdout_ratio=self.cfg.holdout_ratio,
             ),
         )
         self._param_keys = tuple(self.policy.allowed_parameter_paths)
@@ -105,6 +109,9 @@ class SandboxAutoresearchHarness:
                 result.score -= 100.0
             if result.accepted:
                 result.metadata["required_verification_commands"] = self._required_verification_commands()
+                result.metadata["replay_gate_passed"] = False
+                result.metadata["promotion_ready"] = False
+            result.metadata["window_deltas_vs_baseline"] = self._window_deltas(result, baseline)
             self.results.append(result)
 
             if result.score > best.score:
@@ -160,16 +167,20 @@ class SandboxAutoresearchHarness:
                 metadata={"policy_violations": violations},
             )
 
-        metrics = await self._evaluator.evaluate(params)
+        outcome = await self._evaluator.evaluate(params)
+        metrics = outcome.metrics
         accepted, reasons = self._promotion_gate(metrics)
         metrics.rejection_reasons.extend(reasons)
-        score = score_candidate(metrics) if accepted else score_candidate(metrics) - 250.0
+        composite = outcome.diagnostics.get("composite_score")
+        base_score = float(composite) if composite is not None else score_candidate(metrics)
+        score = base_score if accepted else base_score - 250.0
         return CandidateResult(
             candidate_id=candidate_id,
             params=params,
             metrics=metrics,
             score=score,
             accepted=accepted,
+            metadata={"evaluation": outcome.diagnostics},
         )
 
     def _promotion_gate(self, metrics) -> tuple[bool, list[str]]:
@@ -180,6 +191,8 @@ class SandboxAutoresearchHarness:
             reasons.append("Max drawdown exceeds hard cap (35%)")
         if metrics.net_return_pct <= -10.0:
             reasons.append("Net return is deeply negative")
+        if metrics.max_drawdown_pct > 20.0 and metrics.net_return_pct < 2.0:
+            reasons.append("Weak risk-adjusted profile across split windows")
         return (len(reasons) == 0, reasons)
 
     def _read_params_from_config(self, config: Config) -> dict[str, float]:
@@ -236,6 +249,7 @@ class SandboxAutoresearchHarness:
                 "promoted": r.promoted,
                 "params": r.params,
                 "metrics": asdict(r.metrics),
+                "metadata": r.metadata,
             }
             for r in sorted(self.results, key=lambda x: x.score, reverse=True)
         ]
@@ -290,6 +304,51 @@ class SandboxAutoresearchHarness:
             f"Win={best.metrics.win_rate_pct:.1f}% "
             f"Trades={best.metrics.trade_count}"
         )
+
+    def _window_deltas(self, candidate: CandidateResult, baseline: CandidateResult) -> list[dict[str, float]]:
+        """Compute baseline-vs-candidate split deltas for diagnostics."""
+        cand_windows = (
+            candidate.metadata.get("evaluation", {}).get("per_window", [])
+            if isinstance(candidate.metadata, dict)
+            else []
+        )
+        base_windows = (
+            baseline.metadata.get("evaluation", {}).get("per_window", [])
+            if isinstance(baseline.metadata, dict)
+            else []
+        )
+        base_map: dict[int, dict] = {}
+        for w in base_windows:
+            try:
+                base_map[int(w.get("offset_days", 0))] = w
+            except Exception:  # noqa: BLE001 - diagnostics must not break run loop.
+                continue
+
+        deltas: list[dict[str, float]] = []
+        for w in cand_windows:
+            try:
+                offset = int(w.get("offset_days", 0))
+            except Exception:  # noqa: BLE001
+                continue
+            b = base_map.get(offset)
+            if not b:
+                continue
+            c_hold = w.get("holdout", {})
+            b_hold = b.get("holdout", {})
+            try:
+                deltas.append(
+                    {
+                        "offset_days": float(offset),
+                        "delta_return_pct": float(c_hold.get("net_return_pct", 0.0))
+                        - float(b_hold.get("net_return_pct", 0.0)),
+                        "delta_max_drawdown_pct": float(c_hold.get("max_drawdown_pct", 0.0))
+                        - float(b_hold.get("max_drawdown_pct", 0.0)),
+                        "delta_sharpe": float(c_hold.get("sharpe", 0.0)) - float(b_hold.get("sharpe", 0.0)),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        return deltas
 
     def _required_verification_commands(self) -> list[str]:
         """Repository verification checklist before promoting a candidate."""

@@ -75,6 +75,8 @@ Use `scripts/research_control.sh` (or `make research-*`) for a repeatable workfl
 - Supports pause/resume/stop/promote via state file control.
 - Optional Telegram control plane is available, but using a dedicated Telegram bot/chat is strongly recommended to avoid update polling contention with live bot process.
 - Nightly scheduling uses `scripts/research_nightly.sh` with lockfile (`data/research/nightly.lock`) to prevent overlapping runs.
+- Robust scoring uses split windows (train + holdout) across offsets (default `0,30,60` days) to reduce short-window overfit.
+- Promotion is replay-gated: a candidate must be marked replay-pass before `/research_promote` is allowed.
 
 ### Standard workflow
 
@@ -92,6 +94,8 @@ make research-resume
 make research-logs FOLLOW=1
 
 # 5) Queue a candidate for promotion review
+## After replay gate passes, mark candidate:
+/research_mark_replay_pass c042
 make research-promote CID=c042
 
 # 6) Pause or stop
@@ -129,6 +133,8 @@ make research-schedule-status
 - `RESEARCH_NIGHTLY_ITER` (default `30`)
 - `RESEARCH_NIGHTLY_DAYS` (default `30`)
 - `RESEARCH_NIGHTLY_SYMBOLS` (default `BTC/USD,ETH/USD,SOL/USD`)
+- `RESEARCH_NIGHTLY_WINDOW_OFFSETS` (default `0,30,60`)
+- `RESEARCH_NIGHTLY_HOLDOUT_RATIO` (default `0.30`)
 - `RESEARCH_NIGHTLY_TELEGRAM` (`0`/`1`, default `0`)
 - `RESEARCH_NIGHTLY_DIGEST_EVERY` (default `10`)
 

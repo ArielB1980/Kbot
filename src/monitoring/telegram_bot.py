@@ -172,6 +172,7 @@ class TelegramCommandHandler:
                     "/research_top - Top 3 candidates",
                     "/research_diff <id> - Candidate vs baseline",
                     "/research_pause | /research_resume | /research_stop",
+                    "/research_mark_replay_pass <id> - Mark replay gate pass",
                     "/research_promote <id> - Queue for review",
                     "/approve <token> | /reject <token>",
                 ]

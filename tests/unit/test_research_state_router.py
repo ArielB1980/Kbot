@@ -42,18 +42,24 @@ def test_router_diff_and_promotion(tmp_path) -> None:
                 "score": 1.0,
                 "params": {"strategy.adx_threshold": 25.0},
                 "metrics": {"net_return_pct": 1.0, "max_drawdown_pct": 5.0, "sharpe": 0.5},
+                "metadata": {"replay_gate_passed": True},
             },
             {
                 "candidate_id": "c007",
                 "score": 1.2,
                 "params": {"strategy.adx_threshold": 24.0},
                 "metrics": {"net_return_pct": 1.4, "max_drawdown_pct": 5.6, "sharpe": 0.6},
+                "metadata": {"replay_gate_passed": False},
             },
         ]
     )
     router = ResearchTelegramRouter(store)
     diff = asyncio.run(router.handle_command("/research_diff c007"))
     assert "Diff c007 vs baseline" in diff
+    blocked = asyncio.run(router.handle_command("/research_promote c007"))
+    assert "Promotion blocked" in blocked
+    mark = asyncio.run(router.handle_command("/research_mark_replay_pass c007"))
+    assert "Replay gate marked as passed" in mark
     promote = asyncio.run(router.handle_command("/research_promote c007"))
     assert "Queued" in promote
     assert "c007" in store.read_state()["promotion_queue"]

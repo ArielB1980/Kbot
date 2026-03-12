@@ -111,3 +111,23 @@ class ResearchStateStore:
         self.write_state(state)
         return True
 
+    def mark_replay_gate_passed(self, candidate_id: str) -> bool:
+        """Mark a leaderboard candidate as replay-gate passed."""
+        state = self.read_state()
+        board = list(state.get("leaderboard") or [])
+        updated = False
+        for row in board:
+            if row.get("candidate_id") != candidate_id:
+                continue
+            metadata = dict(row.get("metadata") or {})
+            metadata["replay_gate_passed"] = True
+            metadata["promotion_ready"] = True
+            row["metadata"] = metadata
+            updated = True
+            break
+        if not updated:
+            return False
+        state["leaderboard"] = board
+        self.write_state(state)
+        return True
+

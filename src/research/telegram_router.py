@@ -36,6 +36,8 @@ class ResearchTelegramRouter:
             return "🛑 Stop requested. Loop will exit after current candidate."
         if cmd.startswith("/research_promote"):
             return self._research_promote(cmd)
+        if cmd.startswith("/research_mark_replay_pass"):
+            return self._research_mark_replay_pass(cmd)
         if cmd.startswith("/approve "):
             token = cmd.split(" ", 1)[1].strip()
             return "✅ Approved." if self.store.resolve_prompt(token, "approve") else "❌ Invalid token."
@@ -114,7 +116,27 @@ class ResearchTelegramRouter:
         if len(parts) < 2:
             return "Usage: /research_promote <candidate_id>"
         candidate_id = parts[1].strip()
+        state = self.store.read_state()
+        board = list(state.get("leaderboard") or [])
+        target = next((x for x in board if x.get("candidate_id") == candidate_id), None)
+        if not target:
+            return f"Candidate not found: {candidate_id}"
+        metadata = dict(target.get("metadata") or {})
+        if not bool(metadata.get("replay_gate_passed", False)):
+            return (
+                f"⛔ Promotion blocked for {candidate_id}: replay gate not marked as passed.\n"
+                f"Run replay verification, then use /research_mark_replay_pass {candidate_id}."
+            )
         if self.store.queue_promotion(candidate_id):
             return f"📌 Queued {candidate_id} for human review promotion."
         return f"Candidate {candidate_id} is already queued."
+
+    def _research_mark_replay_pass(self, cmd: str) -> str:
+        parts = cmd.split(maxsplit=1)
+        if len(parts) < 2:
+            return "Usage: /research_mark_replay_pass <candidate_id>"
+        candidate_id = parts[1].strip()
+        if self.store.mark_replay_gate_passed(candidate_id):
+            return f"✅ Replay gate marked as passed for {candidate_id}. Promotion is now allowed."
+        return f"Candidate not found: {candidate_id}"
 

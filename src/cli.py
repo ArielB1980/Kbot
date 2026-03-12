@@ -573,9 +573,9 @@ def report(
 @app.command()
 def research(
     iterations: int = typer.Option(12, "--iterations", min=1, help="Number of candidate iterations"),
-    days: int = typer.Option(30, "--days", min=1, help="Backtest lookback window in days"),
+    days: int = typer.Option(90, "--days", min=1, help="Backtest lookback window in days"),
     symbols: str = typer.Option(
-        "BTC/USD,ETH/USD,SOL/USD",
+        "BTC/USD,ETH/USD,SOL/USD,XRP/USD,ADA/USD,LINK/USD",
         "--symbols",
         help="Comma-separated symbol list for evaluation",
     ),
@@ -585,6 +585,18 @@ def research(
         help="Evaluation backend: backtest or mock",
     ),
     digest_every: int = typer.Option(5, "--digest-every", min=1, help="Telegram digest interval"),
+    window_offsets: str = typer.Option(
+        "0,30,60",
+        "--window-offsets",
+        help="Comma-separated window offsets in days for split scoring",
+    ),
+    holdout_ratio: float = typer.Option(
+        0.30,
+        "--holdout-ratio",
+        min=0.10,
+        max=0.80,
+        help="Holdout fraction inside each window for robust split scoring",
+    ),
     out_dir: Path = typer.Option("data/research", "--out-dir", help="Output directory"),
     state_file: Path = typer.Option("data/research/state.json", "--state-file", help="Research state file"),
     telegram: bool = typer.Option(True, "--telegram/--no-telegram", help="Enable Telegram notifications and control commands"),
@@ -596,8 +608,12 @@ def research(
     config = _load_config(config_path)
     _setup_logging_from_config(config)
     symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
+    window_offsets_tuple = tuple(int(x.strip()) for x in window_offsets.split(",") if x.strip())
     if not symbol_tuple:
         typer.secho("❌ At least one symbol is required.", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    if not window_offsets_tuple:
+        typer.secho("❌ At least one --window-offsets value is required.", fg=typer.colors.RED, bold=True)
         raise typer.Exit(1)
     if mode not in {"backtest", "mock"}:
         typer.secho("❌ --mode must be one of: backtest, mock", fg=typer.colors.RED, bold=True)
@@ -618,6 +634,8 @@ def research(
             symbols=symbol_tuple,
             evaluation_mode=mode,
             enable_telegram=telegram,
+            evaluation_window_offsets_days=window_offsets_tuple,
+            holdout_ratio=holdout_ratio,
         )
 
         telegram_task = None
