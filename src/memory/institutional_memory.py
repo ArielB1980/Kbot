@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -312,6 +313,9 @@ class InstitutionalMemoryManager:
 
     def should_block_reentry(self, symbol: str, conviction: Optional[float] = None) -> bool:
         threshold = self._to_float(getattr(self.config, "thesis_reentry_block_threshold", 25.0), 25.0)
+        replay_override = os.getenv("REPLAY_OVERRIDE_THESIS_REENTRY_BLOCK_THRESHOLD")
+        if replay_override is not None and replay_override.strip():
+            threshold = self._to_float(replay_override, threshold)
         if conviction is None:
             thesis = self.get_latest_thesis(symbol)
             conviction = thesis.current_conviction if thesis else None

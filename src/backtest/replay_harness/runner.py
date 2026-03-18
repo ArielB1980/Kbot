@@ -65,6 +65,8 @@ class BacktestRunner:
         config_overrides: Optional[Dict[str, Any]] = None,
         max_ticks: Optional[int] = None,
         timeframes: Optional[List[str]] = None,
+        disable_cycle_guard_throttle: bool = False,
+        disable_db_mock: bool = False,
     ):
         self._data_dir = Path(data_dir)
         self._symbols = symbols
@@ -75,7 +77,13 @@ class BacktestRunner:
         self._fault_injector = fault_injector
         self._config_overrides = config_overrides or {}
         self._max_ticks = max_ticks
-        self._timeframes = timeframes or ["1m"]
+        resolved_timeframes = list(timeframes or ["1m"])
+        if "1m" not in resolved_timeframes:
+            # Exchange simulation fill model requires 1m bars.
+            resolved_timeframes = ["1m", *resolved_timeframes]
+        self._timeframes = resolved_timeframes
+        self._disable_cycle_guard_throttle = disable_cycle_guard_throttle
+        self._disable_db_mock = disable_db_mock
 
         # Built during setup
         self._clock: Optional[SimClock] = None
@@ -133,8 +141,31 @@ class BacktestRunner:
     async def run(self) -> ReplayMetrics:
         """Execute the full replay backtest. Returns metrics."""
         self._setup()
-        self._setup_db_mock()
+        use_db_mock = (
+            not self._disable_db_mock
+            and os.getenv("REPLAY_DISABLE_DB_MOCK", "0") != "1"
+        )
+        if use_db_mock:
+            self._setup_db_mock()
+        else:
+            logger.warning("REPLAY_DB_MOCK_DISABLED_USING_REAL_DB")
+        try:
+            return await self._run_with_db_mock()
+        finally:
+            # Always remove DB patching, even when replay raises early.
+            if use_db_mock:
+                self._teardown_db_mock()
+
+    async def _run_with_db_mock(self) -> ReplayMetrics:
+        """Run replay body with DB mock already installed."""
         await self._initialize()
+        if (
+            self._disable_cycle_guard_throttle
+            and self._live_trading is not None
+            and getattr(self._live_trading, "hardening", None) is not None
+            and getattr(self._live_trading.hardening, "cycle_guard", None) is not None
+        ):
+            self._live_trading.hardening.cycle_guard.min_interval = timedelta(seconds=0)
 
         tick_count = 0
         current = self._start
@@ -167,7 +198,16 @@ class BacktestRunner:
             # Run one tick of the live trading engine
             try:
                 await self._run_tick()
+                # In replay we do not run background health loops; explicitly
+                # poll exchange order status so fills/cancels reach state machine.
+                if (
+                    self._live_trading is not None
+                    and getattr(self._live_trading, "execution_gateway", None) is not None
+                ):
+                    await self._live_trading.execution_gateway.poll_and_process_order_updates()
                 self._metrics.total_ticks += 1
+                if bool(getattr(self._live_trading, "trade_paused", False)):
+                    self._metrics.trade_paused_ticks += 1
             except InvariantError as e:
                 self._metrics.record_event("INVARIANT_VIOLATION", {"error": str(e)})
                 self._metrics.invariant_k_violations += 1
@@ -204,10 +244,24 @@ class BacktestRunner:
             tick_count += 1
             current += timedelta(seconds=self._tick_interval)
 
+        # Ensure replay windows finalize to flat so trade outcomes are realized.
+        if os.getenv("REPLAY_FORCE_FLAT_AT_END", "1") == "1":
+            try:
+                open_positions = await self._exchange.get_all_futures_positions()
+                for p in open_positions:
+                    symbol = str(p.get("symbol") or "").strip()
+                    if not symbol:
+                        continue
+                    await self._exchange.close_position(symbol)
+            except Exception as e:
+                logger.warning("REPLAY_FORCE_FLAT_FAILED", error=str(e))
+
         # Finalize
-        self._metrics.total_fees = Decimal(str(self._exchange.exchange_metrics["total_fees"]))
-        self._metrics.total_funding = Decimal(str(self._exchange.exchange_metrics["total_funding"]))
-        self._metrics.gross_pnl = Decimal(str(self._exchange.exchange_metrics["realized_pnl"]))
+        exchange_summary = self._exchange.exchange_metrics
+        self._metrics.total_fees = Decimal(str(exchange_summary["total_fees"]))
+        self._metrics.total_funding = Decimal(str(exchange_summary["total_funding"]))
+        self._metrics.gross_pnl = Decimal(str(exchange_summary["realized_pnl"]))
+        self._metrics.total_trades = int(exchange_summary.get("trades_closed", 0))
         self._metrics.orders_blocked_by_rate_limiter = (
             self._live_trading.execution_gateway._order_rate_limiter.orders_blocked_total
             if self._live_trading and hasattr(self._live_trading, "execution_gateway")
@@ -222,7 +276,6 @@ class BacktestRunner:
             trades=self._metrics.total_trades,
         )
 
-        self._teardown_db_mock()
         return self._metrics
 
     def _setup(self) -> None:
@@ -257,6 +310,14 @@ class BacktestRunner:
         # Set env vars for config loading
         os.environ.setdefault("ENV", "local")
         os.environ.setdefault("DRY_RUN", "0")
+        # Reduce noisy per-tick logs in replay research loops.
+        os.environ["REPLAY_RESEARCH_MINIMAL_LOGS"] = "1"
+        # Replay research: prefer filled entries to avoid stale pending churn.
+        os.environ["REPLAY_FORCE_MARKET_ENTRY"] = "1"
+        # Keep pending positions from being immediately archived in replay.
+        os.environ["REPLAY_SKIP_STALE_PENDING_CLOSE"] = "1"
+        # Replay can cluster synthetic orders; relax order-rate invariant limits.
+        os.environ["REPLAY_RELAX_ORDER_RATE_LIMITER"] = "1"
 
         # Isolate instrument spec cache so replay never overwrites the live bot's cache
         import tempfile
@@ -277,6 +338,41 @@ class BacktestRunner:
         config.system.dry_run = False  # We want the exchange sim to receive orders
         config.exchange.spot_markets = self._symbols
         config.exchange.futures_markets = self._symbols
+        # Keep replay scope bounded to requested symbols only.
+        config.exchange.use_market_discovery = False
+        if hasattr(config, "coin_universe") and config.coin_universe:
+            config.coin_universe.enabled = False
+        if hasattr(config, "assets") and config.assets:
+            config.assets.mode = "whitelist"
+            config.assets.whitelist = list(self._symbols)
+        if hasattr(config, "data") and config.data:
+            config.data.min_healthy_coins = min(1, len(self._symbols))
+            if hasattr(config.data, "data_sanity") and config.data.data_sanity:
+                config.data.data_sanity.allow_spot_fallback = True
+                config.data.data_sanity.min_decision_tf_candles = 1
+                config.data.data_sanity.min_volume_24h_usd = 0
+                config.data.data_sanity.max_spread_pct = 1.0
+        if (
+            os.getenv("REPLAY_RELAX_MIN_SCORES", "1") == "1"
+            and hasattr(config, "strategy")
+            and config.strategy
+        ):
+            config.strategy.min_score_tight_smc_aligned = min(
+                float(getattr(config.strategy, "min_score_tight_smc_aligned", 75.0) or 75.0),
+                55.0,
+            )
+            config.strategy.min_score_tight_smc_neutral = min(
+                float(getattr(config.strategy, "min_score_tight_smc_neutral", 80.0) or 80.0),
+                60.0,
+            )
+            config.strategy.min_score_wide_structure_aligned = min(
+                float(getattr(config.strategy, "min_score_wide_structure_aligned", 70.0) or 70.0),
+                55.0,
+            )
+            config.strategy.min_score_wide_structure_neutral = min(
+                float(getattr(config.strategy, "min_score_wide_structure_neutral", 75.0) or 75.0),
+                60.0,
+            )
 
         # Build LiveTrading with our replay client injected at construction time.
         # The key is making KrakenClient(...) return self._exchange so every
@@ -307,6 +403,10 @@ class BacktestRunner:
             lt.futures_adapter.client = self._exchange
         if hasattr(lt, "candle_manager"):
             lt.candle_manager.client = self._exchange
+        # Replay should not stall on live candle-health entry gate.
+        lt._replay_disable_candle_health_gate = True
+        # Replay research should bypass strict live gating for signal discovery.
+        lt._replay_relaxed_signal_gates = True
 
         # Advance startup state machine to READY so _tick() is allowed.
         # In real production, LiveTrading.run() goes through SYNCING →

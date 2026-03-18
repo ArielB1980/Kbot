@@ -30,6 +30,11 @@ class ResearchStateStore:
                     "phase": "idle",
                     "iteration": 0,
                     "total_iterations": 0,
+                    "current_symbol": None,
+                    "total_symbols": 0,
+                    "completed_symbols": [],
+                    "symbol_progress": {},
+                    "symbol_best_candidates": {},
                     "best_candidate_id": None,
                     "leaderboard": [],
                     "control": {"paused": False, "stop_requested": False},
@@ -57,6 +62,28 @@ class ResearchStateStore:
         """Merge top-level keys and persist."""
         state = self.read_state()
         state.update(patch)
+        self.write_state(state)
+        return state
+
+    def update_symbol_progress(
+        self,
+        *,
+        symbol: str,
+        iteration: int,
+        total_iterations: int,
+        best_candidate_id: str | None,
+        phase: str = "running",
+    ) -> dict[str, Any]:
+        """Update progress payload for one symbol."""
+        state = self.read_state()
+        symbol_progress = dict(state.get("symbol_progress") or {})
+        symbol_progress[symbol] = {
+            "iteration": int(iteration),
+            "total_iterations": int(total_iterations),
+            "best_candidate_id": best_candidate_id,
+            "phase": phase,
+        }
+        state["symbol_progress"] = symbol_progress
         self.write_state(state)
         return state
 

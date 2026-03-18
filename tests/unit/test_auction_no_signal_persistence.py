@@ -249,6 +249,32 @@ def test_portfolio_state_min_hold_override_locks_recent_positions():
     assert plan.opens == []
 
 
+def test_high_conviction_min_hold_override_locks_recent_positions():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),
+        swap_threshold=10.0,
+        min_hold_minutes=45,
+    )
+    open_position = _make_open(score=60.0)
+    open_position.age_seconds = 70 * 60  # Older than base hold, younger than high-conviction hold.
+    open_position.conviction = 63.0
+    candidate = _make_candidate(score=90.0)
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[candidate],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "auction_min_hold_high_conviction_minutes": 120,
+            "auction_min_hold_high_conviction_threshold": 50.0,
+        },
+    )
+
+    assert plan.closes == []
+    assert plan.opens == []
+
+
 def test_chop_min_hold_applies_only_to_active_symbols():
     allocator = AuctionAllocator(
         limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),

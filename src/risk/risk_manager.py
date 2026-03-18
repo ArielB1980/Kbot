@@ -6,9 +6,10 @@ from typing import List, Optional, TYPE_CHECKING
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
+import os
 
 from src.domain.models import Signal, RiskDecision, Position, Side
-from src.config.config import RiskConfig, TierConfig, LiquidityFilters
+from src.config.config import LiquidityFilters, RiskConfig, TierConfig, resolve_risk_for_symbol
 from src.monitoring.logger import get_logger
 from src.domain.protocols import EventRecorder, _noop_event_recorder
 from src.risk.basis_guard import BasisGuard
@@ -63,6 +64,7 @@ class RiskManager:
         self.config = config
         self.liquidity_filters = liquidity_filters
         self._record_event = event_recorder
+        self._base_config = config
         
         # Portfolio state tracking
         self.current_positions: List[Position] = []
@@ -115,8 +117,8 @@ class RiskManager:
         Returns:
             RiskDecision with approval status and details
         """
+        self.config = resolve_risk_for_symbol(self._base_config, signal.symbol)
         rejection_reasons = []
-
         # Calculate position size using FUTURES prices if available (more accurate)
         # Otherwise fall back to spot prices
         if futures_entry_price and futures_stop_loss:
@@ -758,6 +760,15 @@ class RiskManager:
                 rr_multiple = tp_distance / stop_distance if stop_distance > 0 else Decimal("0")
                 
                 min_rr = Decimal(str(self.config.tight_smc_min_rr_multiple))
+                replay_rr_override = os.getenv("REPLAY_OVERRIDE_TIGHT_SMC_MIN_RR")
+                if replay_rr_override is not None and replay_rr_override.strip():
+                    try:
+                        min_rr = Decimal(str(replay_rr_override))
+                    except Exception:
+                        logger.warning(
+                            "Invalid REPLAY_OVERRIDE_TIGHT_SMC_MIN_RR",
+                            value=replay_rr_override,
+                        )
                 if rr_multiple < min_rr:
                     rejection_reasons.append(
                         f"R:R multiple {rr_multiple:.1f} < minimum {min_rr:.1f} for tight-stop SMC"

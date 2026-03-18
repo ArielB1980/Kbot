@@ -27,6 +27,7 @@ class CandidateResult:
     """Result payload for one evaluated candidate."""
 
     candidate_id: str
+    symbol: str | None
     params: dict[str, float]
     metrics: CandidateMetrics
     score: float

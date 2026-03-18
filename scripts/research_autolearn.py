@@ -1,0 +1,240 @@
+"""Lightweight closed-loop learner for continuous research cycles.
+
+This script analyzes one completed research cycle and writes:
+1) append-only lessons JSONL
+2) next-cycle override env file consumed by research_continuous.sh
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+@dataclass
+class RunSnapshot:
+    run_id: str
+    phase: str
+    completed: int
+    total_symbols: int
+    eligible: int
+    skipped: int
+    baseline_best: int
+    nonbaseline_best: int
+    skipped_insufficient_signal: int
+    skipped_uninformative_surface: int
+    replay_timeout_mentions: int
+    paused_health_mentions: int
+    fib_gate_reject_mentions: int
+    score_gate_reject_mentions: int
+    dedupe_suppressed_mentions: int
+    conviction_gate_block_mentions: int
+    thesis_reentry_block_mentions: int
+    rr_multiple_reject_mentions: int
+    opens_planned_mentions: int
+    opens_executed_mentions: int
+    top_trade_symbols: list[str]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return _read_json(path)
+
+
+def _count_log_mentions(path: Path, needle: str) -> int:
+    if not path.exists():
+        return 0
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if needle in line:
+                count += 1
+    return count
+
+
+def _count_log_regex(path: Path, pattern: str) -> int:
+    if not path.exists():
+        return 0
+    rx = re.compile(pattern)
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if rx.search(line):
+                count += 1
+    return count
+
+
+def _best_by_symbol_file(artifacts_dir: Path) -> Path | None:
+    files = sorted(artifacts_dir.glob("*_best_by_symbol.json"))
+    return files[-1] if files else None
+
+
+def _extract_snapshot(run_id: str, state: dict[str, Any], artifacts_dir: Path, run_log: Path) -> RunSnapshot:
+    symbol_best = state.get("symbol_best_candidates") or {}
+    baseline_best = sum(1 for cid in symbol_best.values() if str(cid).endswith("_baseline"))
+    nonbaseline_best = len(symbol_best) - baseline_best
+
+    progress = state.get("symbol_progress") or {}
+    skipped_insufficient_signal = sum(
+        1 for v in progress.values() if str((v or {}).get("phase")) == "skipped_insufficient_signal"
+    )
+    skipped_uninformative_surface = sum(
+        1 for v in progress.values() if str((v or {}).get("phase")) == "skipped_uninformative_surface"
+    )
+
+    top_trade_symbols: list[str] = []
+    best_file = _best_by_symbol_file(artifacts_dir)
+    if best_file:
+        payload = _read_json(best_file)
+        best_map = payload.get("best_by_symbol") or {}
+        rows: list[tuple[str, int]] = []
+        for symbol, data in best_map.items():
+            trade_count = int(((data or {}).get("metrics") or {}).get("trade_count") or 0)
+            if trade_count > 0:
+                rows.append((symbol, trade_count))
+        rows.sort(key=lambda x: x[1], reverse=True)
+        top_trade_symbols = [s for s, _ in rows[:20]]
+
+    return RunSnapshot(
+        run_id=run_id,
+        phase=str(state.get("phase") or "unknown"),
+        completed=len(state.get("completed_symbols") or []),
+        total_symbols=int(state.get("total_symbols") or 0),
+        eligible=len(state.get("eligible_symbols") or []),
+        skipped=len(state.get("skipped_ineligible_symbols") or {}),
+        baseline_best=baseline_best,
+        nonbaseline_best=nonbaseline_best,
+        skipped_insufficient_signal=skipped_insufficient_signal,
+        skipped_uninformative_surface=skipped_uninformative_surface,
+        replay_timeout_mentions=_count_log_mentions(run_log, "replay_timeout_no_progress"),
+        paused_health_mentions=_count_log_mentions(run_log, "TRADING PAUSED: candle health insufficient"),
+        fib_gate_reject_mentions=_count_log_mentions(run_log, "gate=fib_gate_reject"),
+        score_gate_reject_mentions=_count_log_mentions(run_log, "gate=score_gate_reject"),
+        dedupe_suppressed_mentions=_count_log_mentions(run_log, "Duplicate structure suppressed"),
+        conviction_gate_block_mentions=_count_log_mentions(run_log, "Entry blocked by thesis conviction gate"),
+        thesis_reentry_block_mentions=_count_log_mentions(run_log, "Thesis re-entry blocked"),
+        rr_multiple_reject_mentions=_count_log_mentions(run_log, "R:R multiple"),
+        opens_planned_mentions=_count_log_regex(run_log, r"auction_opens_planned=[1-9]"),
+        opens_executed_mentions=_count_log_regex(run_log, r"auction_opens_executed=[1-9]"),
+        top_trade_symbols=top_trade_symbols,
+    )
+
+
+def _build_overrides(snapshot: RunSnapshot) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    # Frontier profile learned from replay blocker ladder.
+    # Exploration lane keeps weekly-zone gate ablated to avoid
+    # flat/no-trade cycles while searching the parameter surface.
+    overrides["REPLAY_ABLATE_DISABLE_WEEKLY_ZONE"] = "1"
+    overrides["REPLAY_OVERRIDE_ADX_THRESHOLD"] = "12"
+    overrides["REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD"] = "45"
+    overrides["REPLAY_OVERRIDE_FIB_PROXIMITY_BPS"] = "80"
+    overrides["REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES"] = "0"
+    overrides["REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY"] = "25"
+    overrides["REPLAY_OVERRIDE_TIGHT_SMC_MIN_RR"] = "1.5"
+    overrides["REPLAY_OVERRIDE_THESIS_REENTRY_BLOCK_THRESHOLD"] = "10"
+    # Keep optimization lane focused when we have trade-active symbols.
+    if len(snapshot.top_trade_symbols) >= 10:
+        overrides["SYMBOLS_FROM_LIVE_UNIVERSE"] = "0"
+        overrides["SYMBOLS"] = ",".join(snapshot.top_trade_symbols)
+
+    # If still all baseline, increase exploration budget further.
+    if snapshot.completed > 0 and snapshot.nonbaseline_best == 0:
+        overrides["MAX_ITERS_PER_SYMBOL"] = "160"
+        overrides["MAX_STAGNANT_ITERS"] = "24"
+
+    # If frequent insufficient-signal skips, use deep lookback.
+    if snapshot.skipped_insufficient_signal > 0:
+        overrides["DAYS"] = "120"
+
+    # Keep replay horizons aligned with strategy decision regime.
+    if snapshot.paused_health_mentions > 0:
+        overrides["REPLAY_TIMEFRAMES"] = "15m,1h,4h,1d"
+
+    # Blocker-directed relaxations: only when specific blockers dominate.
+    if snapshot.fib_gate_reject_mentions > 100:
+        overrides["REPLAY_OVERRIDE_FIB_PROXIMITY_BPS"] = "80"
+    if snapshot.conviction_gate_block_mentions > 100:
+        overrides["REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY"] = "20"
+    if snapshot.thesis_reentry_block_mentions > 100:
+        overrides["REPLAY_OVERRIDE_THESIS_REENTRY_BLOCK_THRESHOLD"] = "0"
+    if snapshot.rr_multiple_reject_mentions > 0:
+        overrides["REPLAY_OVERRIDE_TIGHT_SMC_MIN_RR"] = "1.3"
+    if snapshot.dedupe_suppressed_mentions > 100:
+        overrides["REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES"] = "0"
+
+    # Opportunistic tightening when execution is healthy and blockers are absent.
+    if (
+        snapshot.opens_executed_mentions >= max(5, snapshot.completed)
+        and snapshot.fib_gate_reject_mentions == 0
+        and snapshot.score_gate_reject_mentions == 0
+        and snapshot.conviction_gate_block_mentions == 0
+        and snapshot.thesis_reentry_block_mentions == 0
+        and snapshot.rr_multiple_reject_mentions == 0
+    ):
+        overrides["REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD"] = "47"
+        overrides["REPLAY_OVERRIDE_FIB_PROXIMITY_BPS"] = "80"
+
+    return overrides
+
+
+def _write_lessons(lessons_file: Path, snapshot: RunSnapshot, overrides: dict[str, str]) -> None:
+    lessons_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "run": asdict(snapshot),
+        "overrides_selected": overrides,
+    }
+    with lessons_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _write_overrides(overrides_file: Path, overrides: dict[str, str]) -> None:
+    overrides_file.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Auto-generated by scripts/research_autolearn.py",
+        "# Format: shell variable assignments consumed by research_continuous.sh",
+    ]
+    for key, value in sorted(overrides.items()):
+        lines.append(f"{key}={value}")
+    overrides_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Analyze one research cycle and generate next-cycle overrides.")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--state-file", required=True)
+    parser.add_argument("--artifacts-dir", required=True)
+    parser.add_argument("--run-log", required=True)
+    parser.add_argument("--lessons-file", required=True)
+    parser.add_argument("--overrides-file", required=True)
+    args = parser.parse_args()
+
+    state = _read_state(Path(args.state_file))
+    if not state:
+        return
+
+    snapshot = _extract_snapshot(
+        run_id=args.run_id,
+        state=state,
+        artifacts_dir=Path(args.artifacts_dir),
+        run_log=Path(args.run_log),
+    )
+    overrides = _build_overrides(snapshot)
+    _write_lessons(Path(args.lessons_file), snapshot, overrides)
+    _write_overrides(Path(args.overrides_file), overrides)
+
+
+if __name__ == "__main__":
+    main()
+

@@ -7,6 +7,7 @@ Used for dashboard display and future trade selection optimization.
 from typing import Dict, Optional, Tuple
 from decimal import Decimal
 from dataclasses import dataclass
+import os
 
 from src.domain.models import Signal, SignalType
 from src.strategy.fibonacci_engine import FibonacciLevels
@@ -141,6 +142,17 @@ class SignalScorer:
                 threshold = self.config.min_score_wide_structure_aligned
             else:
                 threshold = self.config.min_score_wide_structure_neutral
+
+        if os.getenv("REPLAY_ABLATE_DISABLE_SCORE_GATE", "0") == "1":
+            logger.info("Ablation: bypassing score gate in replay", score=score, threshold=threshold)
+            return True, float(threshold)
+
+        override = os.getenv("REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD")
+        if override is not None and override.strip():
+            try:
+                threshold = float(override)
+            except ValueError:
+                logger.warning("Invalid REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD", value=override)
         
         return score >= threshold, threshold
 

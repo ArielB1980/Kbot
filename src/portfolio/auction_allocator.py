@@ -37,6 +37,7 @@ class OpenPositionMetadata:
     is_protective_orders_live: bool
     locked: bool = False  # Cannot be kicked (within MIN_HOLD, protective orders not live, etc.)
     spot_symbol: Optional[str] = None  # Spot symbol for matching against candidate signals
+    conviction: Optional[float] = None  # Optional thesis conviction for dynamic hold controls
 
 
 @dataclass
@@ -487,6 +488,20 @@ class AuctionAllocator:
             0,
         )
         chop_min_hold_seconds = chop_min_hold_minutes * 60
+        high_conviction_threshold = float(
+            portfolio_state.get("auction_min_hold_high_conviction_threshold", 50.0) or 50.0
+        )
+        high_conviction_min_hold_minutes = max(
+            int(
+                portfolio_state.get(
+                    "auction_min_hold_high_conviction_minutes",
+                    int(self.min_hold_seconds / 60),
+                )
+                or int(self.min_hold_seconds / 60)
+            ),
+            0,
+        )
+        high_conviction_min_hold_seconds = high_conviction_min_hold_minutes * 60
         
         # Add open positions
         now = datetime.now(timezone.utc)
@@ -500,6 +515,14 @@ class AuctionAllocator:
                 if contender_normalized in chop_active_symbols
                 else self.min_hold_seconds
             )
+            if (
+                op_meta.conviction is not None
+                and float(op_meta.conviction) >= high_conviction_threshold
+            ):
+                min_hold_seconds_effective = max(
+                    min_hold_seconds_effective,
+                    high_conviction_min_hold_seconds,
+                )
             # Mark as locked if within MIN_HOLD, protective orders not live, or UNPROTECTED
             is_unprotected = not getattr(op_meta.position, 'is_protected', True)
             locked = (

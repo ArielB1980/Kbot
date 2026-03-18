@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Callable, Optional, Dict, List, Callable, Awaitable
 from datetime import datetime, timezone
 import asyncio
+import os
 import time
 
 from src.execution.position_state_machine import (
@@ -247,9 +248,16 @@ class ExecutionGateway:
         }
 
         # P0.2: Global order rate limiter — prevents runaway loops
+        max_per_minute = 60
+        max_per_10s = 10
+        # Replay research can emit clustered synthetic orders in tight loops;
+        # keep invariant checks, but widen limits to avoid false runaway trips.
+        if os.getenv("REPLAY_RELAX_ORDER_RATE_LIMITER", "0") == "1":
+            max_per_minute = 600
+            max_per_10s = 120
         self._order_rate_limiter = _OrderRateLimiter(
-            max_per_minute=60,
-            max_per_10s=10,
+            max_per_minute=max_per_minute,
+            max_per_10s=max_per_10s,
         )
 
         # Fee config for trade recorder (bps → fraction, set at construction)
@@ -559,13 +567,27 @@ class ExecutionGateway:
         # Submit to exchange (use futures symbol; action.symbol is spot)
         try:
             order_side = "buy" if action.side == Side.LONG else "sell"
+            order_type_for_submit = action.order_type.value
+            price_for_submit = (
+                float(action.price)
+                if action.price and action.order_type == OrderType.LIMIT
+                else None
+            )
+            if os.getenv("REPLAY_FORCE_MARKET_ENTRY", "0") == "1":
+                order_type_for_submit = "market"
+                price_for_submit = None
+                logger.info(
+                    "Replay override: forcing market entry order type",
+                    symbol=exchange_symbol,
+                    original_order_type=action.order_type.value,
+                )
 
             result = await self.client.create_order(
                 symbol=exchange_symbol,
-                type=action.order_type.value,
+                type=order_type_for_submit,
                 side=order_side,
                 amount=float(action.size),
-                price=float(action.price) if action.price and action.order_type == OrderType.LIMIT else None,
+                price=price_for_submit,
                 params={"clientOrderId": action.client_order_id},
                 leverage=action.leverage,
             )
@@ -590,6 +612,33 @@ class ExecutionGateway:
                 exchange_order_id=exchange_order_id
             )
             self._wal_mark_sent(action.client_order_id, exchange_order_id)
+
+            # Replay exchange can return immediately filled market orders.
+            # Process that snapshot now so state machine transitions happen
+            # before the next reconcile pass.
+            status = str(result.get("status", "")).lower()
+            filled_now = Decimal(str(result.get("filled", 0) or 0))
+            replay_force_market = os.getenv("REPLAY_FORCE_MARKET_ENTRY", "0") == "1"
+            if replay_force_market and status in {"open", "submitted"} and filled_now <= 0:
+                # Replay fail-open: treat forced market entry as filled to avoid
+                # permanent pending-position churn when simulator order snapshots
+                # lag the immediate fill path.
+                result["status"] = "filled"
+                result["filled"] = float(action.size)
+                result["remaining"] = 0.0
+                if result.get("average") in (None, 0, 0.0):
+                    result["average"] = float(action.price) if action.price else 0.0
+                status = "filled"
+                filled_now = Decimal(str(result.get("filled", 0) or 0))
+                logger.warning(
+                    "Replay fail-open: synthesizing immediate fill for forced market entry",
+                    symbol=exchange_symbol,
+                    client_order_id=action.client_order_id,
+                )
+            if status in {"filled", "closed"} or filled_now > 0:
+                if not result.get("clientOrderId"):
+                    result["clientOrderId"] = action.client_order_id
+                await self.process_order_update(result)
             
             # Log action to persistence
             self.persistence.log_action(
@@ -1573,7 +1622,7 @@ class ExecutionGateway:
             )
             fill_delta = filled
         
-        if status == "closed" and filled > 0:
+        if status in {"closed", "filled"} and filled > 0:
             if fill_delta <= 0:
                 pending.status = "filled"
                 return []

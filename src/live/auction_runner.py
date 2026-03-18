@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _should_emit_replay_tick_log(lt: "LiveTrading", *, force: bool = False, every_cycles: int = 100) -> bool:
+    """Reduce per-tick auction log volume in replay research mode."""
+    if not bool(getattr(lt, "_replay_disable_candle_health_gate", False)):
+        return True
+    if force:
+        return True
+    cycle_num = int(
+        getattr(lt, "_last_cycle_count", 0)
+        or getattr(lt, "_tick_counter", 0)
+        or 0
+    )
+    # Emit early lifecycle logs and periodic checkpoints only.
+    return cycle_num <= 3 or (cycle_num % max(1, every_cycles) == 0)
+
+
 def _is_qty_synced_dust(issue_text: str) -> bool:
     """
     Treat tiny QTY_SYNCED residuals as non-blocking dust.
@@ -335,6 +350,16 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
         equity, available_margin, _ = await calculate_effective_equity(
             balance, base_currency=base, kraken_client=lt.client
         )
+        if (
+            getattr(lt, "_replay_relaxed_signal_gates", False)
+            and Decimal(str(equity or 0)) <= 0
+        ):
+            replay_equity = Decimal(
+                str(getattr(getattr(lt.config, "backtest", None), "starting_equity", Decimal("10000")))
+            )
+            equity = replay_equity
+            if Decimal(str(available_margin or 0)) <= 0:
+                available_margin = replay_equity
 
         # Build spot-to-futures mapping for symbol matching
         spot_to_futures_map: Dict[str, str] = {}
@@ -402,6 +427,24 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                     if base_sym:
                         spot_symbol = f"{base_sym}/USD"
                 meta.spot_symbol = spot_symbol
+                meta.conviction = None
+                if (
+                    spot_symbol
+                    and getattr(lt, "institutional_memory_manager", None)
+                    and lt.institutional_memory_manager.is_enabled_for_symbol(spot_symbol)
+                ):
+                    thesis_snapshot = lt.institutional_memory_manager.get_latest_thesis(
+                        spot_symbol
+                    )
+                    if thesis_snapshot is not None:
+                        conviction_val = getattr(
+                            thesis_snapshot, "current_conviction", None
+                        )
+                        if conviction_val is not None:
+                            try:
+                                meta.conviction = float(conviction_val)
+                            except (TypeError, ValueError):
+                                meta.conviction = None
                 open_positions_meta.append(meta)
             except (ValueError, TypeError, KeyError) as e:
                 logger.error(
@@ -434,7 +477,8 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             )
 
         signals_count = len(lt.auction_signals_this_tick)
-        logger.info("Auction: Collecting candidate signals", signals_count=signals_count, pre_filtered=filtered_out)
+        if _should_emit_replay_tick_log(lt):
+            logger.info("Auction: Collecting candidate signals", signals_count=signals_count, pre_filtered=filtered_out)
         signals_after_cooldown = 0
         risk_approved_count = 0
         risk_rejected_count = 0
@@ -520,15 +564,22 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                 )
                 spec = lt.instrument_spec_registry.get_spec(futures_symbol)
                 if not spec:
-                    funnel_rejections["NO_SPEC"] += 1
-                    logger.warning(
-                        "AUCTION_OPEN_REJECTED",
-                        symbol=signal.symbol,
-                        reason="NO_SPEC",
-                        requested_leverage=requested_leverage,
-                        spec_summary=None,
-                    )
-                    continue
+                    if getattr(lt, "_replay_relaxed_signal_gates", False):
+                        logger.info(
+                            "Ablation: bypassing NO_SPEC in replay",
+                            symbol=signal.symbol,
+                            futures_symbol=futures_symbol,
+                        )
+                    else:
+                        funnel_rejections["NO_SPEC"] += 1
+                        logger.warning(
+                            "AUCTION_OPEN_REJECTED",
+                            symbol=signal.symbol,
+                            reason="NO_SPEC",
+                            requested_leverage=requested_leverage,
+                            spec_summary=None,
+                        )
+                        continue
 
                 symbol_tier = (
                     lt.market_discovery.get_symbol_tier(signal.symbol)
@@ -619,11 +670,12 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             lt._auction_no_signal_cycles = 0
         else:
             lt._auction_no_signal_cycles = int(getattr(lt, "_auction_no_signal_cycles", 0) or 0) + 1
-        logger.info(
-            "Auction no-signal cycle state updated",
-            no_signal_cycles=lt._auction_no_signal_cycles,
-            candidate_count=len(candidate_signals),
-        )
+        if _should_emit_replay_tick_log(lt):
+            logger.info(
+                "Auction no-signal cycle state updated",
+                no_signal_cycles=lt._auction_no_signal_cycles,
+                candidate_count=len(candidate_signals),
+            )
 
         unique_scanned_symbols = {
             _normalize_symbol_key(sig.symbol) for sig, _, _ in lt.auction_signals_this_tick
@@ -641,6 +693,13 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
         )
         base_swap_threshold = float(getattr(lt.config.risk, "auction_swap_threshold", 10.0) or 10.0)
         base_min_hold_minutes = int(getattr(lt.config.risk, "auction_min_hold_minutes", 15) or 15)
+        high_conviction_min_hold_minutes = int(
+            getattr(lt.config.risk, "auction_min_hold_high_conviction_minutes", base_min_hold_minutes)
+            or base_min_hold_minutes
+        )
+        high_conviction_threshold = float(
+            getattr(lt.config.risk, "auction_min_hold_high_conviction_threshold", 50.0) or 50.0
+        )
         base_max_new_opens = int(getattr(lt.config.risk, "auction_max_new_opens_per_cycle", 1) or 1)
         base_no_signal_cycles = int(
             getattr(lt.config.risk, "auction_no_signal_close_persistence_cycles", 3) or 3
@@ -709,6 +768,8 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             "auction_chop_min_hold_minutes": chop_min_hold_minutes,
             "auction_swap_threshold": chop_swap_threshold if (chop_policy_active and not chop_telemetry_only) else base_swap_threshold,
             "auction_min_hold_minutes": base_min_hold_minutes,
+            "auction_min_hold_high_conviction_minutes": high_conviction_min_hold_minutes,
+            "auction_min_hold_high_conviction_threshold": high_conviction_threshold,
             "auction_max_new_opens_per_cycle": (
                 chop_max_new_opens
                 if (chop_policy_active and not chop_telemetry_only and not canary_scoped_mode)
@@ -725,40 +786,43 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             portfolio_state=portfolio_state,
         )
 
-        logger.info(
-            "Auction plan generated",
-            closes_count=len(plan.closes),
-            closes_symbols=plan.closes,
-            opens_count=len(plan.opens),
-            opens_symbols=[s.symbol for s in plan.opens],
-            reductions_count=len(plan.reductions),
-            reductions=[(sym, str(qty)) for sym, qty in plan.reductions],
-            reasons=plan.reasons,
-        )
+        has_activity = bool(plan.closes or plan.opens or plan.reductions)
+        if _should_emit_replay_tick_log(lt, force=has_activity):
+            logger.info(
+                "Auction plan generated",
+                closes_count=len(plan.closes),
+                closes_symbols=plan.closes,
+                opens_count=len(plan.opens),
+                opens_symbols=[s.symbol for s in plan.opens],
+                reductions_count=len(plan.reductions),
+                reductions=[(sym, str(qty)) for sym, qty in plan.reductions],
+                reasons=plan.reasons,
+            )
         _, policy_hash = build_policy_hash(lt.config)
-        logger.info(
-            "AUCTION_CHOP_SUMMARY",
-            policy_hash=policy_hash,
-            global_chop=global_chop,
-            chop_guard_enabled=chop_guard_enabled,
-            chop_telemetry_only=chop_telemetry_only,
-            chop_canary_mode=canary_scoped_mode,
-            chop_canary_symbols=sorted(list(canary_set))[:10] if canary_set else None,
-            chop_signals=chop_signals,
-            unique_symbols=len(unique_scanned_symbols),
-            choppy_symbols=len(choppy_symbols),
-            active_chop_symbols=len(chop_active_symbols),
-            chop_symbol_ratio=round(chop_symbol_ratio, 3),
-            cycle_score_std=round(cycle_score_std, 3),
-            quick_reversal=int(quick_reversal_metrics.get("quick_reversal", 0) or 0),
-            opposite_reentry_fast=int(quick_reversal_metrics.get("opposite_reentry_fast", 0) or 0),
-            quick_profit_close=int(quick_reversal_metrics.get("quick_profit_close", 0) or 0),
-            quick_loss_close=int(quick_reversal_metrics.get("quick_loss_close", 0) or 0),
-            would_block_replace=would_block_replace,
-            would_block_close_no_signal=int(
-                (plan.reasons or {}).get("hysteresis_close_suppressed_no_signal", 0) or 0
-            ),
-        )
+        if _should_emit_replay_tick_log(lt, force=has_activity):
+            logger.info(
+                "AUCTION_CHOP_SUMMARY",
+                policy_hash=policy_hash,
+                global_chop=global_chop,
+                chop_guard_enabled=chop_guard_enabled,
+                chop_telemetry_only=chop_telemetry_only,
+                chop_canary_mode=canary_scoped_mode,
+                chop_canary_symbols=sorted(list(canary_set))[:10] if canary_set else None,
+                chop_signals=chop_signals,
+                unique_symbols=len(unique_scanned_symbols),
+                choppy_symbols=len(choppy_symbols),
+                active_chop_symbols=len(chop_active_symbols),
+                chop_symbol_ratio=round(chop_symbol_ratio, 3),
+                cycle_score_std=round(cycle_score_std, 3),
+                quick_reversal=int(quick_reversal_metrics.get("quick_reversal", 0) or 0),
+                opposite_reentry_fast=int(quick_reversal_metrics.get("opposite_reentry_fast", 0) or 0),
+                quick_profit_close=int(quick_reversal_metrics.get("quick_profit_close", 0) or 0),
+                quick_loss_close=int(quick_reversal_metrics.get("quick_loss_close", 0) or 0),
+                would_block_replace=would_block_replace,
+                would_block_close_no_signal=int(
+                    (plan.reasons or {}).get("hysteresis_close_suppressed_no_signal", 0) or 0
+                ),
+            )
 
         # Record auction wins for churn tracking
         now_utc = datetime.now(timezone.utc)
@@ -1007,6 +1071,16 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             equity_after, refreshed_available_margin, _ = await calculate_effective_equity(
                 balance_after_actions, base_currency=base, kraken_client=lt.client
             )
+            if (
+                getattr(lt, "_replay_relaxed_signal_gates", False)
+                and Decimal(str(equity_after or 0)) <= 0
+            ):
+                replay_equity = Decimal(
+                    str(getattr(getattr(lt.config, "backtest", None), "starting_equity", Decimal("10000")))
+                )
+                equity_after = replay_equity
+                if Decimal(str(refreshed_available_margin or 0)) <= 0:
+                    refreshed_available_margin = replay_equity
             fresh_snapshot_ok = True
             logger.info(
                 "Auction: Margin refreshed after management actions",
@@ -1037,6 +1111,13 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             open_gate_reason = "FRESH_SNAPSHOT_UNAVAILABLE"
         elif reconcile_blocking_issues:
             open_gate_reason = "RECONCILE_BLOCKING_ISSUES"
+        if open_gate_reason and getattr(lt, "_replay_relaxed_signal_gates", False):
+            logger.warning(
+                "Replay relaxed gate: bypassing pre-open gate",
+                blocked_reason=open_gate_reason,
+                planned_opens=len(plan.opens),
+            )
+            open_gate_reason = None
         if open_gate_reason:
             logger.warning(
                 "Auction opens suppressed by pre-open gate",
@@ -1185,18 +1266,20 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                     exc_info=True,
                 )
 
-        logger.info(
-            "Auction allocation executed",
-            closes=closes_executed_count,
-            reductions_planned=len(plan.reductions),
-            reductions_executed=reductions_executed,
-            reductions_failed=reductions_failed,
-            opens_planned=len(plan.opens),
-            opens_executed=opens_executed,
-            opens_failed=opens_failed,
-            rejection_counts=rejection_counts if rejection_counts else None,
-            reasons=plan.reasons,
-        )
+        activity_executed = bool(opens_executed or closes_executed_count or reductions_executed)
+        if _should_emit_replay_tick_log(lt, force=has_activity or activity_executed):
+            logger.info(
+                "Auction allocation executed",
+                closes=closes_executed_count,
+                reductions_planned=len(plan.reductions),
+                reductions_executed=reductions_executed,
+                reductions_failed=reductions_failed,
+                opens_planned=len(plan.opens),
+                opens_executed=opens_executed,
+                opens_failed=opens_failed,
+                rejection_counts=rejection_counts if rejection_counts else None,
+                reasons=plan.reasons,
+            )
         cycle_num = int(getattr(lt, "_last_cycle_count", 0) or 0)
         analysis_funnel = getattr(lt, "_analysis_funnel_metrics", {}) or {}
         funnel_payload = {
@@ -1246,7 +1329,8 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             "rejection_buckets": dict(funnel_rejections) if funnel_rejections else None,
             "policy_hash": policy_hash,
         }
-        logger.info("ENTRY_FUNNEL_SUMMARY", **funnel_payload)
+        if _should_emit_replay_tick_log(lt, force=has_activity or activity_executed):
+            logger.info("ENTRY_FUNNEL_SUMMARY", **funnel_payload)
         if opens_executed > 0 or closes_executed_count > 0 or reductions_executed > 0:
             lt._reconcile_requested = True
 
