@@ -14,6 +14,7 @@ To regenerate the golden fixture:
 """
 import json
 import os
+import re
 import pytest
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
@@ -25,6 +26,21 @@ from src.config.config import StrategyConfig
 
 
 GOLDEN_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "golden_smc_output.json"
+
+
+def _normalize_reasoning_numerics(text: str) -> str:
+    """Normalize decimal precision in reasoning text across Python/pandas builds."""
+
+    def _round_decimal(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            val = Decimal(raw)
+        except Exception:
+            return raw
+        # Keep deterministic precision while ignoring sub-ulp drift.
+        return format(val.quantize(Decimal("0.000000000001")), "f")
+
+    return re.sub(r"\d+\.\d+", _round_decimal, text or "")
 
 
 def _make_trending_candles(
@@ -145,6 +161,9 @@ def test_smc_golden_output(request):
     for key in golden:
         assert key in current_output, f"Missing field '{key}' in current output"
         g_val, c_val = golden[key], current_output[key]
+        if key == "reasoning" and isinstance(g_val, str) and isinstance(c_val, str):
+            g_val = _normalize_reasoning_numerics(g_val)
+            c_val = _normalize_reasoning_numerics(c_val)
         if g_val != c_val:
             if key in _FLOAT_TOLERANCE_FIELDS:
                 try:

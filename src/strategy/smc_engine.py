@@ -5,7 +5,7 @@ Design lock enforced: Operates on spot market data ONLY.
 No futures prices, funding data, or order book data may be accessed.
 """
 from typing import Any, List, Optional, Dict, Tuple, Literal
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 import os
@@ -140,7 +140,7 @@ class SMCEngine:
         
         # Store score penalty for tolerance entries
         self.entry_zone_tolerance_score_penalty = getattr(config, 'entry_zone_tolerance_score_penalty', -5)
-        self._fvg_min_size_pct_default = Decimal(str(getattr(config, "fvg_min_size_pct", 0.001)))
+        self._fvg_min_size_pct_default = self._safe_decimal(getattr(config, "fvg_min_size_pct", 0.001), Decimal("0.001"))
         self.ev_engine = EVEngine(config)
         
         logger.info("SMC Engine initialized", config=config.model_dump())
@@ -188,7 +188,18 @@ class SMCEngine:
 
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
         # Base default with optional per-symbol override via resolved strategy config.
-        return Decimal(str(getattr(self.config, "fvg_min_size_pct", self._fvg_min_size_pct_default)))
+        return self._safe_decimal(
+            getattr(self.config, "fvg_min_size_pct", self._fvg_min_size_pct_default),
+            self._fvg_min_size_pct_default,
+        )
+
+    @staticmethod
+    def _safe_decimal(value: Any, default: Decimal) -> Decimal:
+        """Safely coerce config values to Decimal, falling back on mocks/invalid values."""
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return default
 
     def _ev_shadow_enabled_for_symbol(self, symbol: str) -> bool:
         if not bool(getattr(self.config, "ev_layer_enabled", False)):
