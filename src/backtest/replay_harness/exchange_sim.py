@@ -246,9 +246,8 @@ class ReplayKrakenClient:
         raw = str(symbol or "").strip()
         if not raw:
             return raw
-        cached = self._symbol_resolution_cache.get(raw)
-        if cached:
-            return cached
+        if raw in self._symbol_resolution_cache:
+            return self._symbol_resolution_cache[raw]
 
         available = set(self._data.get_all_symbols())
         candidates: list[str] = []

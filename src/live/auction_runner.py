@@ -570,6 +570,9 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                             symbol=signal.symbol,
                             futures_symbol=futures_symbol,
                         )
+                        # Do not reject this as a funnel failure in replay ablations,
+                        # but skip candidate construction because sizing needs spec fields.
+                        continue
                     else:
                         funnel_rejections["NO_SPEC"] += 1
                         logger.warning(

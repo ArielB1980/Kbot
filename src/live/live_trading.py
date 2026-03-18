@@ -1379,8 +1379,8 @@ class LiveTrading:
                         logger.exception("Kill switch SAFE_HOLD: unexpected error in cancel", error=str(e), error_type=type(e).__name__)
                         raise
 
-                # Stop processing (no new entries while kill switch is active)
-                return
+            # Stop processing (no new entries while kill switch is active)
+            return
         
         # 0.1 Order Timeout Monitoring (CRITICAL: Check first)
         try:

@@ -190,7 +190,7 @@ def evaluate_candidate_batch(
         key=lambda r: (
             float(r["utility_uplift"]),
             int(r["delta_open_count"]),
-            -int(r["candidate_open_count"]),
+            int(r["candidate_open_count"]),
         ),
         reverse=True,
     )
