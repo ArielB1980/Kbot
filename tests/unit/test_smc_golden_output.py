@@ -38,7 +38,7 @@ def _normalize_reasoning_numerics(text: str) -> str:
         except Exception:
             return raw
         # Keep deterministic precision while ignoring sub-ulp drift.
-        return format(val.quantize(Decimal("0.000000000001")), "f")
+        return format(val.quantize(Decimal("0.000000001")), "f")
 
     return re.sub(r"\d+\.\d+", _round_decimal, text or "")
 
