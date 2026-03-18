@@ -1,0 +1,27 @@
+# Live research overrides: merged by load_config() when present.
+# - strategy.symbol_overrides: per-symbol params from research (non-baseline winners).
+# - assets: whitelist of symbols to trade (research universe).
+# Updated automatically by research_continuous.sh after each cycle via apply_research_to_live.py.
+# Restart live trading (or reload config) to pick up changes.
+
+strategy:
+  symbol_overrides: {}
+
+risk:
+  symbol_overrides: {}
+
+assets:
+  mode: whitelist
+  whitelist:
+    - BTC/USD
+    - ETH/USD
+    - SOL/USD
+    - XRP/USD
+    - ADA/USD
+    - LINK/USD
+    - DOGE/USD
+    - AVAX/USD
+    - LTC/USD
+    - TRX/USD
+    - DOT/USD
+    - BCH/USD

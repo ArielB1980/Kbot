@@ -8,7 +8,7 @@ DEPLOY_SSH_KEY ?= $(HOME)/.ssh/trading_droplet
 DEPLOY_TRADING_USER ?= trading
 DEPLOY_TRADING_DIR ?= /home/trading/TradingSystem
 
-.PHONY: help venv install run smoke logs smoke-logs test test-server lint format integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep research-start research-status research-pause research-resume research-stop research-promote research-logs research-cleanup research-schedule-install research-schedule-status research-schedule-remove audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
+.PHONY: help venv install run smoke logs smoke-logs test test-server lint format integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep research-start research-status research-pause research-resume research-stop research-promote research-logs research-cleanup research-schedule-install research-schedule-status research-schedule-remove research-continuous-start research-continuous-status research-continuous-stop daily-apply-research audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
 
 help:
 	@echo "Available commands:"
@@ -29,9 +29,12 @@ help:
 	@echo "  make research-promote Queue candidate for review (CID=<candidate_id>)"
 	@echo "  make research-logs    Show/tail current research run logs (FOLLOW=1 optional)"
 	@echo "  make research-cleanup Stop and remove current research run artifacts"
-	@echo "  make research-schedule-install Install nightly research cron on server"
-	@echo "  make research-schedule-status  Show nightly schedule on server"
-	@echo "  make research-schedule-remove  Remove nightly schedule on server"
+	@echo "  make research-schedule-install Install optional scheduled trigger on server"
+	@echo "  make research-schedule-status  Show scheduled trigger on server"
+	@echo "  make research-schedule-remove  Remove scheduled trigger on server"
+	@echo "  make research-continuous-start Start continuous research supervisor"
+	@echo "  make research-continuous-status Show continuous supervisor status"
+	@echo "  make research-continuous-stop Request continuous supervisor stop"
 	@echo "  make run           Run bot in local mode (dry-run)"
 	@echo "  make smoke         Run smoke test (30s)"
 	@echo "  make integration   Run integration test (5 mins, tests all code paths)"
@@ -68,6 +71,10 @@ backfill:
 		echo "❌ .env.local not found. Run 'make validate' first."; \
 		exit 1; \
 	fi
+
+# Backfill only the live whitelist (from live_research_overrides.yaml) so live has candles. Run on server or with DB + Kraken.
+backfill-live-whitelist:
+	bash scripts/backfill_live_whitelist.sh
 
 backtest-quick:
 	@if [ -f .env.local ]; then \
@@ -116,12 +123,25 @@ replay-sweep:
 	done
 	@echo ""; echo "All seeds passed."
 
-RESEARCH_MODE ?= mock
-RESEARCH_ITER ?= 500
+RESEARCH_MODE ?= replay
+RESEARCH_ITER ?= 50
 RESEARCH_DAYS ?= 90
 RESEARCH_SYMBOLS ?= BTC/USD,ETH/USD,SOL/USD,XRP/USD,ADA/USD,LINK/USD
 RESEARCH_TELEGRAM ?= 0
-RESEARCH_PAUSED_START ?= 1
+RESEARCH_PAUSED_START ?= 0
+RESEARCH_AUTO_REPLAY_GATE ?= 1
+RESEARCH_AUTO_QUEUE_PROMOTION ?= 1
+RESEARCH_REPLAY_SEEDS ?= 42,43
+RESEARCH_REPLAY_DATA_DIR ?= data/replay
+RESEARCH_REPLAY_TIMEOUT_SECONDS ?= 1200
+RESEARCH_OBJECTIVE_MODE ?= net_pnl_only
+RESEARCH_SYMBOL_BY_SYMBOL ?= 1
+RESEARCH_SYMBOLS_FROM_LIVE_UNIVERSE ?= 1
+RESEARCH_UNTIL_CONVERGENCE ?= 1
+RESEARCH_MAX_STAGNANT_ITERS ?= 20
+RESEARCH_MAX_ITERS_PER_SYMBOL ?= 300
+RESEARCH_AUTO_BACKFILL_DATA ?= 1
+RESEARCH_REPLAY_TIMEFRAMES ?= 1m,15m,1h,4h,1d
 CID ?=
 FOLLOW ?= 0
 RESEARCH_CRON ?= 15 2 * * *
@@ -129,14 +149,37 @@ RESEARCH_CRON ?= 15 2 * * *
 research-start:
 	@TELEGRAM_FLAG=""; \
 	PAUSE_FLAG=""; \
+	REPLAY_FLAG="--no-auto-replay-gate"; \
+	QUEUE_FLAG="--no-auto-queue-promotion"; \
+	SYMBOL_MODE_FLAG="--no-symbol-by-symbol"; \
+	SYMBOLS_LIVE_FLAG="--no-symbols-from-live-universe"; \
+	CONVERGENCE_FLAG="--no-until-convergence"; \
+	BACKFILL_FLAG="--no-auto-backfill-data"; \
 	if [ "$(RESEARCH_TELEGRAM)" = "1" ]; then TELEGRAM_FLAG="--telegram"; fi; \
 	if [ "$(RESEARCH_PAUSED_START)" = "1" ]; then PAUSE_FLAG="--paused-start"; fi; \
+	if [ "$(RESEARCH_AUTO_REPLAY_GATE)" = "1" ]; then REPLAY_FLAG="--auto-replay-gate"; fi; \
+	if [ "$(RESEARCH_AUTO_QUEUE_PROMOTION)" = "1" ]; then QUEUE_FLAG="--auto-queue-promotion"; fi; \
+	if [ "$(RESEARCH_SYMBOL_BY_SYMBOL)" = "1" ]; then SYMBOL_MODE_FLAG="--symbol-by-symbol"; fi; \
+	if [ "$(RESEARCH_SYMBOLS_FROM_LIVE_UNIVERSE)" = "1" ]; then SYMBOLS_LIVE_FLAG="--symbols-from-live-universe"; fi; \
+	if [ "$(RESEARCH_UNTIL_CONVERGENCE)" = "1" ]; then CONVERGENCE_FLAG="--until-convergence"; fi; \
+	if [ "$(RESEARCH_AUTO_BACKFILL_DATA)" = "1" ]; then BACKFILL_FLAG="--auto-backfill-data"; fi; \
 	./scripts/research_control.sh start \
 		--mode "$(RESEARCH_MODE)" \
 		--iterations "$(RESEARCH_ITER)" \
 		--days "$(RESEARCH_DAYS)" \
 		--symbols "$(RESEARCH_SYMBOLS)" \
-		$$TELEGRAM_FLAG $$PAUSE_FLAG
+		--objective-mode "$(RESEARCH_OBJECTIVE_MODE)" \
+		$$SYMBOL_MODE_FLAG \
+		$$SYMBOLS_LIVE_FLAG \
+		$$CONVERGENCE_FLAG \
+		--max-stagnant-iters "$(RESEARCH_MAX_STAGNANT_ITERS)" \
+		--max-iters-per-symbol "$(RESEARCH_MAX_ITERS_PER_SYMBOL)" \
+		--replay-seeds "$(RESEARCH_REPLAY_SEEDS)" \
+		--replay-data-dir "$(RESEARCH_REPLAY_DATA_DIR)" \
+		--replay-timeframes "$(RESEARCH_REPLAY_TIMEFRAMES)" \
+		--replay-timeout-seconds "$(RESEARCH_REPLAY_TIMEOUT_SECONDS)" \
+		$$BACKFILL_FLAG \
+		$$REPLAY_FLAG $$QUEUE_FLAG $$TELEGRAM_FLAG $$PAUSE_FLAG
 
 research-status:
 	./scripts/research_control.sh status
@@ -175,6 +218,19 @@ research-schedule-status:
 
 research-schedule-remove:
 	./scripts/research_control.sh remove-schedule
+
+research-continuous-start:
+	./scripts/research_control.sh start-continuous
+
+research-continuous-status:
+	./scripts/research_control.sh status-continuous
+
+research-continuous-stop:
+	./scripts/research_control.sh stop-continuous
+
+# Daily job: apply latest research to live (overrides + promote new coins). Optional: RESTART_LIVE_AFTER_APPLY=1 or pass --restart-live.
+daily-apply-research:
+	bash scripts/daily_apply_research_to_live.sh $(ARGS)
 
 venv:
 	python3 -m venv .venv

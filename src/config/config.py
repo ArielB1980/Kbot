@@ -3,7 +3,7 @@ Configuration models for the Kraken Futures SMC Trading System.
 
 Uses Pydantic for validation and type safety.
 """
-from typing import List, Literal, Optional, Dict
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
@@ -54,6 +54,37 @@ class ExchangeConfig(BaseSettings):
     # If False: exchange returns size in contracts/base units (multiply by price to get notional)
     # Default False for Kraken Futures (returns contracts)
     position_size_is_notional: bool = Field(default=False, description="True if exchange returns size as notional, False if contracts")
+
+
+class StrategySymbolOverride(BaseSettings):
+    """Optional per-symbol strategy overrides."""
+    model_config = SettingsConfigDict(extra="ignore")
+
+    adx_threshold: Optional[float] = Field(default=None, ge=10.0, le=40.0)
+    fvg_min_size_pct: Optional[float] = Field(default=None, ge=0.0001, le=0.01)
+    entry_zone_tolerance_pct: Optional[float] = Field(default=None, ge=0.005, le=0.05)
+    entry_zone_tolerance_atr_mult: Optional[float] = Field(default=None, ge=0.1, le=1.0)
+    min_score_tight_smc_aligned: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    min_score_wide_structure_aligned: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    min_score_wide_structure_neutral: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    signal_cooldown_hours: Optional[float] = Field(default=None, ge=0.0, le=24.0)
+    tight_smc_atr_stop_min: Optional[float] = Field(default=None, ge=0.05, le=1.0)
+    tight_smc_atr_stop_max: Optional[float] = Field(default=None, ge=0.05, le=1.0)
+    wide_structure_atr_stop_min: Optional[float] = Field(default=None, ge=0.2, le=2.0)
+    wide_structure_atr_stop_max: Optional[float] = Field(default=None, ge=0.2, le=2.0)
+
+
+class RiskSymbolOverride(BaseSettings):
+    """Optional per-symbol risk overrides."""
+    model_config = SettingsConfigDict(extra="ignore")
+
+    risk_per_trade_pct: Optional[float] = Field(default=None, ge=0.0001, le=0.05)
+    max_leverage: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+    target_leverage: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+    max_position_size_usd: Optional[float] = Field(default=None, ge=1000.0, le=1000000.0)
+    tight_smc_cost_cap_bps: Optional[float] = Field(default=None, ge=10.0, le=50.0)
+    tight_smc_min_rr_multiple: Optional[float] = Field(default=None, ge=1.5, le=5.0)
+    wide_structure_max_distortion_pct: Optional[float] = Field(default=None, ge=0.10, le=0.25)
 
 
 class RiskConfig(BaseSettings):
@@ -116,6 +147,18 @@ class RiskConfig(BaseSettings):
     auction_max_per_symbol: int = Field(default=1, ge=1, le=5)
     auction_swap_threshold: float = Field(default=10.0, ge=0.0, le=50.0)
     auction_min_hold_minutes: int = Field(default=15, ge=0, le=60)
+    auction_min_hold_high_conviction_minutes: int = Field(
+        default=120,
+        ge=0,
+        le=360,
+        description="Minimum hold for high-conviction positions before strategic auction closes",
+    )
+    auction_min_hold_high_conviction_threshold: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description="Conviction threshold that activates the high-conviction minimum hold window",
+    )
     auction_max_trades_per_cycle: int = Field(default=5, ge=1, le=20)
     auction_max_new_opens_per_cycle: int = Field(default=5, ge=1, le=20)
     auction_max_closes_per_cycle: int = Field(default=5, ge=1, le=20)
@@ -273,6 +316,7 @@ class RiskConfig(BaseSettings):
     trim_buffer_pct: float = Field(default=0.18, ge=0.10, le=0.30, description="Liquidation buffer for TRIM (18%)")
     shock_marketwide_count: int = Field(default=3, ge=2, le=10, description="Symbols needed for market-wide shock")
     shock_marketwide_window_sec: int = Field(default=60, ge=30, le=300, description="Window for market-wide detection (seconds)")
+    symbol_overrides: Dict[str, RiskSymbolOverride] = Field(default_factory=dict)
 
 
     @field_validator('max_leverage')
@@ -510,6 +554,7 @@ class StrategyConfig(BaseSettings):
     # Skip Reconfirmation in Trending Markets
     # When True, enters immediately after MSS confirmation without waiting for retrace
     skip_reconfirmation_in_trends: bool = Field(default=True)  # Default True for trending markets
+    symbol_overrides: Dict[str, StrategySymbolOverride] = Field(default_factory=dict)
 
 
 
@@ -935,6 +980,36 @@ class SpotDCAConfig(BaseSettings):
     reserve_usd: float = Field(default=0.0, ge=0.0)  # Keep this much USD in reserve, don't spend it
 
 
+def _merge_live_research_overrides(config_dict: dict, yaml_path: Path) -> None:
+    """Merge live_research_overrides.yaml into config_dict (strategy/risk symbol_overrides, optional assets)."""
+    import os
+    overrides_path = os.environ.get("RESEARCH_LIVE_OVERRIDES_PATH")
+    if not overrides_path:
+        overrides_path = Path(yaml_path).parent / "live_research_overrides.yaml"
+    else:
+        overrides_path = Path(overrides_path)
+    if not overrides_path.exists():
+        return
+    with open(overrides_path, "r") as f:
+        overrides = yaml.safe_load(f) or {}
+    if overrides.get("strategy", {}).get("symbol_overrides"):
+        if "strategy" not in config_dict:
+            config_dict["strategy"] = {}
+        existing = config_dict["strategy"].get("symbol_overrides") or {}
+        config_dict["strategy"]["symbol_overrides"] = {**existing, **overrides["strategy"]["symbol_overrides"]}
+    if overrides.get("risk", {}).get("symbol_overrides"):
+        if "risk" not in config_dict:
+            config_dict["risk"] = {}
+        existing = config_dict["risk"].get("symbol_overrides") or {}
+        config_dict["risk"]["symbol_overrides"] = {**existing, **overrides["risk"]["symbol_overrides"]}
+    if overrides.get("assets"):
+        if "assets" not in config_dict:
+            config_dict["assets"] = {}
+        for key in ("mode", "whitelist"):
+            if key in overrides["assets"]:
+                config_dict["assets"][key] = overrides["assets"][key]
+
+
 class Config(BaseSettings):
     """Main configuration class."""
     model_config = SettingsConfigDict(
@@ -983,6 +1058,9 @@ class Config(BaseSettings):
             
         expanded_content = pattern.sub(replace_match, raw_content)
         config_dict = yaml.safe_load(expanded_content)
+
+        # Merge live research overrides if present (per-symbol strategy/risk + optional assets)
+        _merge_live_research_overrides(config_dict, yaml_path)
             
         import os
         if "ENVIRONMENT" in os.environ:
@@ -1044,6 +1122,54 @@ class Config(BaseSettings):
         # Validate basis guards are set
         if self.risk.basis_max_pct <= 0:
             raise ValueError("Basis guard must be configured (basis_max_pct > 0)")
+
+
+def normalize_symbol_key(symbol: Optional[str]) -> str:
+    """Normalize symbol key across spot/futures aliases."""
+    if not symbol:
+        return ""
+    raw = str(symbol).strip().upper()
+    if raw.startswith(("PF_", "PI_", "FI_")):
+        raw = raw[3:]
+    raw = raw.split(":")[0]
+    if raw.endswith("USD") and "/" not in raw and len(raw) > 3:
+        return f"{raw[:-3]}/USD"
+    if "/" not in raw and raw:
+        return raw
+    return raw
+
+
+def _resolve_symbol_override(
+    overrides: Dict[str, Any],
+    symbol: Optional[str],
+) -> Optional[Any]:
+    if not symbol or not overrides:
+        return None
+    key = normalize_symbol_key(symbol)
+    if key in overrides:
+        return overrides[key]
+    for candidate_key, value in overrides.items():
+        if normalize_symbol_key(candidate_key) == key:
+            return value
+    return None
+
+
+def resolve_strategy_for_symbol(strategy: StrategyConfig, symbol: Optional[str]) -> StrategyConfig:
+    """Return strategy config with symbol-level overrides applied."""
+    override = _resolve_symbol_override(strategy.symbol_overrides, symbol)
+    if not override:
+        return strategy
+    patch = {k: v for k, v in override.model_dump(exclude_none=True).items()}
+    return strategy.model_copy(update=patch)
+
+
+def resolve_risk_for_symbol(risk: RiskConfig, symbol: Optional[str]) -> RiskConfig:
+    """Return risk config with symbol-level overrides applied."""
+    override = _resolve_symbol_override(risk.symbol_overrides, symbol)
+    if not override:
+        return risk
+    patch = {k: v for k, v in override.model_dump(exclude_none=True).items()}
+    return risk.model_copy(update=patch)
 
 
 def validate_required_env_vars() -> None:

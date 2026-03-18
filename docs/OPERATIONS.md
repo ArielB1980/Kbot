@@ -24,6 +24,61 @@ make deploy          # commit, push, SSH pull, restart service
 ./scripts/deploy.sh
 ```
 
+## Research -> Live Automation (Production)
+
+### Daily apply job
+
+Applies latest completed research run to live config (`live_research_overrides.yaml`):
+- updates strategy overrides for existing live symbols
+- optionally promotes new symbols when they pass promotion gates
+- optionally restarts `trading-bot.service`
+
+```bash
+# one-off
+cd /home/trading/TradingSystem
+RESTART_LIVE_AFTER_APPLY=1 bash scripts/daily_apply_research_to_live.sh
+```
+
+Current production cron (user `trading`):
+
+```cron
+0 6 * * * RESTART_LIVE_AFTER_APPLY=1 cd /home/trading/TradingSystem && bash scripts/daily_apply_research_to_live.sh >> data/research/continuous_daemon/logs/daily_apply.log 2>&1
+```
+
+### Live candle reliability jobs
+
+Backfills only live whitelist symbols (`assets.whitelist` in `src/config/live_research_overrides.yaml`) for `15m,1h,4h,1d`.
+
+```bash
+# one-off backfill
+cd /home/trading/TradingSystem
+BOOTSTRAP_DAYS=60 bash scripts/backfill_live_whitelist.sh
+```
+
+Current production cron (user `trading`):
+
+```cron
+*/20 * * * * cd /home/trading/TradingSystem && BOOTSTRAP_DAYS=2 bash scripts/backfill_live_whitelist.sh >> data/research/continuous_daemon/logs/live_whitelist_refresh.log 2>&1
+15 2 * * 0 cd /home/trading/TradingSystem && BOOTSTRAP_DAYS=90 bash scripts/backfill_live_whitelist.sh >> data/research/continuous_daemon/logs/live_whitelist_weekly_backfill.log 2>&1
+```
+
+### Monitoring commands (live + research)
+
+```bash
+# Live
+systemctl is-active trading-bot.service
+journalctl -u trading-bot.service --since "30 minutes ago" --no-pager | grep -E "ENTRY_FUNNEL_SUMMARY|No candles for|ENTRY_BLOCKED_LOW_CONVICTION" | tail -50
+
+# Research
+pgrep -af "research_continuous|run.py research"
+cat /home/trading/TradingSystem/data/research/continuous_daemon/latest_run_id
+tail -50 /home/trading/TradingSystem/data/research/continuous_daemon/logs/daemon.log
+
+# Daily apply / refresh logs
+tail -50 /home/trading/TradingSystem/data/research/continuous_daemon/logs/daily_apply.log
+tail -50 /home/trading/TradingSystem/data/research/continuous_daemon/logs/live_whitelist_refresh.log
+```
+
 ## Kill Switch Recovery
 
 1. **Check status**: `ssh <droplet> systemctl status trading-bot`
@@ -76,7 +131,7 @@ Use `scripts/research_control.sh` (or `make research-*`) for a repeatable workfl
 - Optional Telegram control plane is available, but using a dedicated Telegram bot/chat is strongly recommended to avoid update polling contention with live bot process.
 - Nightly scheduling uses `scripts/research_nightly.sh` with lockfile (`data/research/nightly.lock`) to prevent overlapping runs.
 - Robust scoring uses split windows (train + holdout) across offsets (default `0,30,60` days) to reduce short-window overfit.
-- Promotion is replay-gated: a candidate must be marked replay-pass before `/research_promote` is allowed.
+- Nightly and scripted runs can auto-run replay gate and auto-queue promotion only on replay pass.
 
 ### Standard workflow
 
@@ -94,8 +149,7 @@ make research-resume
 make research-logs FOLLOW=1
 
 # 5) Queue a candidate for promotion review
-## After replay gate passes, mark candidate:
-/research_mark_replay_pass c042
+## If auto queue is disabled, manually queue after replay pass:
 make research-promote CID=c042
 
 # 6) Pause or stop
@@ -113,7 +167,7 @@ make research-schedule-status
 ### Direct script usage
 
 ```bash
-./scripts/research_control.sh start --mode mock --iterations 500 --telegram --paused-start
+./scripts/research_control.sh start --mode mock --iterations 500 --telegram --paused-start --replay-seeds 42,43
 ./scripts/research_control.sh status
 ./scripts/research_control.sh resume
 ./scripts/research_control.sh logs --follow
@@ -131,12 +185,17 @@ make research-schedule-status
 
 - `RESEARCH_NIGHTLY_MODE` (`backtest` or `mock`, default `backtest`)
 - `RESEARCH_NIGHTLY_ITER` (default `30`)
-- `RESEARCH_NIGHTLY_DAYS` (default `30`)
-- `RESEARCH_NIGHTLY_SYMBOLS` (default `BTC/USD,ETH/USD,SOL/USD`)
+- `RESEARCH_NIGHTLY_DAYS` (default `90`)
+- `RESEARCH_NIGHTLY_SYMBOLS` (default `BTC/USD,ETH/USD,SOL/USD,XRP/USD,ADA/USD,LINK/USD`)
 - `RESEARCH_NIGHTLY_WINDOW_OFFSETS` (default `0,30,60`)
 - `RESEARCH_NIGHTLY_HOLDOUT_RATIO` (default `0.30`)
 - `RESEARCH_NIGHTLY_TELEGRAM` (`0`/`1`, default `0`)
 - `RESEARCH_NIGHTLY_DIGEST_EVERY` (default `10`)
+- `RESEARCH_NIGHTLY_AUTO_REPLAY_GATE` (`0`/`1`, default `1`)
+- `RESEARCH_NIGHTLY_REPLAY_SEEDS` (default `42,43`)
+- `RESEARCH_NIGHTLY_REPLAY_DATA_DIR` (default `data/replay`)
+- `RESEARCH_NIGHTLY_REPLAY_TIMEOUT_SECONDS` (default `1200`)
+- `RESEARCH_NIGHTLY_AUTO_QUEUE_PROMOTION` (`0`/`1`, default `1`)
 
 ## Log Patterns
 

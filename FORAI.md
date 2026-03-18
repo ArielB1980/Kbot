@@ -60,6 +60,79 @@ journalctl -u trading-bot.service --no-pager | grep CYCLE_SUMMARY | tail -5
 journalctl -u trading-bot.service --no-pager | grep 'Alert\|send_alert' | tail -10
 ```
 
+### Research → Live handoff
+- **Live universe (baseline + research winners):** `src/config/live_research_overrides.yaml` is merged at config load time. It sets `assets.mode=whitelist` and `assets.whitelist` to the research universe (e.g. 12 coins) and `strategy.symbol_overrides` for any symbol where research found a sufficient non-baseline result.
+- **Apply research to live:** After each continuous research cycle, `scripts/apply_research_to_live.py` is run with `--run-dir` and `--live-universe`; it writes/updates `live_research_overrides.yaml`. Restart live trading (or reload config) to pick up changes.
+- **One-time seed:** To start live with the research universe and no overrides, ensure `live_research_overrides.yaml` exists (repo includes a default with the 12-coin whitelist). To add the latest research overrides (e.g. ETH c004), run once: `scripts/apply_research_to_live.py --run-dir data/research/continuous_daemon/runs/<run_id> --live-universe "BTC/USD,ETH/USD,..."`.
+- **Research always on:** Keep the continuous research daemon running (e.g. `make research-continuous-start` or systemd/cron). It runs cycle after cycle and updates `live_research_overrides.yaml` whenever it finds sufficient results.
+
+### When is a coin ready to be promoted to live?
+
+- **Already in the live whitelist (12 coins):** You don’t need to “promote” them. Research applies **strategy overrides** automatically after each cycle for any symbol that has a sufficient result (non-baseline, `trade_count` ≥ `--min-trades`, default 2). Restart live (or reload config) to pick up the new overrides.
+
+- **New coin (not in the live whitelist):** The system does **not** auto-add new symbols to the live whitelist. To decide when a researched coin is ready to trade live:
+  1. **Where to look:** Latest run artifacts, e.g. `data/research/continuous_daemon/runs/<run_id>/artifacts/*_best_by_symbol.json`. For each symbol you care about, check the best entry: `accepted`, `metrics.trade_count`, `metrics.net_return_pct`, `metrics.max_drawdown_pct`, and `metadata.promotion_ready` (if present).
+  2. **Bar for “ready”:**
+     - Research harness treats a candidate as **promotion_ready** when replay validation passes (replay outcome `passed`). The harness also enforces a **promotion gate**: ≥ `promotion_min_signal_trades` (default 10), max drawdown ≤ 35%, net return > -10%, and reasonable risk-adjusted profile. Rejection reasons are in `metrics.rejection_reasons` (e.g. `insufficient_signal(<10 trades)`, `low_comparability_for_promotion`).
+     - A practical “ready for live” bar: **accepted** (or promotion_ready), **trade_count ≥ 10**, and drawdown/return you’re comfortable with.
+  3. **How to promote:** Add the symbol to the live whitelist, then restart live (or reload config). Options:
+     - **Option A:** Edit `src/config/live_research_overrides.yaml`: add the symbol to `assets.whitelist`, then deploy and restart the live service.
+     - **Option B:** When running apply-to-live manually, pass a larger `--live-universe` that includes the new coin:  
+       `scripts/apply_research_to_live.py --run-dir <run_dir> --live-universe "BTC/USD,ETH/USD,...,NEWCOIN/USD"`  
+       That overwrites the whitelist in `live_research_overrides.yaml` with the given list. Then restart live.
+
+- **Quick check from artifacts:**  
+  `jq '.best_by_symbol | to_entries[] | select(.value.accepted == true) | {symbol: .key, trade_count: .value.metrics.trade_count, net_return_pct: .value.metrics.net_return_pct, max_drawdown_pct: .value.metrics.max_drawdown_pct}' data/research/continuous_daemon/runs/<run_id>/artifacts/*_best_by_symbol.json`  
+  shows accepted symbols and their metrics; filter by symbols not yet in the live whitelist to see promotion candidates.
+
+### Daily apply (cron): promote new coins + improved settings
+
+A **daily job** can apply the latest research and optionally restart live:
+
+1. **Script:** `scripts/daily_apply_research_to_live.sh`  
+   - Uses the latest research run (`latest_run_id` or most recent `continuous_*` run dir).  
+   - Runs `apply_research_to_live.py --run-dir <run> --promote-new-coins --promotion-min-trades 10 --min-trades 2`.  
+   - Writes `live_research_overrides.yaml` (improved overrides for existing coins + new coins that pass the promotion bar).  
+   - If `RESTART_LIVE_AFTER_APPLY=1` or `--restart-live`, runs `sudo systemctl restart trading-bot.service`.
+
+2. **Cron (e.g. 6 AM daily):**  
+   ```bash
+   0 6 * * * cd /home/trading/TradingSystem && bash scripts/daily_apply_research_to_live.sh >> data/research/continuous_daemon/logs/daily_apply.log 2>&1
+   ```  
+   With restart after apply:  
+   ```bash
+   0 6 * * * RESTART_LIVE_AFTER_APPLY=1 cd /home/trading/TradingSystem && bash scripts/daily_apply_research_to_live.sh >> data/research/continuous_daemon/logs/daily_apply.log 2>&1
+   ```  
+   Ensure the cron user has passwordless `sudo systemctl restart trading-bot.service` if using restart.
+
+   Recommended companion jobs for live candle reliability:
+   ```bash
+   */20 * * * * cd /home/trading/TradingSystem && BOOTSTRAP_DAYS=2 bash scripts/backfill_live_whitelist.sh >> data/research/continuous_daemon/logs/live_whitelist_refresh.log 2>&1
+   15 2 * * 0 cd /home/trading/TradingSystem && BOOTSTRAP_DAYS=90 bash scripts/backfill_live_whitelist.sh >> data/research/continuous_daemon/logs/live_whitelist_weekly_backfill.log 2>&1
+   ```
+
+3. **Apply script flags:**  
+   - `--promote-new-coins`: add symbols that are accepted, have ≥ `--promotion-min-trades` (default 10), and pass drawdown/return gates (max drawdown ≤35%, net return >−10%, etc.).  
+   - `--max-promotions N`: cap how many new coins to add per run (optional).  
+   - Base whitelist when promoting is read from the existing `live_research_overrides.yaml` so current live coins are preserved.
+
+4. **One-off run:**  
+   `make daily-apply-research` (or `bash scripts/daily_apply_research_to_live.sh`). Add `RESTART_LIVE_AFTER_APPLY=1` or `--restart-live` to restart live after applying.
+
+### Live candle data ("No candles for X")
+
+If live logs show **"No candles for SYMBOL 15m (spot failed, futures fallback skipped or empty)"**, the bot has no OHLCV for that symbol. CandleManager hydrates from the **database** at startup, then refreshes via **spot API** (and optional **futures fallback**). Missing DB data or repeated API failures cause this.
+
+- **Fix:** Backfill the **live whitelist** so the DB has candles; then restart the bot so it hydrates from DB.
+  ```bash
+  # On server (or anywhere with DATABASE_URL and Kraken API):
+  ./scripts/backfill_live_whitelist.sh
+  # Optional: bootstrap more history (default 60 days)
+  BOOTSTRAP_DAYS=90 ./scripts/backfill_live_whitelist.sh
+  ```
+  The script reads `src/config/live_research_overrides.yaml` `assets.whitelist` (or uses the default 12-coin list), then runs one cycle of `scripts/collect_kraken_candles_continuous.py` for 15m, 1h, 4h, 1d. After backfill, restart live so it hydrates: `systemctl restart trading-bot.service`.
+- **Ongoing:** Running the Kraken candle collector (e.g. cron or daemon) for the live universe keeps the cache updated; otherwise the bot relies on spot/futures API at runtime, which can fail or be rate-limited.
+
 ---
 
 ## 2. Architecture Overview

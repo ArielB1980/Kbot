@@ -3,6 +3,7 @@ CLI entrypoint for the Kraken Futures SMC Trading System.
 
 Provides commands for backtest, paper, live, status, and kill-switch.
 """
+import json
 import os
 import typer
 from typing import Optional
@@ -582,7 +583,44 @@ def research(
     mode: str = typer.Option(
         "backtest",
         "--mode",
-        help="Evaluation backend: backtest or mock",
+        help="Evaluation backend: backtest, replay, or mock",
+    ),
+    objective_mode: str = typer.Option(
+        "risk_adjusted",
+        "--objective-mode",
+        help="Scoring objective: risk_adjusted or net_pnl_only",
+    ),
+    symbol_by_symbol: bool = typer.Option(
+        False,
+        "--symbol-by-symbol/--no-symbol-by-symbol",
+        help="Optimize each symbol independently",
+    ),
+    symbols_from_live_universe: bool = typer.Option(
+        False,
+        "--symbols-from-live-universe/--no-symbols-from-live-universe",
+        help="Use current live universe from config instead of --symbols",
+    ),
+    symbols_from_config_universe: bool = typer.Option(
+        False,
+        "--symbols-from-config-universe/--no-symbols-from-config-universe",
+        help="Use full coin_universe.candidate_symbols from config (overrides --symbols and live universe)",
+    ),
+    until_convergence: bool = typer.Option(
+        False,
+        "--until-convergence/--no-until-convergence",
+        help="Run each symbol until no improvement for N iterations",
+    ),
+    max_stagnant_iterations: int = typer.Option(
+        20,
+        "--max-stagnant-iterations",
+        min=1,
+        help="Convergence stop threshold (no improvement streak)",
+    ),
+    max_iterations_per_symbol: int = typer.Option(
+        300,
+        "--max-iterations-per-symbol",
+        min=1,
+        help="Safety cap per symbol when convergence mode is enabled",
     ),
     digest_every: int = typer.Option(5, "--digest-every", min=1, help="Telegram digest interval"),
     window_offsets: str = typer.Option(
@@ -600,6 +638,42 @@ def research(
     out_dir: Path = typer.Option("data/research", "--out-dir", help="Output directory"),
     state_file: Path = typer.Option("data/research/state.json", "--state-file", help="Research state file"),
     telegram: bool = typer.Option(True, "--telegram/--no-telegram", help="Enable Telegram notifications and control commands"),
+    auto_replay_gate: bool = typer.Option(
+        False,
+        "--auto-replay-gate/--no-auto-replay-gate",
+        help="Run replay harness automatically for best candidate before promotion readiness",
+    ),
+    replay_seeds: str = typer.Option(
+        "42",
+        "--replay-seeds",
+        help="Comma-separated replay jitter seeds for gate (all must pass)",
+    ),
+    replay_data_dir: str = typer.Option(
+        "data/replay",
+        "--replay-data-dir",
+        help="Replay harness data directory",
+    ),
+    replay_timeout_seconds: int = typer.Option(
+        1200,
+        "--replay-timeout-seconds",
+        min=30,
+        help="Timeout per replay seed execution",
+    ),
+    auto_queue_promotion: bool = typer.Option(
+        False,
+        "--auto-queue-promotion/--no-auto-queue-promotion",
+        help="Automatically queue promotion when replay gate passes",
+    ),
+    auto_backfill_data: bool = typer.Option(
+        True,
+        "--auto-backfill-data/--no-auto-backfill-data",
+        help="For replay mode, fetch missing historical candles before evaluation",
+    ),
+    replay_timeframes: str = typer.Option(
+        "1m,15m,1h,4h,1d",
+        "--replay-timeframes",
+        help="Comma-separated replay data timeframes",
+    ),
     config_path: Path = typer.Option("src/config/config.yaml", "--config", help="Path to config file"),
 ):
     """
@@ -608,15 +682,42 @@ def research(
     config = _load_config(config_path)
     _setup_logging_from_config(config)
     symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
+    if symbols_from_config_universe:
+        from src.data.fiat_currencies import has_disallowed_base
+
+        if config.coin_universe and getattr(config.coin_universe, "get_all_candidates", None):
+            symbol_tuple = tuple(
+                s for s in config.coin_universe.get_all_candidates() if not has_disallowed_base(s)
+            )
+    elif symbols_from_live_universe:
+        from src.data.fiat_currencies import has_disallowed_base
+
+        if config.assets.mode == "whitelist":
+            symbol_tuple = tuple(config.assets.whitelist)
+        elif config.coin_universe and config.coin_universe.enabled:
+            symbol_tuple = tuple(
+                s for s in config.coin_universe.get_all_candidates() if not has_disallowed_base(s)
+            )
     window_offsets_tuple = tuple(int(x.strip()) for x in window_offsets.split(",") if x.strip())
+    replay_seeds_tuple = tuple(int(x.strip()) for x in replay_seeds.split(",") if x.strip())
+    replay_timeframes_tuple = tuple(x.strip() for x in replay_timeframes.split(",") if x.strip())
     if not symbol_tuple:
         typer.secho("❌ At least one symbol is required.", fg=typer.colors.RED, bold=True)
         raise typer.Exit(1)
     if not window_offsets_tuple:
         typer.secho("❌ At least one --window-offsets value is required.", fg=typer.colors.RED, bold=True)
         raise typer.Exit(1)
-    if mode not in {"backtest", "mock"}:
-        typer.secho("❌ --mode must be one of: backtest, mock", fg=typer.colors.RED, bold=True)
+    if not replay_seeds_tuple:
+        typer.secho("❌ At least one --replay-seeds value is required.", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    if mode not in {"backtest", "replay", "mock"}:
+        typer.secho("❌ --mode must be one of: backtest, replay, mock", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    if objective_mode not in {"risk_adjusted", "net_pnl_only"}:
+        typer.secho("❌ --objective-mode must be one of: risk_adjusted, net_pnl_only", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    if not replay_timeframes_tuple:
+        typer.secho("❌ At least one --replay-timeframes value is required.", fg=typer.colors.RED, bold=True)
         raise typer.Exit(1)
 
     from src.research.harness import HarnessConfig, run_sandbox_autoresearch
@@ -636,6 +737,19 @@ def research(
             enable_telegram=telegram,
             evaluation_window_offsets_days=window_offsets_tuple,
             holdout_ratio=holdout_ratio,
+            auto_replay_gate=auto_replay_gate,
+            replay_gate_seeds=replay_seeds_tuple,
+            replay_data_dir=replay_data_dir,
+            replay_gate_timeout_seconds=replay_timeout_seconds,
+            replay_eval_timeout_seconds=replay_timeout_seconds,
+            auto_queue_promotion_on_replay_pass=auto_queue_promotion,
+            objective_mode=objective_mode,
+            symbol_by_symbol=symbol_by_symbol,
+            until_convergence=until_convergence,
+            max_stagnant_iterations=max_stagnant_iterations,
+            max_iterations_per_symbol=max_iterations_per_symbol,
+            auto_backfill_data=auto_backfill_data,
+            replay_timeframes=replay_timeframes_tuple,
         )
 
         telegram_task = None
@@ -673,6 +787,128 @@ def research(
     import contextlib
 
     asyncio.run(_run())
+
+
+@app.command("counterfactual-twin")
+def counterfactual_twin(
+    hours: int = typer.Option(24, "--hours", min=1, help="Hours of decision tape to analyze"),
+    symbols: str = typer.Option("", "--symbols", help="Optional comma-separated symbol filter"),
+    params_file: Optional[Path] = typer.Option(
+        None,
+        "--params-file",
+        help="JSON file with candidate dot-path params (e.g. strategy.min_score_...)",
+    ),
+    out_file: Path = typer.Option(
+        Path("data/research/counterfactual_twin.json"),
+        "--out-file",
+        help="Output JSON report path",
+    ),
+    config_path: Path = typer.Option("src/config/config.yaml", "--config", help="Path to config file"),
+):
+    """Run Counterfactual Live Twin uplift analysis on captured decision tape."""
+    config = _load_config(config_path)
+    _setup_logging_from_config(config)
+    symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
+    candidate_params: dict[str, float] = {}
+    if params_file:
+        if not params_file.exists():
+            typer.secho(f"❌ params file not found: {params_file}", fg=typer.colors.RED, bold=True)
+            raise typer.Exit(1)
+        raw = json.loads(params_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            typer.secho("❌ params file must contain a JSON object", fg=typer.colors.RED, bold=True)
+            raise typer.Exit(1)
+        candidate_params = {str(k): float(v) for k, v in raw.items()}
+
+    from src.research.counterfactual_twin import evaluate_counterfactual_uplift, load_decision_tape
+
+    tape = load_decision_tape(since_hours=hours, symbols=symbol_tuple if symbol_tuple else None)
+    report = evaluate_counterfactual_uplift(
+        base_config=config,
+        candidate_params=candidate_params,
+        tape=tape,
+    )
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "hours": hours,
+        "symbols": list(symbol_tuple),
+        "candidate_params": candidate_params,
+        "report": report,
+    }
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    typer.echo(f"Counterfactual twin report: {out_file}")
+    typer.echo(
+        f"Utility uplift={report['utility_uplift']:.4f} "
+        f"(baseline_open={report['baseline_open_count']} candidate_open={report['candidate_open_count']})"
+    )
+
+
+@app.command("counterfactual-twin-batch")
+def counterfactual_twin_batch(
+    hours: int = typer.Option(24, "--hours", min=1, help="Hours of decision tape to analyze"),
+    symbols: str = typer.Option("", "--symbols", help="Optional comma-separated symbol filter"),
+    candidates_dir: Path = typer.Option(
+        Path("data/research/counterfactual_twin/candidates"),
+        "--candidates-dir",
+        help="Directory containing candidate param JSON files",
+    ),
+    top_n: int = typer.Option(10, "--top-n", min=1, help="How many top candidates to print"),
+    out_file: Path = typer.Option(
+        Path("data/research/counterfactual_twin/batch_ranking.json"),
+        "--out-file",
+        help="Output JSON ranking path",
+    ),
+    config_path: Path = typer.Option("src/config/config.yaml", "--config", help="Path to config file"),
+):
+    """Rank many candidate JSON files against the same decision tape."""
+    config = _load_config(config_path)
+    _setup_logging_from_config(config)
+    symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
+    if not candidates_dir.exists():
+        typer.secho(f"❌ candidates directory not found: {candidates_dir}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+    candidate_files = sorted(candidates_dir.glob("*.json"))
+    if not candidate_files:
+        typer.secho(f"❌ no candidate JSON files found in: {candidates_dir}", fg=typer.colors.RED, bold=True)
+        raise typer.Exit(1)
+
+    from src.research.counterfactual_twin import evaluate_candidate_batch, load_decision_tape
+
+    tape = load_decision_tape(since_hours=hours, symbols=symbol_tuple if symbol_tuple else None)
+    candidates: dict[str, dict[str, float]] = {}
+    skipped: list[dict[str, str]] = []
+    for fpath in candidate_files:
+        try:
+            raw = json.loads(fpath.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("JSON root must be object")
+            candidates[fpath.stem] = {str(k): float(v) for k, v in raw.items()}
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({"file": str(fpath), "reason": str(exc)})
+
+    ranking = evaluate_candidate_batch(base_config=config, tape=tape, candidates=candidates)
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "hours": hours,
+        "symbols": list(symbol_tuple),
+        "tape_samples": len(tape),
+        "candidate_count": len(candidates),
+        "skipped": skipped,
+        "ranking": ranking,
+    }
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    typer.echo(f"Counterfactual twin batch ranking: {out_file}")
+    if not ranking:
+        typer.echo("No valid candidates to rank.")
+        return
+    typer.echo("Top candidates:")
+    for idx, row in enumerate(ranking[:top_n], start=1):
+        typer.echo(
+            f"{idx:>2}. {row['candidate_id']}: uplift={row['utility_uplift']:.4f} "
+            f"delta_open={row['delta_open_count']} eligible={row['eligible_opportunities']}"
+        )
 
 
 
