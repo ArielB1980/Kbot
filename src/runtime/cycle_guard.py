@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 import uuid
+import os
 
 from src.monitoring.logger import get_logger
 
@@ -99,6 +100,7 @@ class CycleGuard:
         self._total_cycles = 0
         self._overlapped_cycles = 0
         self._skipped_cycles = 0
+        self._minimal_replay_logs = os.getenv("REPLAY_RESEARCH_MINIMAL_LOGS", "0") == "1"
         
         logger.info(
             "CycleGuard initialized",
@@ -156,11 +158,12 @@ class CycleGuard:
         
         self._total_cycles += 1
         
-        logger.info(
-            "CYCLE_START",
-            cycle_id=cycle_id,
-            total_cycles=self._total_cycles,
-        )
+        if (not self._minimal_replay_logs) or (self._total_cycles % 100 == 0):
+            logger.info(
+                "CYCLE_START",
+                cycle_id=cycle_id,
+                total_cycles=self._total_cycles,
+            )
         
         return (True, None)
     
@@ -186,15 +189,16 @@ class CycleGuard:
         
         elapsed = now - self.current_cycle.started_at
         
-        logger.info(
-            "CYCLE_END",
-            cycle_id=self.current_cycle.cycle_id,
-            duration_seconds=round(elapsed.total_seconds(), 2),
-            coins_processed=self.current_cycle.coins_processed,
-            signals_generated=self.current_cycle.signals_generated,
-            orders_placed=self.current_cycle.orders_placed,
-            orders_rejected=self.current_cycle.orders_rejected,
-        )
+        if (not self._minimal_replay_logs) or (self._total_cycles % 100 == 0):
+            logger.info(
+                "CYCLE_END",
+                cycle_id=self.current_cycle.cycle_id,
+                duration_seconds=round(elapsed.total_seconds(), 2),
+                coins_processed=self.current_cycle.coins_processed,
+                signals_generated=self.current_cycle.signals_generated,
+                orders_placed=self.current_cycle.orders_placed,
+                orders_rejected=self.current_cycle.orders_rejected,
+            )
         
         completed = self.current_cycle
         self.current_cycle = None

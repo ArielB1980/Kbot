@@ -5,7 +5,7 @@ Design lock enforced: Operates on spot market data ONLY.
 No futures prices, funding data, or order book data may be accessed.
 """
 from typing import Any, List, Optional, Dict, Tuple, Literal
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 import os
@@ -16,7 +16,7 @@ from src.strategy.fibonacci_engine import FibonacciEngine
 from src.strategy.signal_scorer import SignalScorer
 from src.strategy.market_structure_tracker import MarketStructureTracker
 from src.strategy.ev_engine import EVEngine
-from src.config.config import StrategyConfig
+from src.config.config import StrategyConfig, resolve_strategy_for_symbol
 from src.monitoring.logger import get_logger
 from src.domain.protocols import EventRecorder, _noop_event_recorder
 from src.exceptions import OperationalError, DataError
@@ -107,6 +107,7 @@ class SMCEngine:
             config: Strategy configuration
             event_recorder: Callable for recording system events (injected; defaults to no-op)
         """
+        self._base_config = config
         self.config = config
         self.indicators = Indicators()
         self._record_event = event_recorder
@@ -139,7 +140,7 @@ class SMCEngine:
         
         # Store score penalty for tolerance entries
         self.entry_zone_tolerance_score_penalty = getattr(config, 'entry_zone_tolerance_score_penalty', -5)
-        self._fvg_min_size_pct_default = Decimal(str(getattr(config, "fvg_min_size_pct", 0.001)))
+        self._fvg_min_size_pct_default = self._safe_decimal(getattr(config, "fvg_min_size_pct", 0.001), Decimal("0.001"))
         self.ev_engine = EVEngine(config)
         
         logger.info("SMC Engine initialized", config=config.model_dump())
@@ -163,6 +164,15 @@ class SMCEngine:
         return self._normalize_symbol_key(symbol) in canary
 
     def _resolve_conviction_min_for_entry(self, symbol: str) -> float:
+        replay_override = os.getenv("REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY")
+        if replay_override is not None and replay_override.strip():
+            try:
+                return float(replay_override)
+            except ValueError:
+                logger.warning(
+                    "Invalid REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY",
+                    value=replay_override,
+                )
         base = float(getattr(self.config, "conviction_min_for_entry", 35.0))
         canary_threshold = getattr(self.config, "conviction_min_for_entry_canary", None)
         if canary_threshold is None:
@@ -177,8 +187,19 @@ class SMCEngine:
         return float(canary_threshold) if self._normalize_symbol_key(symbol) in canary_symbols else base
 
     def _resolve_fvg_min_size_pct(self, symbol: Optional[str]) -> Decimal:
-        # Promoted policy: single global FVG minimum threshold.
-        return self._fvg_min_size_pct_default
+        # Base default with optional per-symbol override via resolved strategy config.
+        return self._safe_decimal(
+            getattr(self.config, "fvg_min_size_pct", self._fvg_min_size_pct_default),
+            self._fvg_min_size_pct_default,
+        )
+
+    @staticmethod
+    def _safe_decimal(value: Any, default: Decimal) -> Decimal:
+        """Safely coerce config values to Decimal, falling back on mocks/invalid values."""
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return default
 
     def _ev_shadow_enabled_for_symbol(self, symbol: str) -> bool:
         if not bool(getattr(self.config, "ev_layer_enabled", False)):
@@ -376,6 +397,8 @@ class SMCEngine:
         - "4h": Use decision_candles_4h for structure detection (production default)
         - "1h": Use refine_candles_1h for structure detection (legacy/comparison mode)
         """
+        self.config = resolve_strategy_for_symbol(self._base_config, symbol)
+
         # Context Variables for Trace
         decision_id = str(uuid.uuid4())
         reasoning_parts = []
@@ -552,6 +575,30 @@ class SMCEngine:
                 (structure_decision.get('order_block') or structure_decision.get('fvg') or structure_decision.get('bos'))
             )
             
+            decision_structure_ablation = (
+                os.getenv("REPLAY_ABLATE_DISABLE_DECISION_STRUCTURE", "0") == "1"
+            )
+            if not has_decision_structure and decision_structure_ablation:
+                logger.info(
+                    "Ablation: bypassing decision structure gate in replay",
+                    symbol=symbol,
+                    decision_tf=decision_tf_label,
+                    reason=f"{decision_tf_label}_STRUCTURE_REQUIRED",
+                )
+                reasoning_parts.append(
+                    f"🧪 Ablation: bypass {decision_tf_label} structure-required gate"
+                )
+                synthetic_ts = (
+                    effective_decision_candles[-1].timestamp if effective_decision_candles else None
+                )
+                structure_decision = {
+                    "bos": {
+                        "direction": bias,
+                        "timestamp": synthetic_ts,
+                    }
+                }
+                has_decision_structure = True
+
             if not has_decision_structure:
                 reasoning_parts.append(f"❌ No valid {decision_tf_label} decision structure")
                 logger.info(
@@ -613,8 +660,20 @@ class SMCEngine:
                             current_price=latest_price,
                             current_volume_avg=avg_volume,
                         )
+                    weekly_zone_ablation = (
+                        os.getenv("REPLAY_ABLATE_DISABLE_WEEKLY_ZONE", "0") == "1"
+                    )
                     if not higher_tf_context.allowed_entry:
-                        if higher_tf_mode == "hard":
+                        if weekly_zone_ablation:
+                            logger.info(
+                                "Ablation: bypassing weekly-zone gate in replay",
+                                symbol=symbol,
+                                reason="outside_weekly_zone",
+                                mode=higher_tf_mode,
+                            )
+                            reasoning_parts.append("🧪 Ablation: bypass higher-TF weekly-zone gate")
+                            higher_tf_penalty = 0.0
+                        elif higher_tf_mode == "hard":
                             logger.info(
                                 "higher_tf_hard_rejected",
                                 symbol=symbol,
@@ -630,14 +689,15 @@ class SMCEngine:
                                 regime=regime_early,
                             )
                             return signal
-                        higher_tf_penalty = float(getattr(self.config, "higher_tf_penalty_outside_zone", -18.0))
-                        logger.info(
-                            "higher_tf_penalty_applied",
-                            symbol=symbol,
-                            reason="outside_weekly_zone",
-                            penalty=higher_tf_penalty,
-                        )
-                        reasoning_parts.append(f"⚠ Higher-TF outside weekly zone: penalty {higher_tf_penalty:.1f}")
+                        else:
+                            higher_tf_penalty = float(getattr(self.config, "higher_tf_penalty_outside_zone", -18.0))
+                            logger.info(
+                                "higher_tf_penalty_applied",
+                                symbol=symbol,
+                                reason="outside_weekly_zone",
+                                penalty=higher_tf_penalty,
+                            )
+                            reasoning_parts.append(f"⚠ Higher-TF outside weekly zone: penalty {higher_tf_penalty:.1f}")
 
         import traceback
         
@@ -678,6 +738,10 @@ class SMCEngine:
                     logger.warning("Adaptive confirmation failed, using default", error=str(e), error_type=type(e).__name__)
 
             
+            ablate_ms_confirmation = os.getenv("REPLAY_ABLATE_DISABLE_MS_CONFIRMATION", "0") == "1"
+            ablate_wait_structure_break = os.getenv("REPLAY_ABLATE_DISABLE_WAIT_STRUCTURE_BREAK", "0") == "1"
+            ablate_reconfirmation = os.getenv("REPLAY_ABLATE_DISABLE_RECONFIRMATION", "0") == "1"
+
             if ms_change:
                 # Structure change detected - check confirmation (on 4H)
                 confirmed = self.ms_tracker.check_confirmation(
@@ -686,6 +750,13 @@ class SMCEngine:
                     ms_change,
                     required_candles=required_candles # Dynamic
                 )
+                if not confirmed and ablate_ms_confirmation:
+                    logger.info(
+                        "Ablation: bypassing market-structure confirmation gate in replay",
+                        symbol=symbol,
+                    )
+                    reasoning_parts.append("🧪 Ablation: bypass market-structure confirmation gate")
+                    confirmed = True
                 
                 if confirmed:
                     # Structure already detected on 4H in Step 1.5
@@ -731,7 +802,11 @@ class SMCEngine:
                     # Check if we should skip reconfirmation (for trending markets)
                     skip_reconfirmation = getattr(self.config, 'skip_reconfirmation_in_trends', True)
                     
-                    if skip_reconfirmation:
+                    if ablate_reconfirmation:
+                        reconfirmed = True
+                        used_tolerance = False
+                        reasoning_parts.append("🧪 Ablation: bypass reconfirmation gate")
+                    elif skip_reconfirmation:
                         # In trending markets, enter immediately after confirmation
                         reconfirmed = True
                         used_tolerance = False
@@ -776,7 +851,7 @@ class SMCEngine:
                 if not self.ms_tracker.is_entry_ready(symbol):
                     # Check if we should require structure change
                     require_ms_change = getattr(self.config, 'require_ms_change_confirmation', True)
-                    if require_ms_change:
+                    if require_ms_change and not ablate_wait_structure_break:
                         reasoning_parts.append(
                             f"⏳ No 4H market structure change detected - waiting for structure break"
                         )
@@ -788,6 +863,12 @@ class SMCEngine:
                             atr=atr_value,
                             regime=regime_early
                         )
+                    elif require_ms_change and ablate_wait_structure_break:
+                        logger.info(
+                            "Ablation: bypassing wait-for-structure-break gate in replay",
+                            symbol=symbol,
+                        )
+                        reasoning_parts.append("🧪 Ablation: bypass wait-for-structure-break gate")
         
         # Step 2.5: 4H structure already validated in Step 1.5
         # Just handle the case where no structure was found (should be caught by guard above)
@@ -819,7 +900,13 @@ class SMCEngine:
 
             
             # ADX REGIME FILTER: Skip ranging markets (1H ADX for faster response)
-            adx_threshold = getattr(self.config, 'adx_threshold', 25.0)
+            adx_threshold = float(getattr(self.config, 'adx_threshold', 25.0))
+            adx_override = os.getenv("REPLAY_OVERRIDE_ADX_THRESHOLD")
+            if adx_override is not None and adx_override.strip():
+                try:
+                    adx_threshold = float(adx_override)
+                except ValueError:
+                    logger.warning("Invalid REPLAY_OVERRIDE_ADX_THRESHOLD", value=adx_override)
             if adx_value < adx_threshold:
                 reasoning_parts.append(
                     f"❌ Ranging market: ADX {adx_value:.1f} < {adx_threshold} threshold (skip)"
@@ -864,16 +951,44 @@ class SMCEngine:
                 regime = classification_info['regime']
                 
                 if regime == "tight_smc":
+                    disable_fib_gate = os.getenv("REPLAY_ABLATE_DISABLE_FIB_GATE", "0") == "1"
+                    disable_ote_check = os.getenv("REPLAY_ABLATE_DISABLE_FIB_OTE_CHECK", "0") == "1"
+                    disable_confluence_check = (
+                        os.getenv("REPLAY_ABLATE_DISABLE_FIB_CONFLUENCE_CHECK", "0") == "1"
+                    )
+                    if disable_fib_gate:
+                        logger.info("Ablation: bypassing fib gate in replay", symbol=symbol)
+                        reasoning_parts.append("🧪 Ablation: bypass fib gate")
+                        fib_valid = True
                     # HARD REQUIREMENT: Must be in OTE or near key level
-                    if fib_levels:
+                    elif fib_levels:
                         # Check OTE
                         in_ote = self.fibonacci_engine.is_in_ote_zone(entry_price, fib_levels)
                         # Check specific levels
+                        fib_proximity_bps = float(getattr(self.config, "fib_proximity_bps", 20.0))
+                        fib_bps_override = os.getenv("REPLAY_OVERRIDE_FIB_PROXIMITY_BPS")
+                        if fib_bps_override is not None and fib_bps_override.strip():
+                            try:
+                                fib_proximity_bps = float(fib_bps_override)
+                            except ValueError:
+                                logger.warning(
+                                    "Invalid REPLAY_OVERRIDE_FIB_PROXIMITY_BPS",
+                                    value=fib_bps_override,
+                                )
                         is_near, _ = self.fibonacci_engine.check_confluence(
                             entry_price, 
                             fib_levels, 
-                            tolerance_pct=self.config.fib_proximity_bps/10000
+                            tolerance_pct=fib_proximity_bps / 10000
                         )
+                        if disable_ote_check:
+                            logger.info("Ablation: bypassing OTE sub-check in fib gate", symbol=symbol)
+                            in_ote = False
+                        if disable_confluence_check:
+                            logger.info(
+                                "Ablation: bypassing confluence sub-check in fib gate",
+                                symbol=symbol,
+                            )
+                            is_near = False
                         
                         if not (in_ote or is_near):
                             reasoning_parts.append(f"❌ Rejected: tight_smc entry not in OTE/Key Fib (Gate)")
@@ -1162,6 +1277,7 @@ class SMCEngine:
                                     "atr": float(atr_value) if isinstance(atr_value, Decimal) else atr_value
                                 },
                                 "thesis": thesis_snapshot or {},
+                                "decision_id": decision_id,
                             }
                         )
                 elif signal is None:
@@ -1207,6 +1323,19 @@ class SMCEngine:
 
             dedupe_minutes = int(getattr(self.config, "signal_structure_dedupe_minutes", 0) or 0)
             dedupe_enabled = bool(getattr(self.config, "signal_structure_dedupe_enabled", False)) and dedupe_minutes > 0
+            if os.getenv("REPLAY_ABLATE_DISABLE_STRUCTURE_DEDUPE", "0") == "1":
+                logger.info("Ablation: bypassing duplicate-structure debounce in replay")
+                dedupe_enabled = False
+            dedupe_override = os.getenv("REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES")
+            if dedupe_override is not None and dedupe_override.strip():
+                try:
+                    dedupe_minutes = max(0, int(float(dedupe_override)))
+                    dedupe_enabled = dedupe_minutes > 0
+                except ValueError:
+                    logger.warning(
+                        "Invalid REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES",
+                        value=dedupe_override,
+                    )
             if dedupe_enabled:
                 now_utc = datetime.now(timezone.utc)
                 debounce_window = timedelta(minutes=dedupe_minutes)
@@ -1830,6 +1959,36 @@ class SMCEngine:
     
     # Removed unused _check_rsi_divergence method - RSI divergence is checked inline
     # in generate_signal() where it's actually used (around line 297)
+
+    @staticmethod
+    def _infer_no_signal_gate(reasoning: List[str]) -> str:
+        """Infer a normalized gate label from NO_SIGNAL reasoning text."""
+        if not reasoning:
+            return "unknown"
+        reason = str(reasoning[-1]).lower()
+        if "no valid 4h decision structure" in reason:
+            return "decision_structure_required"
+        if "outside weekly zone" in reason:
+            return "outside_weekly_zone"
+        if "waiting for structure break" in reason:
+            return "waiting_structure_break"
+        if "waiting for confirmation" in reason:
+            return "waiting_structure_confirmation"
+        if "waiting for reconfirmation" in reason:
+            return "waiting_reconfirmation"
+        if "ranging market: adx" in reason:
+            return "adx_ranging_filter"
+        if "tight_smc entry not in ote/key fib" in reason:
+            return "fib_gate_reject"
+        if "no fib structure found for tight_smc" in reason:
+            return "fib_missing_reject"
+        if "signal direction mismatch" in reason:
+            return "direction_mismatch"
+        if "score " in reason and "threshold" in reason:
+            return "score_gate_reject"
+        if "low conviction" in reason:
+            return "conviction_gate_reject"
+        return "other"
     
     def _no_signal(
         self,
@@ -1844,14 +2003,6 @@ class SMCEngine:
         """Create a NO_SIGNAL signal."""
         from src.domain.models import SetupType
         timestamp = current_candle.timestamp if current_candle else datetime.now(timezone.utc)
-        
-        # DEBUG LOGGING FOR REGIME
-        import logging
-        logger = logging.getLogger("SMCEngine") # Use direct logger if needed or self.logger if available
-        # Assuming no self.logger here, printing to stdout or using print is dirty but effective for now.
-        # But we should use the configured logger if possible. 
-        # Since I can't easily import get_logger here without risking circular dep or context issues, 
-        # I'll rely on the logic check.
         
         # Determine regime if not provided (fallback for early rejections)
         if not regime:
@@ -1878,6 +2029,15 @@ class SMCEngine:
                  reasoning.append(f"DEBUG_ERROR: Regime=no_data BUT Candle Exists! ADX={adx}")
                  # Force fix
                  regime = "consolidation"  # Conservative default
+
+        if os.getenv("REPLAY_GATE_DIAGNOSTICS", "0") == "1":
+            gate = self._infer_no_signal_gate(reasoning)
+            logger.info(
+                "REPLAY_GATE_REASON",
+                symbol=symbol,
+                gate=gate,
+                reason_tail=str(reasoning[-1])[:240] if reasoning else "",
+            )
         
         return Signal(
             timestamp=timestamp,

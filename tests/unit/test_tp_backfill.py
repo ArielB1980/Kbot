@@ -36,6 +36,7 @@ def mock_config():
     config.strategy = Mock()
     config.strategy.bias_timeframes = ["4h", "1d"]
     config.strategy.execution_timeframes = ["15m", "1h"]
+    config.strategy.signal_cooldown_hours = 4.0
     
     # Risk config
     config.risk = Mock()

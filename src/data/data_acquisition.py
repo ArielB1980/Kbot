@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Set
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from src.data.kraken_client import KrakenClient, KrakenWebSocket
+from src.data.coinapi_client import CoinAPIClient
 from src.data.orderbook import OrderBook
 from src.domain.models import Candle
 from src.storage.repository import save_candles_bulk
@@ -36,6 +37,7 @@ class DataAcquisition:
         spot_symbols: List[str],
         futures_symbols: List[str],
         max_gap_seconds: int = 60,
+        coinapi_client: Optional[CoinAPIClient] = None,
     ):
         """
         Initialize data acquisition.
@@ -50,6 +52,7 @@ class DataAcquisition:
         self.spot_symbols = spot_symbols
         self.futures_symbols = futures_symbols
         self.max_gap_seconds = max_gap_seconds
+        self.coinapi_client = coinapi_client
         
         # Order books for futures mark price tracking
         self.orderbooks: Dict[str, OrderBook] = {
@@ -110,6 +113,7 @@ class DataAcquisition:
         timeframe: str,
         start_time: datetime,
         end_time: datetime,
+        source: str = "kraken",
     ) -> List[Candle]:
         """
         Fetch historical spot OHLCV data.
@@ -129,7 +133,30 @@ class DataAcquisition:
             timeframe=timeframe,
             start=start_time.isoformat(),
             end=end_time.isoformat(),
+            source=source,
         )
+
+        normalized_source = str(source or "kraken").strip().lower()
+        if normalized_source == "coinapi":
+            if not self.coinapi_client:
+                raise ValueError("CoinAPI source selected but coinapi_client is not configured")
+            candles = await self.coinapi_client.fetch_spot_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            if candles:
+                self._validate_candles(candles, timeframe)
+                save_candles_bulk(candles)
+            logger.info(
+                "Historical spot data fetched",
+                symbol=symbol,
+                timeframe=timeframe,
+                count=len(candles),
+                source=normalized_source,
+            )
+            return candles
         
         all_candles = []
         current_time = start_time

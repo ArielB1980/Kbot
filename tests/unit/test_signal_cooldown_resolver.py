@@ -46,6 +46,18 @@ def test_signal_cooldown_resolver_keeps_base_for_non_canary_symbol():
     assert params["canary_applied"] is False
 
 
+def test_signal_cooldown_resolver_applies_symbol_override():
+    cfg = SimpleNamespace(
+        signal_cooldown_hours=4.0,
+        symbol_overrides={
+            "BTC/USD": SimpleNamespace(signal_cooldown_hours=1.5),
+        },
+    )
+    params = _resolve_signal_cooldown_params(cfg, "PF_BTCUSD")
+    assert params["cooldown_hours"] == 1.5
+    assert params["canary_applied"] is True
+
+
 def test_post_close_cooldown_classifies_stop_as_loss_bucket():
     cfg = SimpleNamespace(
         signal_post_close_cooldown_loss_minutes=180,

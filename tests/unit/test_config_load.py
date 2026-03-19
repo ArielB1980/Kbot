@@ -111,3 +111,34 @@ def test_config_schema_version_present():
 
     assert CONFIG_SCHEMA_VERSION is not None
     assert len(CONFIG_SCHEMA_VERSION) > 0
+
+
+def test_symbol_override_resolvers():
+    """Per-symbol override resolvers should apply only to target symbol."""
+    from src.config.config import (
+        RiskConfig,
+        RiskSymbolOverride,
+        StrategyConfig,
+        StrategySymbolOverride,
+        resolve_risk_for_symbol,
+        resolve_strategy_for_symbol,
+    )
+
+    strategy = StrategyConfig(
+        signal_cooldown_hours=4.0,
+        symbol_overrides={"BTC/USD": StrategySymbolOverride(signal_cooldown_hours=1.0)},
+    )
+    risk = RiskConfig(
+        target_leverage=7.0,
+        symbol_overrides={"BTC/USD": RiskSymbolOverride(target_leverage=3.0)},
+    )
+
+    btc_strategy = resolve_strategy_for_symbol(strategy, "PF_BTCUSD")
+    eth_strategy = resolve_strategy_for_symbol(strategy, "ETH/USD")
+    assert btc_strategy.signal_cooldown_hours == 1.0
+    assert eth_strategy.signal_cooldown_hours == 4.0
+
+    btc_risk = resolve_risk_for_symbol(risk, "BTC/USD")
+    eth_risk = resolve_risk_for_symbol(risk, "ETH/USD")
+    assert btc_risk.target_leverage == 3.0
+    assert eth_risk.target_leverage == 7.0

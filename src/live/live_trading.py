@@ -48,7 +48,13 @@ from src.utils.kill_switch import KillSwitch, KillSwitchReason
 from src.exceptions import CircuitOpenError, OperationalError, DataError, InvariantError
 from src.runtime.startup_phases import StartupStateMachine, StartupPhase
 from src.domain.models import Candle, Signal, SignalType, Position, Side
-from src.storage.repository import record_event, record_metrics_snapshot, get_trades_since
+from src.storage.repository import (
+    get_candles as db_get_candles,
+    get_latest_candle_timestamp,
+    get_trades_since,
+    record_event,
+    record_metrics_snapshot,
+)
 from src.storage.maintenance import DatabasePruner
 from src.live.startup_validator import ensure_all_coins_have_traces
 from src.live.maintenance import periodic_data_maintenance
@@ -98,6 +104,14 @@ def _resolve_signal_cooldown_params(strategy_config, symbol: str) -> Dict[str, A
     Resolve signal cooldown hours (global policy).
     """
     base_hours = float(getattr(strategy_config, "signal_cooldown_hours", 4.0))
+    overrides = getattr(strategy_config, "symbol_overrides", {}) or {}
+    normalized = _normalize_symbol_key(symbol)
+    for key, override in overrides.items():
+        if _normalize_symbol_key(key) != normalized:
+            continue
+        override_hours = getattr(override, "signal_cooldown_hours", None)
+        if override_hours is not None:
+            return {"cooldown_hours": float(override_hours), "canary_applied": True}
     return {
         "cooldown_hours": base_hours,
         "canary_applied": False,
@@ -312,6 +326,10 @@ class LiveTrading:
         # A signal is considered "same" if it has the same symbol + signal_type + structure_timestamp.
         self._signal_cooldown: Dict[str, datetime] = {}  # symbol -> cooldown expiry
         self._signal_cooldown_hours: float = float(getattr(config.strategy, "signal_cooldown_hours", 4.0))
+        self._tick_counter: int = 0
+        # Rate-limited log guards for high-frequency replay loops.
+        self._last_rate_limited_log_at: Dict[str, datetime] = {}
+        self._suppressed_rate_limited_logs: Dict[str, int] = {}
         
         # Auto halt recovery tracking (instance-level, not class-level)
         self._auto_recovery_attempts: list = []
@@ -417,6 +435,7 @@ class LiveTrading:
         )
         
         self.last_trace_log: Dict[str, datetime] = {} # Dashboard update throttling
+        self._current_cycle_id: Optional[str] = None
         self.last_account_sync = datetime.min.replace(tzinfo=timezone.utc)
         self.last_maintenance_run = datetime.min.replace(tzinfo=timezone.utc)
         self.last_data_maintenance = datetime.min.replace(tzinfo=timezone.utc)
@@ -824,10 +843,13 @@ class LiveTrading:
             # 4.5. Run first tick to hydrate runtime state (now safely after READY)
             if not (self.config.system.dry_run and not self.client.has_valid_futures_credentials()):
                 try:
+                    self._current_cycle_id = f"startup_{int(datetime.now(timezone.utc).timestamp())}"
                     await self._tick()
                     logger.info("Initial tick completed - runtime state hydrated")
                 except (OperationalError, DataError) as e:
                     logger.error("Initial tick failed", error=str(e), error_type=type(e).__name__)
+                finally:
+                    self._current_cycle_id = None
             
             # 4.6. Validate position protection (startup safety gate)
             try:
@@ -874,6 +896,7 @@ class LiveTrading:
                 
                 loop_start = datetime.now(timezone.utc)
                 cycle_id = f"tick_{loop_count}_{int(loop_start.timestamp())}"
+                self._current_cycle_id = cycle_id
 
                 try:
                     record_event("CYCLE_TICK_BEGIN", "system", {"cycle_id": cycle_id, "loop_count": loop_count})
@@ -905,6 +928,8 @@ class LiveTrading:
                         record_event("CYCLE_TICK_END", "system", {"cycle_id": cycle_id, "loop_count": loop_count})
                     except Exception as e:
                         logger.debug("Failed to record CYCLE_TICK_END event", error=str(e))
+                finally:
+                    self._current_cycle_id = None
                 
                 self.ticks_since_emit += 1
                 # P0.4: Write heartbeat file after each successful tick
@@ -1226,6 +1251,18 @@ class LiveTrading:
         from src.live.health_monitor import validate_position_protection
         await validate_position_protection(self)
 
+    def _rate_limited_log(self, key: str, interval_seconds: int) -> tuple[bool, int]:
+        """Return (emit_now, suppressed_since_last_emit)."""
+        now = datetime.now(timezone.utc)
+        last = self._last_rate_limited_log_at.get(key)
+        if last is None or (now - last).total_seconds() >= interval_seconds:
+            suppressed = int(self._suppressed_rate_limited_logs.get(key, 0))
+            self._last_rate_limited_log_at[key] = now
+            self._suppressed_rate_limited_logs[key] = 0
+            return True, suppressed
+        self._suppressed_rate_limited_logs[key] = int(self._suppressed_rate_limited_logs.get(key, 0)) + 1
+        return False, 0
+
     async def _tick(self):
         """
         Single iteration of live trading logic.
@@ -1237,6 +1274,7 @@ class LiveTrading:
                 f"_tick() called before READY (phase={self._startup_sm.phase.value}). "
                 "This is a startup ordering bug — no trading actions before READY."
             )
+        self._tick_counter = int(getattr(self, "_tick_counter", 0) or 0) + 1
 
         # 0. Kill Switch Check (HIGHEST PRIORITY)
         # P0.3: SAFE_HOLD semantics — kill switch active does NOT auto-flatten.
@@ -1253,75 +1291,93 @@ class LiveTrading:
         ks = self.kill_switch
         
         if ks.is_active():
-            # Determine if this is a recent emergency that should auto-flatten
-            should_auto_flatten = False
-            if ks.reason and ks.reason.allows_auto_flatten_on_startup and ks.activated_at:
-                age_seconds = (datetime.now(timezone.utc) - ks.activated_at).total_seconds()
-                if age_seconds < 120:  # < 2 minutes = recent emergency
-                    should_auto_flatten = True
-                    logger.critical(
-                        "Kill switch SAFE_HOLD: recent emergency — allowing auto-flatten",
-                        reason=ks.reason.value,
-                        age_seconds=f"{age_seconds:.0f}",
+            replay_fail_open = bool(getattr(self, "_replay_disable_candle_health_gate", False)) and (
+                ks.reason == KillSwitchReason.DATA_FAILURE
+            )
+            if replay_fail_open:
+                emit, suppressed = self._rate_limited_log("replay_data_failure_kill_switch", 60)
+                if emit:
+                    logger.warning(
+                        "Replay fail-open: bypassing data_failure kill switch",
+                        reason=ks.reason.value if ks.reason else "unknown",
+                        suppressed_since_last=suppressed,
                     )
-
-            if should_auto_flatten:
-                # EMERGENCY path: cancel all + close positions (original behavior)
-                logger.critical("Kill switch EMERGENCY: cancelling orders and closing positions")
-                try:
-                    cancelled = await self.client.cancel_all_orders()
-                    logger.info(f"Kill switch: Cancelled {len(cancelled)} orders")
-                except InvariantError:
-                    raise
-                except OperationalError as e:
-                    logger.error("Kill switch: cancel_all transient failure", kill_step="cancel_all", error=str(e), error_type=type(e).__name__)
-                except Exception as e:
-                    logger.exception("Kill switch: unexpected error in cancel_all", kill_step="cancel_all", error=str(e), error_type=type(e).__name__)
-                    raise
-
-                try:
-                    positions = await self.client.get_all_futures_positions()
-                    for pos in positions:
-                        if pos.get('size', 0) != 0:
-                            symbol = pos.get('symbol')
-                            try:
-                                await self.client.close_position(symbol)
-                                logger.warning(f"Kill switch: Emergency closed position for {symbol}")
-                            except InvariantError:
-                                raise
-                            except OperationalError as e:
-                                logger.error("Kill switch: close_position transient failure", kill_step="close_position", symbol=symbol, error=str(e), error_type=type(e).__name__)
-                            except Exception as e:
-                                logger.exception("Kill switch: unexpected error closing position", kill_step="close_position", symbol=symbol, error=str(e), error_type=type(e).__name__)
-                                raise
-                except InvariantError:
-                    raise
-                except OperationalError as e:
-                    logger.error("Kill switch: close_all transient failure", kill_step="close_all", error=str(e), error_type=type(e).__name__)
-                except Exception as e:
-                    logger.exception("Kill switch: unexpected error in close_all", kill_step="close_all", error=str(e), error_type=type(e).__name__)
-                    raise
             else:
-                # SAFE_HOLD path: cancel non-SL orders, verify stops, do NOT flatten
-                logger.critical(
-                    "Kill switch SAFE_HOLD: preserving positions + stops, refusing new entries",
-                    reason=ks.reason.value if ks.reason else "unknown",
-                    activated_at=ks.activated_at.isoformat() if ks.activated_at else "unknown",
-                )
-                try:
-                    cancelled, preserved_sls = await ks._cancel_non_sl_orders()
-                    logger.info(
-                        "Kill switch SAFE_HOLD: order cleanup done",
-                        cancelled_non_sl=cancelled,
-                        preserved_stop_losses=preserved_sls,
-                    )
-                except InvariantError:
-                    raise
-                except OperationalError as e:
-                    logger.error("Kill switch SAFE_HOLD: cancel transient failure", error=str(e), error_type=type(e).__name__)
-                except Exception as e:
-                    logger.exception("Kill switch SAFE_HOLD: unexpected error in cancel", error=str(e), error_type=type(e).__name__)
-                    raise
+            # Determine if this is a recent emergency that should auto-flatten
+                should_auto_flatten = False
+                if ks.reason and ks.reason.allows_auto_flatten_on_startup and ks.activated_at:
+                    age_seconds = (datetime.now(timezone.utc) - ks.activated_at).total_seconds()
+                    if age_seconds < 120:  # < 2 minutes = recent emergency
+                        should_auto_flatten = True
+                        logger.critical(
+                            "Kill switch SAFE_HOLD: recent emergency — allowing auto-flatten",
+                            reason=ks.reason.value,
+                            age_seconds=f"{age_seconds:.0f}",
+                        )
+
+                if should_auto_flatten:
+                    # EMERGENCY path: cancel all + close positions (original behavior)
+                    logger.critical("Kill switch EMERGENCY: cancelling orders and closing positions")
+                    try:
+                        cancelled = await self.client.cancel_all_orders()
+                        logger.info(f"Kill switch: Cancelled {len(cancelled)} orders")
+                    except InvariantError:
+                        raise
+                    except OperationalError as e:
+                        logger.error("Kill switch: cancel_all transient failure", kill_step="cancel_all", error=str(e), error_type=type(e).__name__)
+                    except Exception as e:
+                        logger.exception("Kill switch: unexpected error in cancel_all", kill_step="cancel_all", error=str(e), error_type=type(e).__name__)
+                        raise
+
+                    try:
+                        positions = await self.client.get_all_futures_positions()
+                        for pos in positions:
+                            if pos.get('size', 0) != 0:
+                                symbol = pos.get('symbol')
+                                try:
+                                    await self.client.close_position(symbol)
+                                    logger.warning(f"Kill switch: Emergency closed position for {symbol}")
+                                except InvariantError:
+                                    raise
+                                except OperationalError as e:
+                                    logger.error("Kill switch: close_position transient failure", kill_step="close_position", symbol=symbol, error=str(e), error_type=type(e).__name__)
+                                except Exception as e:
+                                    logger.exception("Kill switch: unexpected error closing position", kill_step="close_position", symbol=symbol, error=str(e), error_type=type(e).__name__)
+                                    raise
+                    except InvariantError:
+                        raise
+                    except OperationalError as e:
+                        logger.error("Kill switch: close_all transient failure", kill_step="close_all", error=str(e), error_type=type(e).__name__)
+                    except Exception as e:
+                        logger.exception("Kill switch: unexpected error in close_all", kill_step="close_all", error=str(e), error_type=type(e).__name__)
+                        raise
+                else:
+                    # SAFE_HOLD path: cancel non-SL orders, verify stops, do NOT flatten
+                    emit, suppressed = self._rate_limited_log("kill_switch_safe_hold", 60)
+                    if emit:
+                        logger.critical(
+                            "Kill switch SAFE_HOLD: preserving positions + stops, refusing new entries",
+                            reason=ks.reason.value if ks.reason else "unknown",
+                            activated_at=ks.activated_at.isoformat() if ks.activated_at else "unknown",
+                            suppressed_since_last=suppressed,
+                        )
+                    try:
+                        cancelled, preserved_sls = await ks._cancel_non_sl_orders()
+                        emit_cleanup, suppressed_cleanup = self._rate_limited_log("kill_switch_safe_hold_cleanup", 60)
+                        if emit_cleanup:
+                            logger.info(
+                                "Kill switch SAFE_HOLD: order cleanup done",
+                                cancelled_non_sl=cancelled,
+                                preserved_stop_losses=preserved_sls,
+                                suppressed_since_last=suppressed_cleanup,
+                            )
+                    except InvariantError:
+                        raise
+                    except OperationalError as e:
+                        logger.error("Kill switch SAFE_HOLD: cancel transient failure", error=str(e), error_type=type(e).__name__)
+                    except Exception as e:
+                        logger.exception("Kill switch SAFE_HOLD: unexpected error in cancel", error=str(e), error_type=type(e).__name__)
+                        raise
 
             # Stop processing (no new entries while kill switch is active)
             return
@@ -1336,8 +1392,16 @@ class LiveTrading:
         
         # 1. Check Data Health
         if not self.data_acq.is_healthy():
-            logger.error("Data acquisition unhealthy")
-            return
+            if getattr(self, "_replay_disable_candle_health_gate", False):
+                emit, suppressed = self._rate_limited_log("replay_data_acq_unhealthy", 60)
+                if emit:
+                    logger.warning(
+                        "Replay fail-open: data acquisition unhealthy, continuing in degraded mode",
+                        suppressed_since_last=suppressed,
+                    )
+            else:
+                logger.error("Data acquisition unhealthy")
+                return
 
         # 2. Sync Active Positions (Global Sync)
         # Phase 2 Fix: Pass positions to _sync_positions to avoid duplicate API call
@@ -1428,7 +1492,10 @@ class LiveTrading:
             )
             min_healthy = getattr(self.config.data, "min_healthy_coins", 30)
             min_ratio = getattr(self.config.data, "min_health_ratio", 0.25)
-            if total_coins > 0:
+            if getattr(self, "_replay_disable_candle_health_gate", False):
+                # Replay research can run on partial windows to discover signals.
+                self.trade_paused = False
+            elif total_coins > 0:
                 ratio = coins_with_sufficient_candles / total_coins
                 # When universe is smaller than min_healthy, require all coins to have data (ratio 1.0)
                 effective_min = min(min_healthy, total_coins)
@@ -1763,14 +1830,23 @@ class LiveTrading:
             if symbols_with_neither > 0 or symbols_with_futures < len(market_symbols):
                 self._last_ticker_skip_log = getattr(self, "_last_ticker_skip_log", datetime.min.replace(tzinfo=timezone.utc))
                 if (datetime.now(timezone.utc) - self._last_ticker_skip_log).total_seconds() >= 300:
-                    logger.warning(
-                        "Ticker coverage: spot/futures",
-                        total=len(market_symbols),
-                        with_spot=symbols_with_spot,
-                        with_futures=symbols_with_futures,
-                        with_neither=symbols_with_neither,
-                        hint="Trading requires futures ticker; ensure bulk API keys match discovery (CCXT vs PF_*).",
-                    )
+                    if getattr(self, "_replay_relaxed_signal_gates", False):
+                        logger.info(
+                            "Replay ticker coverage: using spot fallback",
+                            total=len(market_symbols),
+                            with_spot=symbols_with_spot,
+                            with_futures=symbols_with_futures,
+                            with_neither=symbols_with_neither,
+                        )
+                    else:
+                        logger.warning(
+                            "Ticker coverage: spot/futures",
+                            total=len(market_symbols),
+                            with_spot=symbols_with_spot,
+                            with_futures=symbols_with_futures,
+                            with_neither=symbols_with_neither,
+                            hint="Trading requires futures ticker; ensure bulk API keys match discovery (CCXT vs PF_*).",
+                        )
                     self._last_ticker_skip_log = datetime.now(timezone.utc)
         except (OperationalError, DataError) as e:
             logger.error("Failed batch data fetch", error=str(e), error_type=type(e).__name__)
@@ -1830,14 +1906,56 @@ class LiveTrading:
 
                     if has_spot:
                         spot_ticker = map_spot_tickers[spot_symbol]
-                        spot_price = Decimal(str(spot_ticker["last"]))
+                        spot_price = Decimal(str(spot_ticker.get("last", 0) or 0))
+                        if (
+                            spot_price <= 0
+                            and getattr(self, "_replay_relaxed_signal_gates", False)
+                        ):
+                            bid = Decimal(str(spot_ticker.get("bid", 0) or 0))
+                            ask = Decimal(str(spot_ticker.get("ask", 0) or 0))
+                            if bid > 0 and ask > 0:
+                                spot_price = (bid + ask) / 2
                     else:
                         spot_price = None
                     # map_futures_tickers is Dict[str, Decimal] - mark price directly
                     mark_price = map_futures_tickers.get(futures_symbol) if has_futures else None
                     if not mark_price:
                         mark_price = spot_price
+                    if (
+                        (not mark_price or Decimal(str(mark_price)) <= 0)
+                        and getattr(self, "_replay_relaxed_signal_gates", False)
+                    ):
+                        # Replay fallback: bootstrap price from candles when ticker carries zeros.
+                        await self._update_candles(spot_symbol)
+                        replay_candles = self.candle_manager.get_candles(spot_symbol, "15m")
+                        if replay_candles:
+                            last_close = Decimal(str(replay_candles[-1].close))
+                            if last_close > 0:
+                                mark_price = last_close
+                                if not spot_price or spot_price <= 0:
+                                    spot_price = last_close
+                        if not mark_price or Decimal(str(mark_price)) <= 0:
+                            # Last-resort replay fallback: use latest cached DB candle close.
+                            for tf in ("15m", "1h", "4h", "1d"):
+                                latest_ts = get_latest_candle_timestamp(spot_symbol, tf)
+                                if not latest_ts:
+                                    continue
+                                db_candles = db_get_candles(
+                                    spot_symbol,
+                                    tf,
+                                    start_time=latest_ts,
+                                    end_time=latest_ts,
+                                )
+                                if not db_candles:
+                                    continue
+                                db_close = Decimal(str(db_candles[-1].close))
+                                if db_close > 0:
+                                    mark_price = db_close
+                                    if not spot_price or spot_price <= 0:
+                                        spot_price = db_close
+                                    break
                     if not mark_price:
+                        _af_skip("no_mark_price")
                         return
                     if spot_price is None:
                         spot_price = mark_price  # Use futures mark when no spot ticker (futures-only)
@@ -1853,7 +1971,14 @@ class LiveTrading:
                             has_spec = False
                     
                     skip_reason: Optional[str] = None
-                    if not has_futures:
+                    if (
+                        getattr(self, "_replay_relaxed_signal_gates", False)
+                        and has_spot
+                        and not has_futures
+                    ):
+                        # Replay fallback: keep symbol tradable with spot-only ticker coverage.
+                        skip_reason = None
+                    elif not has_futures:
                         skip_reason = "no_futures_ticker"
                     elif not has_spec:
                         skip_reason = "no_instrument_spec"
@@ -1891,14 +2016,33 @@ class LiveTrading:
                             thresholds=self.sanity_thresholds,
                         )
                         if not stage_a.passed:
-                            _af_skip(f"stage_a_{stage_a.reason or 'failed'}")
-                            self.data_quality_tracker.record_result(
-                                spot_symbol, passed=False, reason=stage_a.reason,
-                            )
-                            return
+                            if getattr(self, "_replay_relaxed_signal_gates", False):
+                                _af_skip(f"stage_a_relaxed_bypass_{stage_a.reason or 'failed'}")
+                            else:
+                                _af_skip(f"stage_a_{stage_a.reason or 'failed'}")
+                                self.data_quality_tracker.record_result(
+                                    spot_symbol, passed=False, reason=stage_a.reason,
+                                )
+                                return
 
                     # Update Candles (spot first; futures fallback when spot unavailable)
                     await self._update_candles(spot_symbol)
+                    if getattr(self, "_replay_relaxed_signal_gates", False):
+                        # Replay fallback: hydrate in-memory candles from DB cache
+                        # when exchange candle pulls are unavailable for this tick.
+                        now_utc = datetime.now(timezone.utc)
+                        lookback_days_by_tf = {"15m": 14, "1h": 60, "4h": 180, "1d": 365}
+                        for tf, lookback_days in lookback_days_by_tf.items():
+                            if self.candle_manager.get_candles(spot_symbol, tf):
+                                continue
+                            db_candles = db_get_candles(
+                                spot_symbol,
+                                tf,
+                                start_time=now_utc - timedelta(days=lookback_days),
+                                end_time=now_utc,
+                            )
+                            if db_candles:
+                                self.candle_manager.candles.setdefault(tf, {})[spot_symbol] = db_candles
                     
                     # Position Management (V2 State Machine)
                     position_data = map_positions.get(futures_symbol)
@@ -1986,11 +2130,14 @@ class LiveTrading:
                         )
                         if warmup_diag:
                             logger.info("4h_warmup_skip", **warmup_diag)
-                        _af_skip(f"stage_b_{stage_b.reason or 'failed'}")
-                        self.data_quality_tracker.record_result(
-                            spot_symbol, passed=False, reason=stage_b.reason,
-                        )
-                        return
+                        if getattr(self, "_replay_relaxed_signal_gates", False):
+                            _af_skip(f"stage_b_relaxed_bypass_{stage_b.reason or 'failed'}")
+                        else:
+                            _af_skip(f"stage_b_{stage_b.reason or 'failed'}")
+                            self.data_quality_tracker.record_result(
+                                spot_symbol, passed=False, reason=stage_b.reason,
+                            )
+                            return
 
                     # Both stages passed -- record success
                     self.data_quality_tracker.record_result(spot_symbol, passed=True)
@@ -2065,6 +2212,8 @@ class LiveTrading:
                                 cooldown_until = last_close_at + timedelta(
                                     minutes=int(close_ctx["cooldown_minutes"])
                                 )
+                        if getattr(self, "_replay_relaxed_signal_gates", False):
+                            cooldown_until = None
                         if cooldown_until and now_cd < cooldown_until:
                             kind = (cooldown_kind or "GLOBAL_THROTTLE").strip().upper()
                             if kind == "IN_POSITION":
@@ -2155,50 +2304,79 @@ class LiveTrading:
                                 if not self.auction_allocator:
                                     order_outcome = await self._handle_signal(signal, spot_price, mark_price)
                     
-                    # Trace Logging (Throttled)
                     now = datetime.now(timezone.utc)
+                    # Counterfactual twin tape: capture per-cycle decision context.
+                    decision_id = None
+                    if isinstance(getattr(signal, "meta_info", None), dict):
+                        decision_id = signal.meta_info.get("decision_id")
+                    if not decision_id:
+                        decision_id = (
+                            f"{self._current_cycle_id or 'cycle'}:"
+                            f"{spot_symbol}:"
+                            f"{int(now.timestamp())}"
+                        )
+                    trace_details = {
+                        "signal": signal.signal_type.value,
+                        "regime": signal.regime,
+                        "bias": signal.higher_tf_bias,
+                        "adx": float(signal.adx) if signal.adx else 0.0,
+                        "atr": float(signal.atr) if signal.atr else 0.0,
+                        "ema200_slope": signal.ema200_slope,
+                        "spot_price": float(spot_price),
+                        "setup_quality": sum(
+                            float(v)
+                            for v in (signal.score_breakdown or {}).values()
+                            if isinstance(v, (int, float, Decimal))
+                        ),
+                        "score_breakdown": signal.score_breakdown or {},
+                        "status": "active",
+                        "candle_count": candle_count,
+                        "reason": signal.reasoning,
+                        "structure": signal.structure_info,
+                        "meta": signal.meta_info,
+                        "cycle_id": self._current_cycle_id,
+                        "is_tradable": bool(is_tradable),
+                    }
+                    if self.institutional_memory_manager and self.institutional_memory_manager.is_enabled_for_symbol(spot_symbol):
+                        thesis_snapshot = self.institutional_memory_manager.update_conviction_for_symbol(
+                            spot_symbol,
+                            current_price=spot_price,
+                            current_volume_avg=None,
+                            emit_log=True,
+                        )
+                        _attach_thesis_trace_fields(trace_details, thesis_snapshot)
+                    if signal.signal_type != SignalType.NO_SIGNAL:
+                        trace_details["skipped"] = not is_tradable
+                        if not is_tradable:
+                            trace_details["skip_reason"] = skip_reason or "unknown"
+                        elif order_outcome is not None:
+                            trace_details["order_placed"] = order_outcome.get("order_placed", False)
+                            if not order_outcome.get("order_placed") and order_outcome.get("reason"):
+                                trace_details["order_fail_reason"] = order_outcome["reason"]
+                    try:
+                        from src.storage.repository import async_record_event
+
+                        await async_record_event(
+                            event_type="COUNTERFACTUAL_DECISION",
+                            symbol=spot_symbol,
+                            details=trace_details,
+                            decision_id=decision_id,
+                            timestamp=now,
+                        )
+                    except (OperationalError, DataError, OSError) as e:
+                        logger.debug(
+                            "Failed to record counterfactual decision event",
+                            symbol=spot_symbol,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                        )
+
+                    # Trace Logging (Throttled)
                     last_trace = self.last_trace_log.get(spot_symbol, datetime.min.replace(tzinfo=timezone.utc))
                     
                     if (now - last_trace).total_seconds() > 300: # 5 minutes
                         try:
                             from src.storage.repository import async_record_event
-                            
-                            trace_details = {
-                                "signal": signal.signal_type.value,
-                                "regime": signal.regime,
-                                "bias": signal.higher_tf_bias,
-                                "adx": float(signal.adx) if signal.adx else 0.0,
-                                "atr": float(signal.atr) if signal.atr else 0.0,
-                                "ema200_slope": signal.ema200_slope,
-                                "spot_price": float(spot_price),
-                                "setup_quality": sum(
-                                    float(v)
-                                    for v in (signal.score_breakdown or {}).values()
-                                    if isinstance(v, (int, float, Decimal))
-                                ),
-                                "score_breakdown": signal.score_breakdown or {},
-                                "status": "active",
-                                "candle_count": candle_count,
-                                "reason": signal.reasoning,  # CAPTURE REASON
-                                "structure": signal.structure_info,
-                                "meta": signal.meta_info
-                            }
-                            if self.institutional_memory_manager and self.institutional_memory_manager.is_enabled_for_symbol(spot_symbol):
-                                thesis_snapshot = self.institutional_memory_manager.update_conviction_for_symbol(
-                                    spot_symbol,
-                                    current_price=spot_price,
-                                    current_volume_avg=None,
-                                    emit_log=True,
-                                )
-                                _attach_thesis_trace_fields(trace_details, thesis_snapshot)
-                            if signal.signal_type != SignalType.NO_SIGNAL:
-                                trace_details["skipped"] = not is_tradable
-                                if not is_tradable:
-                                    trace_details["skip_reason"] = skip_reason or "unknown"
-                                elif order_outcome is not None:
-                                    trace_details["order_placed"] = order_outcome.get("order_placed", False)
-                                    if not order_outcome.get("order_placed") and order_outcome.get("reason"):
-                                        trace_details["order_fail_reason"] = order_outcome["reason"]
 
                             if signal.signal_type == SignalType.NO_SIGNAL and signal.reasoning:
                                 # Downgrade to debug: this fires for most coins every cycle.
@@ -2213,6 +2391,7 @@ class LiveTrading:
                                 event_type="DECISION_TRACE",
                                 symbol=spot_symbol,
                                 details=trace_details,
+                                decision_id=decision_id,
                                 timestamp=now
                             )
                             self.last_trace_log[spot_symbol] = now
@@ -2238,7 +2417,11 @@ class LiveTrading:
         # `self.markets` may include symbols that must be hard-blocked (e.g. fiat pairs),
         # and `process_coin()` can still trade them via futures tickers even without spot tickers.
         # Data quality filter: exclude SUSPENDED/DEGRADED-skipped symbols at scheduling level.
-        analyzable = [s for s in market_symbols if self.data_quality_tracker.should_analyze(s)]
+        # Replay research can bypass this gate to keep signal exploration active.
+        if getattr(self, "_replay_relaxed_signal_gates", False):
+            analyzable = list(market_symbols)
+        else:
+            analyzable = [s for s in market_symbols if self.data_quality_tracker.should_analyze(s)]
         analysis_funnel["symbols_skipped_by_reason"]["data_quality_gate"] = max(
             0, len(market_symbols) - len(analyzable)
         )
@@ -2248,14 +2431,24 @@ class LiveTrading:
         # Run auction mode allocation (if enabled) - after all signals processed
         if self.auction_allocator:
             signals_count = len(self.auction_signals_this_tick)
-            logger.info("AUCTION_START", signals_collected=signals_count)
-            logger.info(
-                "Auction: About to run allocation",
-                signals_collected=signals_count,
-                auction_allocator_exists=bool(self.auction_allocator),
-            )
+            emit_auction_tick_log = True
+            if getattr(self, "_replay_disable_candle_health_gate", False):
+                cycle_num = int(
+                    getattr(self, "_last_cycle_count", 0)
+                    or getattr(self, "_tick_counter", 0)
+                    or 0
+                )
+                emit_auction_tick_log = signals_count > 0 or cycle_num <= 3 or (cycle_num % 100 == 0)
+            if emit_auction_tick_log:
+                logger.info("AUCTION_START", signals_collected=signals_count)
+                logger.info(
+                    "Auction: About to run allocation",
+                    signals_collected=signals_count,
+                    auction_allocator_exists=bool(self.auction_allocator),
+                )
             await self._run_auction_allocation(all_raw_positions)
-            logger.info("AUCTION_END", signals_collected=signals_count)
+            if emit_auction_tick_log:
+                logger.info("AUCTION_END", signals_collected=signals_count)
         else:
             logger.debug("Auction: Skipped (auction_allocator is None)")
         

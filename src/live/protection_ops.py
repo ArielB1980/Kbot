@@ -385,7 +385,7 @@ async def place_missing_stops_for_unprotected(
             result = await lt.execution_gateway.place_emergency_order(
                 symbol=unified,
                 side=close_side,
-                order_type="stop_loss",
+                order_type="stop",
                 size=size,
                 stop_price=stop_price,
                 reduce_only=True,

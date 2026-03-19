@@ -91,10 +91,37 @@ async def handle_signal_v2(
     """
     import uuid
 
-    def _fail(reason: str) -> dict:
+    decision_id = None
+    if isinstance(getattr(signal, "meta_info", None), dict):
+        decision_id = signal.meta_info.get("decision_id")
+    cycle_id = getattr(lt, "_current_cycle_id", None)
+
+    async def _emit_counterfactual_action(order_placed: bool, reason: Optional[str]) -> None:
+        if not decision_id:
+            return
+        try:
+            from src.storage.repository import async_record_event
+
+            await async_record_event(
+                event_type="COUNTERFACTUAL_ACTION",
+                symbol=signal.symbol,
+                decision_id=decision_id,
+                details={
+                    "order_placed": bool(order_placed),
+                    "reason": reason,
+                    "signal_type": signal.signal_type.value,
+                    "cycle_id": cycle_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to record counterfactual action", symbol=signal.symbol, error=str(exc))
+
+    async def _fail(reason: str) -> dict:
+        await _emit_counterfactual_action(False, reason)
         return {"order_placed": False, "reason": reason}
 
-    def _ok() -> dict:
+    async def _ok() -> dict:
+        await _emit_counterfactual_action(True, None)
         return {"order_placed": True, "reason": None}
 
     logger.info(
@@ -109,9 +136,19 @@ async def handle_signal_v2(
     equity, available_margin, _ = await calculate_effective_equity(
         balance, base_currency=base, kraken_client=lt.client
     )
+    if (
+        getattr(lt, "_replay_relaxed_signal_gates", False)
+        and equity <= 0
+    ):
+        replay_equity = Decimal(
+            str(getattr(getattr(lt.config, "backtest", None), "starting_equity", Decimal("10000")))
+        )
+        equity = replay_equity
+        if available_margin <= 0:
+            available_margin = replay_equity
     if equity <= 0:
         logger.error("Insufficient equity for trading", equity=str(equity))
-        return _fail("Insufficient equity for trading")
+        return await _fail("Insufficient equity for trading")
 
     # 2. Risk Validation (Safety Gate)
     symbol_tier = lt.market_discovery.get_symbol_tier(signal.symbol) if lt.market_discovery else "C"
@@ -141,7 +178,7 @@ async def handle_signal_v2(
         reasons = getattr(decision, "rejection_reasons", []) or []
         detail = reasons[0] if reasons else "Trade rejected by Risk Manager"
         logger.warning("Trade rejected by Risk Manager", symbol=signal.symbol, reasons=reasons)
-        return _fail(f"Risk Manager rejected: {detail}")
+        return await _fail(f"Risk Manager rejected: {detail}")
     logger.info("Risk approved", symbol=signal.symbol, notional=str(decision.position_notional))
 
     # 3. Map to futures symbol
@@ -151,17 +188,24 @@ async def handle_signal_v2(
 
     # 3b. Enforce minimum position notional (venue min_size * price)
     if hasattr(lt, "instrument_spec_registry") and lt.instrument_spec_registry and mark_price > 0:
-        min_size = lt.instrument_spec_registry.get_effective_min_size(futures_symbol)
-        min_notional = min_size * mark_price
-        if decision.position_notional < min_notional:
-            logger.warning(
-                "Position notional below venue minimum - rejecting",
-                symbol=signal.symbol,
-                notional=str(decision.position_notional),
-                min_notional=str(min_notional),
-                min_size=str(min_size),
-            )
-            return _fail(f"Position notional {decision.position_notional} below venue min {min_notional}")
+        spec = lt.instrument_spec_registry.get_spec(futures_symbol)
+        skip_min_notional_check = (
+            getattr(lt, "_replay_relaxed_signal_gates", False) and spec is None
+        )
+        if not skip_min_notional_check:
+            min_size = lt.instrument_spec_registry.get_effective_min_size(futures_symbol)
+            min_notional = min_size * mark_price
+            if decision.position_notional < min_notional:
+                logger.warning(
+                    "Position notional below venue minimum - rejecting",
+                    symbol=signal.symbol,
+                    notional=str(decision.position_notional),
+                    min_notional=str(min_notional),
+                    min_size=str(min_size),
+                )
+                return await _fail(
+                    f"Position notional {decision.position_notional} below venue min {min_notional}"
+                )
 
     # 4. Generate entry plan to get TP levels
     step_size = None
@@ -204,7 +248,7 @@ async def handle_signal_v2(
 
     if action.type == ActionTypeV2.REJECT_ENTRY:
         logger.warning("Entry REJECTED by State Machine", symbol=signal.symbol, reason=action.reason)
-        return _fail(f"State Machine rejected: {action.reason or 'REJECT_ENTRY'}")
+        return await _fail(f"State Machine rejected: {action.reason or 'REJECT_ENTRY'}")
     logger.info(
         "State machine accepted entry",
         symbol=signal.symbol,
@@ -229,7 +273,7 @@ async def handle_signal_v2(
             result = await lt.execution_gateway.execute_action(close_action)
             if not result.success:
                 logger.error("Failed to close for replacement", error=result.error)
-                return _fail(f"Failed to close for replacement: {result.error}")
+                return await _fail(f"Failed to close for replacement: {result.error}")
 
         lt.position_registry.confirm_reversal_closed(decision.close_symbol)
 
@@ -242,7 +286,7 @@ async def handle_signal_v2(
         lt.position_registry.register_position(position)
     except (OperationalError, DataError) as e:
         logger.error("Failed to register position", error=str(e), error_type=type(e).__name__)
-        return _fail(f"Failed to register position: {e}")
+        return await _fail(f"Failed to register position: {e}")
 
     # 9. Execute entry via Execution Gateway
     logger.info(
@@ -255,7 +299,7 @@ async def handle_signal_v2(
     if not result.success:
         logger.error("Entry failed", error=result.error)
         position.mark_error(f"Entry failed: {result.error}")
-        return _fail(f"Entry failed: {result.error}")
+        return await _fail(f"Entry failed: {result.error}")
 
     logger.info(
         "Entry order placed via V2",
@@ -315,4 +359,4 @@ async def handle_signal_v2(
     except (OperationalError, ImportError, OSError):
         pass  # Alert failure must never block trading
 
-    return _ok()
+    return await _ok()

@@ -80,6 +80,7 @@ class ReplayMetrics:
     failed_ticks: int = 0
     exceptions_caught: int = 0
     exceptions_by_type: Dict[str, int] = field(default_factory=dict)
+    trade_paused_ticks: int = 0
 
     # -- Time series --
     equity_curve: List[EquitySnapshot] = field(default_factory=list)
@@ -212,6 +213,11 @@ class ReplayMetrics:
                 "failed_ticks": self.failed_ticks,
                 "exceptions_caught": self.exceptions_caught,
                 "exceptions_by_type": dict(self.exceptions_by_type),
+                "trade_paused_ticks": self.trade_paused_ticks,
+                "trade_paused_ratio": round(
+                    (float(self.trade_paused_ticks) / float(self.total_ticks)) if self.total_ticks > 0 else 0.0,
+                    4,
+                ),
             },
         }
 

@@ -235,9 +235,52 @@ class ReplayKrakenClient:
             "mid_fallback_count": 0,  # Fix 1 micro-add: tracks data store gaps
             "funding_events": 0,
             "latency_injected_ms_total": 0.0,
+            "trades_closed": 0,
         }
+        self._symbol_resolution_cache: Dict[str, str] = {}
 
     # -- Initialization --
+
+    def _resolve_market_symbol(self, symbol: str) -> str:
+        """Map futures-style symbols to loaded replay market symbols."""
+        raw = str(symbol or "").strip()
+        if not raw:
+            return raw
+        if raw in self._symbol_resolution_cache:
+            return self._symbol_resolution_cache[raw]
+
+        available = set(self._data.get_all_symbols())
+        candidates: list[str] = []
+
+        def _add(val: str) -> None:
+            if val and val not in candidates:
+                candidates.append(val)
+
+        core = raw.split(":", 1)[0]
+        _add(raw)
+        _add(core)
+        _add(core.replace("XBT", "BTC"))
+        if core.startswith("PF_"):
+            core = core[3:]
+            _add(core)
+            _add(core.replace("XBT", "BTC"))
+        if "/" not in core and core.endswith("USD") and len(core) > 3:
+            s = f"{core[:-3]}/USD"
+            _add(s)
+            _add(s.replace("XBT", "BTC"))
+
+        resolved = next((c for c in candidates if c in available), candidates[0] if candidates else raw)
+        self._symbol_resolution_cache[raw] = resolved
+        return resolved
+
+    def _market_bar_at(self, symbol: str, at: datetime) -> Optional[CandleBar]:
+        """Best-effort current bar lookup across loaded replay timeframes."""
+        resolved = self._resolve_market_symbol(symbol)
+        for tf in ("1m", "5m", "15m", "1h", "4h", "1d"):
+            bar = self._data.get_candle_at(resolved, tf, at)
+            if bar is not None:
+                return bar
+        return None
 
     async def initialize(self) -> None:
         """No-op for replay."""
@@ -302,7 +345,7 @@ class ReplayKrakenClient:
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
                 continue
 
-            bar = self._data.get_candle_at(order.symbol, "1m", now)
+            bar = self._market_bar_at(order.symbol, now)
             if bar is None:
                 continue
 
@@ -618,6 +661,7 @@ class ReplayKrakenClient:
                     # Close existing position (logical fill 1)
                     pnl = self._calculate_close_pnl(pos, fill.price, pos.size)
                     self._realized_pnl += pnl
+                    self._metrics["trades_closed"] += 1
                     remaining = effective_size - pos.size
                     del self._positions[fill.symbol]
                     if remaining > 0 and not reduce_only:
@@ -700,7 +744,7 @@ class ReplayKrakenClient:
 
     def _update_unrealized_pnl(self, now: datetime) -> None:
         for pos in self._positions.values():
-            bar = self._data.get_candle_at(pos.symbol, "1m", now)
+            bar = self._market_bar_at(pos.symbol, now)
             if bar:
                 mark = bar.close
                 if pos.side == "long":
@@ -755,7 +799,7 @@ class ReplayKrakenClient:
 
     async def get_futures_mark_price(self, symbol: str) -> Decimal:
         self._check_fault("get_futures_mark_price")
-        bar = self._data.get_candle_at(symbol, "1m", self._clock.now())
+        bar = self._market_bar_at(symbol, self._clock.now())
         return bar.close if bar else Decimal("0")
 
     async def get_futures_tickers_bulk(self) -> Dict[str, Decimal]:
@@ -763,7 +807,7 @@ class ReplayKrakenClient:
         await self._maybe_inject_latency()
         result = {}
         for s in self._data.get_all_symbols():
-            bar = self._data.get_candle_at(s, "1m", self._clock.now())
+            bar = self._market_bar_at(s, self._clock.now())
             if bar:
                 result[s] = bar.close
         return result
@@ -773,7 +817,7 @@ class ReplayKrakenClient:
         await self._maybe_inject_latency()
         result = {}
         for s in self._data.get_all_symbols():
-            bar = self._data.get_candle_at(s, "1m", self._clock.now())
+            bar = self._market_bar_at(s, self._clock.now())
             liq = self._data.get_liquidity_at(s, self._clock.now())
             if bar:
                 mid = bar.close
@@ -831,6 +875,7 @@ class ReplayKrakenClient:
 
     async def get_futures_position(self, symbol: str) -> Optional[Dict]:
         self._check_fault("get_futures_position")
+        symbol = self._resolve_market_symbol(symbol)
         pos = self._positions.get(symbol)
         if not pos:
             return None
@@ -875,8 +920,10 @@ class ReplayKrakenClient:
         if self._dry_run:
             raise OperationalError("dry_run_active: order placement refused at transport boundary")
 
+        symbol = self._resolve_market_symbol(symbol)
+
         # -- Order rejection checks (Fix 3: realism) --
-        bar = self._data.get_candle_at(symbol, "1m", self._clock.now())
+        bar = self._market_bar_at(symbol, self._clock.now())
         liq = self._data.get_liquidity_at(symbol, self._clock.now())
         mid = bar.close if bar else Decimal("0")
 
@@ -1073,6 +1120,7 @@ class ReplayKrakenClient:
 
     async def close_position(self, symbol: str) -> Dict[str, Any]:
         self._check_fault("close_position")
+        symbol = self._resolve_market_symbol(symbol)
         pos = self._positions.get(symbol)
         if not pos:
             raise DataError(f"No position for {symbol}")
@@ -1086,7 +1134,8 @@ class ReplayKrakenClient:
     # -- Helpers --
 
     async def _make_ticker_dict(self, symbol: str) -> Dict:
-        bar = self._data.get_candle_at(symbol, "1m", self._clock.now())
+        symbol = self._resolve_market_symbol(symbol)
+        bar = self._market_bar_at(symbol, self._clock.now())
         liq = self._data.get_liquidity_at(symbol, self._clock.now())
         if not bar:
             return {"symbol": symbol, "last": 0, "bid": 0, "ask": 0, "volume": 0}
@@ -1110,6 +1159,7 @@ class ReplayKrakenClient:
         self, symbol: str, timeframe: str, since: Optional[int], limit: Optional[int],
     ) -> List[Candle]:
         """Convert CandleBars to domain Candle objects."""
+        symbol = self._resolve_market_symbol(symbol)
         now = self._clock.now()
         bars = self._data.get_candles_up_to(symbol, timeframe, now, limit=limit or 500)
         if since:

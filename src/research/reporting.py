@@ -18,6 +18,7 @@ def write_leaderboard(path: Path, run_id: str, baseline_id: str, results: list[C
         "candidates": [
             {
                 "candidate_id": r.candidate_id,
+                "symbol": r.symbol,
                 "params": r.params,
                 "score": r.score,
                 "accepted": r.accepted,
@@ -64,5 +65,35 @@ def write_summary(path: Path, run_id: str, baseline: CandidateResult, best: Cand
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    return path
+
+
+def write_per_symbol_best(path: Path, run_id: str, best_by_symbol: dict[str, CandidateResult]) -> Path:
+    """Write per-symbol winner payload for runtime integration."""
+    payload = {
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "best_by_symbol": {
+            symbol: {
+                "candidate_id": result.candidate_id,
+                "params": result.params,
+                "score": result.score,
+                "accepted": result.accepted,
+                "metrics": {
+                    "net_return_pct": result.metrics.net_return_pct,
+                    "max_drawdown_pct": result.metrics.max_drawdown_pct,
+                    "sharpe": result.metrics.sharpe,
+                    "sortino": result.metrics.sortino,
+                    "win_rate_pct": result.metrics.win_rate_pct,
+                    "trade_count": result.metrics.trade_count,
+                    "rejection_reasons": result.metrics.rejection_reasons,
+                },
+                "metadata": result.metadata,
+            }
+            for symbol, result in sorted(best_by_symbol.items())
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 

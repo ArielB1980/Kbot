@@ -51,6 +51,9 @@ class ResearchTelegramRouter:
         phase = state.get("phase", "idle")
         cur = int(state.get("iteration", 0))
         total = int(state.get("total_iterations", 0))
+        current_symbol = state.get("current_symbol") or "-"
+        total_symbols = int(state.get("total_symbols", 0))
+        completed_symbols = len(state.get("completed_symbols") or [])
         best = state.get("best_candidate_id") or "-"
         err = state.get("last_error") or "-"
         updated = state.get("updated_at") or datetime.now(timezone.utc).isoformat()
@@ -58,6 +61,8 @@ class ResearchTelegramRouter:
             "🔬 <b>Research Status</b>\n"
             f"Phase: <b>{phase}</b>\n"
             f"Progress: {cur}/{total}\n"
+            f"Current Symbol: <code>{current_symbol}</code>\n"
+            f"Symbol Progress: {completed_symbols}/{total_symbols}\n"
             f"Best: <code>{best}</code>\n"
             f"Last Error: <code>{err}</code>\n"
             f"Updated: {updated}"
@@ -78,6 +83,7 @@ class ResearchTelegramRouter:
             lines.append(
                 (
                     f"\n• <code>{row.get('candidate_id')}</code> score={row.get('score', 0):.2f}\n"
+                    f"  symbol={row.get('symbol') or '-'}\n"
                     f"  return={metrics.get('net_return_pct', 0):+.2f}% "
                     f"dd={metrics.get('max_drawdown_pct', 0):.2f}% "
                     f"sharpe={metrics.get('sharpe', 0):.2f} "

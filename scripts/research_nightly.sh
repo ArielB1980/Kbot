@@ -17,14 +17,27 @@ if [[ -f ".env" ]]; then
   set +a
 fi
 
-MODE="${RESEARCH_NIGHTLY_MODE:-backtest}"
-ITERATIONS="${RESEARCH_NIGHTLY_ITER:-30}"
+MODE="${RESEARCH_NIGHTLY_MODE:-replay}"
+ITERATIONS="${RESEARCH_NIGHTLY_ITER:-50}"
 DAYS="${RESEARCH_NIGHTLY_DAYS:-90}"
 SYMBOLS="${RESEARCH_NIGHTLY_SYMBOLS:-BTC/USD,ETH/USD,SOL/USD,XRP/USD,ADA/USD,LINK/USD}"
+OBJECTIVE_MODE="${RESEARCH_NIGHTLY_OBJECTIVE_MODE:-net_pnl_only}"
+SYMBOL_BY_SYMBOL="${RESEARCH_NIGHTLY_SYMBOL_BY_SYMBOL:-1}"
+SYMBOLS_FROM_LIVE_UNIVERSE="${RESEARCH_NIGHTLY_SYMBOLS_FROM_LIVE_UNIVERSE:-1}"
+UNTIL_CONVERGENCE="${RESEARCH_NIGHTLY_UNTIL_CONVERGENCE:-1}"
+MAX_STAGNANT_ITERS="${RESEARCH_NIGHTLY_MAX_STAGNANT_ITERS:-20}"
+MAX_ITERS_PER_SYMBOL="${RESEARCH_NIGHTLY_MAX_ITERS_PER_SYMBOL:-300}"
 TELEGRAM="${RESEARCH_NIGHTLY_TELEGRAM:-0}"
 DIGEST_EVERY="${RESEARCH_NIGHTLY_DIGEST_EVERY:-10}"
 WINDOW_OFFSETS="${RESEARCH_NIGHTLY_WINDOW_OFFSETS:-0,30,60}"
 HOLDOUT_RATIO="${RESEARCH_NIGHTLY_HOLDOUT_RATIO:-0.30}"
+AUTO_REPLAY_GATE="${RESEARCH_NIGHTLY_AUTO_REPLAY_GATE:-1}"
+REPLAY_SEEDS="${RESEARCH_NIGHTLY_REPLAY_SEEDS:-42,43}"
+REPLAY_DATA_DIR="${RESEARCH_NIGHTLY_REPLAY_DATA_DIR:-data/replay}"
+REPLAY_TIMEFRAMES="${RESEARCH_NIGHTLY_REPLAY_TIMEFRAMES:-1m,15m,1h,4h,1d}"
+REPLAY_TIMEOUT_SECONDS="${RESEARCH_NIGHTLY_REPLAY_TIMEOUT_SECONDS:-1200}"
+AUTO_QUEUE_PROMOTION="${RESEARCH_NIGHTLY_AUTO_QUEUE_PROMOTION:-1}"
+AUTO_BACKFILL_DATA="${RESEARCH_NIGHTLY_AUTO_BACKFILL_DATA:-1}"
 
 TS="$(date -u +%Y%m%d_%H%M%S)"
 RUN_ID="nightly_${TS}"
@@ -68,6 +81,42 @@ else
   TELEGRAM_FLAG="--no-telegram"
 fi
 
+if [[ "${AUTO_REPLAY_GATE}" == "1" ]]; then
+  AUTO_REPLAY_FLAG="--auto-replay-gate"
+else
+  AUTO_REPLAY_FLAG="--no-auto-replay-gate"
+fi
+
+if [[ "${AUTO_QUEUE_PROMOTION}" == "1" ]]; then
+  AUTO_QUEUE_FLAG="--auto-queue-promotion"
+else
+  AUTO_QUEUE_FLAG="--no-auto-queue-promotion"
+fi
+
+if [[ "${SYMBOL_BY_SYMBOL}" == "1" ]]; then
+  SYMBOL_MODE_FLAG="--symbol-by-symbol"
+else
+  SYMBOL_MODE_FLAG="--no-symbol-by-symbol"
+fi
+
+if [[ "${SYMBOLS_FROM_LIVE_UNIVERSE}" == "1" ]]; then
+  SYMBOLS_LIVE_FLAG="--symbols-from-live-universe"
+else
+  SYMBOLS_LIVE_FLAG="--no-symbols-from-live-universe"
+fi
+
+if [[ "${UNTIL_CONVERGENCE}" == "1" ]]; then
+  CONVERGENCE_FLAG="--until-convergence"
+else
+  CONVERGENCE_FLAG="--no-until-convergence"
+fi
+
+if [[ "${AUTO_BACKFILL_DATA}" == "1" ]]; then
+  BACKFILL_FLAG="--auto-backfill-data"
+else
+  BACKFILL_FLAG="--no-auto-backfill-data"
+fi
+
 # Force isolated sqlite for research to avoid production DB writes.
 export DATABASE_URL="sqlite:///${TRADING_DIR}/${RUN_DIR}/research.db"
 
@@ -77,9 +126,22 @@ echo "[$(date -u +%FT%TZ)] nightly run start id=${RUN_ID} mode=${MODE} iteration
   --iterations "${ITERATIONS}" \
   --days "${DAYS}" \
   --symbols "${SYMBOLS}" \
+  --objective-mode "${OBJECTIVE_MODE}" \
+  ${SYMBOL_MODE_FLAG} \
+  ${SYMBOLS_LIVE_FLAG} \
+  ${CONVERGENCE_FLAG} \
+  --max-stagnant-iterations "${MAX_STAGNANT_ITERS}" \
+  --max-iterations-per-symbol "${MAX_ITERS_PER_SYMBOL}" \
   --digest-every "${DIGEST_EVERY}" \
   --window-offsets "${WINDOW_OFFSETS}" \
   --holdout-ratio "${HOLDOUT_RATIO}" \
+  ${AUTO_REPLAY_FLAG} \
+  --replay-seeds "${REPLAY_SEEDS}" \
+  --replay-data-dir "${REPLAY_DATA_DIR}" \
+  --replay-timeframes "${REPLAY_TIMEFRAMES}" \
+  --replay-timeout-seconds "${REPLAY_TIMEOUT_SECONDS}" \
+  ${BACKFILL_FLAG} \
+  ${AUTO_QUEUE_FLAG} \
   ${TELEGRAM_FLAG} \
   --state-file "${STATE_FILE}" \
   --out-dir "${OUT_DIR}" \

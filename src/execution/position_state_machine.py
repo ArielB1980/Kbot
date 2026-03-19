@@ -21,6 +21,7 @@ from typing import Optional, Dict, List, Tuple, Set
 import threading
 import hashlib
 import json
+import os
 
 from src.domain.models import Side, OrderType
 from src.exceptions import OperationalError, DataError
@@ -1555,6 +1556,12 @@ class PositionRegistry:
                     orphaned_symbols.append(symbol)
                     issues.append((symbol, "ORPHANED: Registry has position, exchange does not"))
                 elif exchange_pos is None and pos.remaining_qty <= 0:
+                    if (
+                        os.getenv("REPLAY_SKIP_STALE_PENDING_CLOSE", "0") == "1"
+                        and pos.state == PositionState.PENDING
+                    ):
+                        issues.append((symbol, "STALE_PENDING_RETAINED_REPLAY"))
+                        continue
                     self._orphan_miss_counts.pop(symbol_norm, None)
                     # Position has no remaining qty and exchange has nothing - mark as closed
                     pos._mark_closed(ExitReason.RECONCILIATION)

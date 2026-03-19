@@ -1055,6 +1055,42 @@ def get_recent_events(limit: int = 50, event_type: Optional[str] = None, symbol:
         ]
 
 
+def get_system_events_since(
+    since: datetime,
+    *,
+    event_types: Optional[List[str]] = None,
+    symbols: Optional[List[str]] = None,
+    limit: int = 100_000,
+) -> List[Dict[str, Any]]:
+    """Return system events since timestamp with optional filters."""
+    cutoff = _to_naive_utc(since)
+    db = get_db()
+    with db.get_session() as session:
+        query = session.query(SystemEventModel).filter(SystemEventModel.timestamp >= cutoff)
+        if event_types:
+            query = query.filter(SystemEventModel.event_type.in_(event_types))
+        if symbols:
+            query = query.filter(SystemEventModel.symbol.in_(symbols))
+        rows = query.order_by(SystemEventModel.timestamp.asc()).limit(max(1, int(limit))).all()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                details = json.loads(row.details)
+            except json.JSONDecodeError:
+                details = {"_decode_error": True}
+            out.append(
+                {
+                    "id": row.id,
+                    "timestamp": row.timestamp.replace(tzinfo=timezone.utc),
+                    "event_type": row.event_type,
+                    "symbol": row.symbol,
+                    "decision_id": row.decision_id,
+                    "details": details,
+                }
+            )
+        return out
+
+
 def get_last_signal_per_symbol(limit_events: int = 2000) -> Dict[str, datetime]:
     """
     Latest LONG/SHORT SIGNAL_GENERATED timestamp per symbol.
