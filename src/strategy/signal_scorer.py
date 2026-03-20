@@ -25,6 +25,7 @@ class SignalScore:
     htf_alignment: float  # 0-20
     adx_strength: float  # 0-15
     cost_efficiency: float  # 0-20
+    ema_slope: float = 0.0  # 0-15 (bonus when slope aligns with direction)
     
     def get_grade(self) -> str:
         """Convert score to letter grade."""
@@ -91,18 +92,20 @@ class SignalScorer:
         htf_score = self._score_htf_alignment(signal, bias)
         adx_score = self._score_adx_strength(adx)
         cost_score = self._score_cost_efficiency(signal, cost_bps)
-        
-        total = smc_score + fib_score + htf_score + adx_score + cost_score
-        
+        ema_slope_score = self._score_ema_slope(signal)
+
+        total = smc_score + fib_score + htf_score + adx_score + cost_score + ema_slope_score
+
         score = SignalScore(
             total_score=total,
             smc_quality=smc_score,
             fib_confluence=fib_score,
             htf_alignment=htf_score,
             adx_strength=adx_score,
-            cost_efficiency=cost_score
+            cost_efficiency=cost_score,
+            ema_slope=ema_slope_score,
         )
-        
+
         logger.debug(
             "Signal scored",
             symbol=signal.symbol,
@@ -113,7 +116,8 @@ class SignalScorer:
                 "fib": f"{fib_score:.1f}",
                 "htf": f"{htf_score:.1f}",
                 "adx": f"{adx_score:.1f}",
-                "cost": f"{cost_score:.1f}"
+                "cost": f"{cost_score:.1f}",
+                "ema_slope": f"{ema_slope_score:.1f}",
             }
         )
         
@@ -274,7 +278,7 @@ class SignalScorer:
     def _score_cost_efficiency(self, signal: Signal, cost_bps: Decimal) -> float:
         """
         Score cost efficiency (0-20 points).
-        
+
         Lower cost relative to potential reward = higher score.
         """
         if cost_bps <= Decimal("10"):
@@ -287,3 +291,24 @@ class SignalScorer:
             return 5.0
         else:
             return 0.0
+
+    def _score_ema_slope(self, signal: Signal) -> float:
+        """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).
+
+        Awards bonus points when the daily EMA200 slope confirms the trade
+        direction (e.g. rising EMA + LONG, falling EMA + SHORT).  Returns 0
+        when the slope is flat, counter-directional, or the bonus is disabled.
+        """
+        bonus = self.config.ema_slope_bonus
+        if bonus <= 0:
+            return 0.0
+
+        slope = getattr(signal, "ema200_slope", "flat")
+        if slope == "flat":
+            return 0.0
+
+        is_long = signal.signal_type == SignalType.LONG
+        if (slope == "up" and is_long) or (slope == "down" and not is_long):
+            return bonus
+
+        return 0.0
