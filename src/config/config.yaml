@@ -242,10 +242,10 @@ strategy:
   weekly_fib_confluence_weight: 0.25
   daily_bias_weight: 0.15
   min_weekly_zone_width_pct: 1.5  # only consider meaningful weekly zones
-  higher_tf_penalty_outside_zone: -18.0
+  higher_tf_penalty_outside_zone: -8.0  # Reduced from -18.0 — too punitive, blocks most signals
   # Persistent institutional memory rollout
   memory_enabled: true
-  thesis_observe_only: false
+  thesis_observe_only: true  # Re-enabled observe-only: conviction gate blocks all entries (all theses decayed)
   thesis_score_enabled: false
   thesis_management_enabled: true
   thesis_canary_symbols: []   # empty = all symbols
