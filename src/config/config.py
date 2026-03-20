@@ -421,6 +421,14 @@ class StrategyConfig(BaseSettings):
     signal_structure_dedupe_minutes: int = Field(default=45, ge=0, le=240)
     bos_confirmation_candles: int = Field(default=3, ge=1, le=10)
     require_bos_confirmation: bool = Field(default=False)  # Optional filter for higher quality
+    bos_volume_confirmation_enabled: bool = Field(
+        default=False,
+        description="Require break candle volume > threshold × avg volume for BOS",
+    )
+    bos_volume_threshold_mult: float = Field(
+        default=1.5, ge=1.0, le=5.0,
+        description="Break candle volume must exceed this multiple of 20-period avg volume",
+    )
     fvg_mitigation_mode: Literal["touched", "partial", "full"] = "touched"
     fvg_partial_fill_pct: float = Field(default=0.5, ge=0.0, le=1.0)
 
@@ -435,6 +443,18 @@ class StrategyConfig(BaseSettings):
     
     # Fib Enforcement
     fib_proximity_bps: float = Field(default=20.0, ge=0.0, le=100.0) # 0.2%
+    fib_proximity_adaptive_enabled: bool = Field(
+        default=False,
+        description="Scale fib proximity tolerance with ATR ratio (wider in high vol)",
+    )
+    fib_proximity_adaptive_scale: float = Field(
+        default=0.5, ge=0.0, le=2.0,
+        description="Scale factor: effective_bps = base × (1 + max(0, atr_ratio-1) × scale)",
+    )
+    fib_proximity_max_bps: float = Field(
+        default=50.0, ge=10.0, le=200.0,
+        description="Hard cap on adaptive fib proximity (bps)",
+    )
     
     # Higher-timeframe pyramid gate (1W -> 1D -> 4H)
     # Starts SOFT (score penalty only) so we can roll out safely.

@@ -1732,22 +1732,42 @@ class SMCEngine:
         return None
     
     def _detect_break_of_structure(self, candles: List[Candle], bias: str) -> bool:
-        """Detect break of structure (BOS)."""
+        """Detect break of structure (BOS), optionally with volume confirmation."""
         if len(candles) < self.config.bos_confirmation_candles + 5:
             return False
-        
+
         # Simple BOS: recent candles break previous swing high/low
         recent = candles[-self.config.bos_confirmation_candles:]
         previous = candles[-10:-self.config.bos_confirmation_candles]
-        
+
         if bias == "bullish":
             prev_high = max(c.high for c in previous)
             recent_high = max(c.high for c in recent)
-            return recent_high > prev_high
+            structure_broken = recent_high > prev_high
         else:  # bearish
             prev_low = min(c.low for c in previous)
             recent_low = min(c.low for c in recent)
-            return recent_low < prev_low
+            structure_broken = recent_low < prev_low
+
+        if not structure_broken:
+            return False
+
+        # Volume confirmation gate (disabled by default for safe rollout)
+        if self.config.bos_volume_confirmation_enabled:
+            vol_lookback = min(20, len(candles) - self.config.bos_confirmation_candles)
+            if vol_lookback >= 5:
+                lookback_candles = candles[-(self.config.bos_confirmation_candles + vol_lookback):-self.config.bos_confirmation_candles]
+                avg_vol = sum(c.volume for c in lookback_candles) / len(lookback_candles)
+                if avg_vol > 0:
+                    # Break candle = the candle that made the extreme in recent
+                    if bias == "bullish":
+                        break_candle = max(recent, key=lambda c: c.high)
+                    else:
+                        break_candle = min(recent, key=lambda c: c.low)
+                    if break_candle.volume < avg_vol * Decimal(str(self.config.bos_volume_threshold_mult)):
+                        return False
+
+        return True
     
     def _apply_filters(self, candles: List[Candle], reasoning: List[str]) -> bool:
         """Apply ADX and ATR filters."""

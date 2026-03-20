@@ -28,6 +28,9 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.wide_structure_atr_stop_min",
     "strategy.wide_structure_atr_stop_max",
     "strategy.ema_slope_bonus",
+    "strategy.bos_volume_threshold_mult",
+    "strategy.fib_proximity_adaptive_scale",
+    "strategy.fib_proximity_max_bps",
 )
 
 # Hard lock these paths even if they appear in future candidate generation logic.

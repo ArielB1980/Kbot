@@ -183,6 +183,19 @@ class SignalScorer:
         
         return min(score, 25.0)
     
+    def _effective_fib_proximity_bps(self, signal: Signal) -> float:
+        """Return fib proximity tolerance in bps, optionally scaled by ATR ratio."""
+        base = self.config.fib_proximity_bps
+        if not self.config.fib_proximity_adaptive_enabled:
+            return base
+        atr_ratio = getattr(signal, "atr_ratio", None)
+        if atr_ratio is None:
+            return base
+        ratio_float = float(atr_ratio)
+        scale = self.config.fib_proximity_adaptive_scale
+        effective = base * (1.0 + max(0.0, ratio_float - 1.0) * scale)
+        return min(effective, self.config.fib_proximity_max_bps)
+
     def _score_fib_confluence(
         self,
         signal: Signal,
@@ -190,7 +203,7 @@ class SignalScorer:
     ) -> float:
         """
         Score Fibonacci confluence (0-20 points).
-        
+
         Scoring:
         - In OTE zone: +15
         - Near any fib level: +10
@@ -199,16 +212,17 @@ class SignalScorer:
         """
         if not fib_levels:
             return 0.0
-        
+
         score = 0.0
         entry = signal.entry_price
-        
+
         # Check OTE zone (highest value)
         if fib_levels.ote_low <= entry <= fib_levels.ote_high:
             score = 15.0
         else:
-            # Check proximity to standard levels (from config)
-            tolerance = Decimal(str(self.config.fib_proximity_bps)) / Decimal("10000")
+            # Check proximity to standard levels (adaptive or fixed)
+            effective_bps = self._effective_fib_proximity_bps(signal)
+            tolerance = Decimal(str(effective_bps)) / Decimal("10000")
             levels = [
                 fib_levels.fib_0_382,
                 fib_levels.fib_0_618,
