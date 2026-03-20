@@ -31,9 +31,12 @@ env/
 *.swp
 *.swo
 *~
+.cursor/
+.cursor_tmp_*
 
 # Environment variables
 .env
+.env.local
 DATABASE_URL.txt
 
 # Credential files (NEVER commit API keys)
