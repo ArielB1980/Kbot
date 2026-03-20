@@ -1264,6 +1264,7 @@ class SMCEngine:
                                 "htf": score_obj.htf_alignment,
                                 "adx": score_obj.adx_strength,
                                 "cost": score_obj.cost_efficiency,
+                                "ema_slope": score_obj.ema_slope,
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
                                 "higher_tf_penalty": higher_tf_penalty,
                                 "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else 0.0,

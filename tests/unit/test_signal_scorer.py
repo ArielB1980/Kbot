@@ -98,3 +98,126 @@ def test_fib_confluence_uses_config_tolerance():
     scorer.config = config
     score = scorer._score_fib_confluence(signal, fibs)
     assert score == 10.0
+
+
+# --- EMA Slope Scoring Tests ---
+
+def _make_signal_with_slope(signal_type, slope):
+    """Helper to create a signal mock with ema200_slope."""
+    sig = Mock(spec=Signal)
+    sig.signal_type = signal_type
+    sig.ema200_slope = slope
+    return sig
+
+
+def test_ema_slope_aligned_long():
+    """Rising EMA + LONG signal awards full bonus."""
+    config = StrategyConfig()
+    config.ema_slope_bonus = 7.0
+    scorer = SignalScorer(config)
+    sig = _make_signal_with_slope(SignalType.LONG, "up")
+    assert scorer._score_ema_slope(sig) == 7.0
+
+
+def test_ema_slope_aligned_short():
+    """Falling EMA + SHORT signal awards full bonus."""
+    config = StrategyConfig()
+    config.ema_slope_bonus = 10.0
+    scorer = SignalScorer(config)
+    sig = _make_signal_with_slope(SignalType.SHORT, "down")
+    assert scorer._score_ema_slope(sig) == 10.0
+
+
+def test_ema_slope_flat_returns_zero():
+    """Flat slope always returns zero regardless of direction."""
+    config = StrategyConfig()
+    config.ema_slope_bonus = 7.0
+    scorer = SignalScorer(config)
+    sig = _make_signal_with_slope(SignalType.LONG, "flat")
+    assert scorer._score_ema_slope(sig) == 0.0
+
+
+def test_ema_slope_counter_direction_returns_zero():
+    """Counter-directional slope (rising EMA + SHORT) returns zero."""
+    config = StrategyConfig()
+    config.ema_slope_bonus = 7.0
+    scorer = SignalScorer(config)
+    sig = _make_signal_with_slope(SignalType.SHORT, "up")
+    assert scorer._score_ema_slope(sig) == 0.0
+    sig = _make_signal_with_slope(SignalType.LONG, "down")
+    assert scorer._score_ema_slope(sig) == 0.0
+
+
+def test_ema_slope_disabled_returns_zero():
+    """When bonus is 0 (disabled), always returns zero."""
+    config = StrategyConfig()
+    config.ema_slope_bonus = 0.0
+    scorer = SignalScorer(config)
+    sig = _make_signal_with_slope(SignalType.LONG, "up")
+    assert scorer._score_ema_slope(sig) == 0.0
+
+
+# --- Adaptive Fib Tolerance Tests ---
+
+def test_adaptive_fib_scales_with_atr_ratio():
+    """High ATR ratio widens tolerance."""
+    config = StrategyConfig()
+    config.fib_proximity_bps = 20.0
+    config.fib_proximity_adaptive_enabled = True
+    config.fib_proximity_adaptive_scale = 0.5
+    config.fib_proximity_max_bps = 50.0
+    scorer = SignalScorer(config)
+    sig = Mock(spec=Signal)
+    sig.atr_ratio = Decimal("2.0")  # ATR is 2x average
+    # effective = 20 * (1 + max(0, 2.0-1.0) * 0.5) = 20 * 1.5 = 30
+    assert scorer._effective_fib_proximity_bps(sig) == 30.0
+
+
+def test_adaptive_fib_respects_max_cap():
+    """Adaptive tolerance is capped at fib_proximity_max_bps."""
+    config = StrategyConfig()
+    config.fib_proximity_bps = 20.0
+    config.fib_proximity_adaptive_enabled = True
+    config.fib_proximity_adaptive_scale = 2.0
+    config.fib_proximity_max_bps = 35.0
+    scorer = SignalScorer(config)
+    sig = Mock(spec=Signal)
+    sig.atr_ratio = Decimal("3.0")  # Would give 20*(1+2*2)=100 uncapped
+    assert scorer._effective_fib_proximity_bps(sig) == 35.0
+
+
+def test_adaptive_fib_no_atr_ratio_uses_base():
+    """When atr_ratio is None, falls back to base tolerance."""
+    config = StrategyConfig()
+    config.fib_proximity_bps = 20.0
+    config.fib_proximity_adaptive_enabled = True
+    config.fib_proximity_adaptive_scale = 0.5
+    config.fib_proximity_max_bps = 50.0
+    scorer = SignalScorer(config)
+    sig = Mock(spec=Signal)
+    sig.atr_ratio = None
+    assert scorer._effective_fib_proximity_bps(sig) == 20.0
+
+
+def test_adaptive_fib_disabled_ignores_atr_ratio():
+    """When adaptive is disabled, always uses base regardless of ATR ratio."""
+    config = StrategyConfig()
+    config.fib_proximity_bps = 20.0
+    config.fib_proximity_adaptive_enabled = False
+    scorer = SignalScorer(config)
+    sig = Mock(spec=Signal)
+    sig.atr_ratio = Decimal("5.0")
+    assert scorer._effective_fib_proximity_bps(sig) == 20.0
+
+
+def test_adaptive_fib_low_atr_ratio_no_expansion():
+    """ATR ratio below 1.0 does not expand tolerance (max(0, ratio-1))."""
+    config = StrategyConfig()
+    config.fib_proximity_bps = 20.0
+    config.fib_proximity_adaptive_enabled = True
+    config.fib_proximity_adaptive_scale = 0.5
+    config.fib_proximity_max_bps = 50.0
+    scorer = SignalScorer(config)
+    sig = Mock(spec=Signal)
+    sig.atr_ratio = Decimal("0.5")
+    assert scorer._effective_fib_proximity_bps(sig) == 20.0
