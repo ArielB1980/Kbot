@@ -72,6 +72,7 @@ class StrategySymbolOverride(BaseSettings):
     tight_smc_atr_stop_max: Optional[float] = Field(default=None, ge=0.05, le=1.0)
     wide_structure_atr_stop_min: Optional[float] = Field(default=None, ge=0.2, le=2.0)
     wide_structure_atr_stop_max: Optional[float] = Field(default=None, ge=0.2, le=2.0)
+    ema_slope_bonus: Optional[float] = Field(default=None, ge=0.0, le=15.0)
 
 
 class RiskSymbolOverride(BaseSettings):
@@ -446,6 +447,12 @@ class StrategyConfig(BaseSettings):
     daily_bias_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     min_weekly_zone_width_pct: float = Field(default=1.5, ge=0.1, le=20.0)
     higher_tf_penalty_outside_zone: float = Field(default=-18.0)
+
+    # EMA slope scoring bonus
+    ema_slope_bonus: float = Field(
+        default=0.0, ge=0.0, le=15.0,
+        description="Bonus points when EMA200 slope aligns with signal direction (0=disabled)",
+    )
 
     # Persistent institutional memory (thesis + conviction decay)
     memory_enabled: bool = Field(default=False, description="Enable thesis memory tracking")
