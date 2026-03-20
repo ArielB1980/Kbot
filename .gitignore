@@ -63,9 +63,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Project specific
-trading.db
-
 # Market discovery data and runtime data
 data/
 
@@ -77,7 +74,6 @@ results/
 
 # Process management
 .watchdog_live_trading.pid
-.env.local
 .local/
 .venv/
 
