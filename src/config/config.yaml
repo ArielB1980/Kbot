@@ -203,7 +203,7 @@ strategy:
   # Indicators
   ema_period: 200
   adx_period: 14
-  adx_threshold: 25.0  # Minimum ADX for trend strength
+  adx_threshold: 20.0  # Relaxed from 25.0 — Profile C (KBO-8 research campaign)
   atr_period: 14
   atr_multiplier_stop: 1.5  # ATR multiplier for stop-loss buffer
   rsi_period: 14
@@ -224,11 +224,17 @@ strategy:
 
   # V2.3 Scoring & Regimes (Slightly relaxed)
   ema_neutral_zone_bps: 10.0
-  min_score_tight_smc_aligned: 65.0  # Was 70.0
-  min_score_tight_smc_neutral: 75.0
-  min_score_wide_structure_aligned: 60.0  # Was 65.0
-  min_score_wide_structure_neutral: 70.0
+  min_score_tight_smc_aligned: 60.0  # Relaxed from 65.0 — Profile C (KBO-8)
+  min_score_tight_smc_neutral: 65.0  # Relaxed from 75.0 — Profile C (KBO-8)
+  min_score_wide_structure_aligned: 55.0  # Relaxed from 60.0 — Profile C (KBO-8)
+  min_score_wide_structure_neutral: 60.0  # Relaxed from 70.0 — Profile C (KBO-8)
   fib_proximity_bps: 60.0
+  # Adaptive fib tolerance — Profile C (KBO-8)
+  fib_proximity_adaptive_enabled: true
+  fib_proximity_adaptive_scale: 0.5
+  fib_proximity_max_bps: 80.0
+  # EMA slope alignment bonus — Profile C (KBO-8)
+  ema_slope_bonus: 10.0
   # Higher-timeframe pyramid gate (1W -> 1D -> 4H)
   # v1 = SOFT (score penalty only) — set to true after monitoring
   higher_tf_enabled: true
