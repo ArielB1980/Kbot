@@ -6,7 +6,7 @@ Provides repository pattern for clean data access.
 from sqlalchemy import Column, String, Numeric, DateTime, Integer, Boolean, Index, UniqueConstraint
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from typing import List, Optional, Dict, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 import json
 from src.exceptions import OperationalError, DataError
 from src.storage.db import Base, get_db
@@ -938,7 +938,7 @@ def count_open_positions_opened_since(since: datetime) -> int:
         ).count()
 
 
-def clear_cache():
+def clear_cache() -> None:
     """Clear the query cache. Useful after bulk updates."""
     _query_cache.clear()
 
@@ -1367,7 +1367,7 @@ def save_intent_hash(intent_hash: str, symbol: str, timestamp: datetime) -> None
     )
 
 
-def load_recent_intent_hashes(lookback_hours: int = 24) -> set:
+def load_recent_intent_hashes(lookback_hours: int = 24) -> Set[str]:
     """
     Load recent order intent hashes from database.
 

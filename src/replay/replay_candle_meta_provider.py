@@ -113,51 +113,52 @@ class ReplayCandleMetaProvider:
                 .order_by(MarketSnapshot.symbol, MarketSnapshot.ts_utc)
                 .all()
             )
+            # Extract all ORM attributes into plain cache entries while
+            # the session is still open to avoid DetachedInstanceError.
+            self._cache.clear()
+            for row in rows:
+                sym = row.symbol
+                if sym not in self._cache:
+                    self._cache[sym] = []
+
+                ts_float = row.ts_utc.timestamp() if row.ts_utc.tzinfo else row.ts_utc.replace(tzinfo=timezone.utc).timestamp()
+
+                # Parse JSON blobs
+                try:
+                    raw_ts = json.loads(row.last_candle_ts_json) if row.last_candle_ts_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    raw_ts = {}
+
+                try:
+                    raw_counts = json.loads(row.candle_count_json) if row.candle_count_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    raw_counts = {}
+
+                # Convert ISO strings -> datetime
+                last_ts: Dict[str, Optional[datetime]] = {}
+                for tf, iso_str in raw_ts.items():
+                    if iso_str:
+                        try:
+                            dt = datetime.fromisoformat(iso_str)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            last_ts[tf] = dt
+                        except (ValueError, TypeError):
+                            last_ts[tf] = None
+                    else:
+                        last_ts[tf] = None
+
+                counts: Dict[str, int] = {}
+                for tf, c in raw_counts.items():
+                    counts[tf] = int(c) if c else 0
+
+                self._cache[sym].append(_CandleMeta(
+                    ts=ts_float,
+                    last_candle_ts=last_ts,
+                    candle_counts=counts,
+                ))
         finally:
             session.close()
-
-        self._cache.clear()
-        for row in rows:
-            sym = row.symbol
-            if sym not in self._cache:
-                self._cache[sym] = []
-
-            ts_float = row.ts_utc.timestamp() if row.ts_utc.tzinfo else row.ts_utc.replace(tzinfo=timezone.utc).timestamp()
-
-            # Parse JSON blobs
-            try:
-                raw_ts = json.loads(row.last_candle_ts_json) if row.last_candle_ts_json else {}
-            except (json.JSONDecodeError, TypeError):
-                raw_ts = {}
-
-            try:
-                raw_counts = json.loads(row.candle_count_json) if row.candle_count_json else {}
-            except (json.JSONDecodeError, TypeError):
-                raw_counts = {}
-
-            # Convert ISO strings -> datetime
-            last_ts: Dict[str, Optional[datetime]] = {}
-            for tf, iso_str in raw_ts.items():
-                if iso_str:
-                    try:
-                        dt = datetime.fromisoformat(iso_str)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        last_ts[tf] = dt
-                    except (ValueError, TypeError):
-                        last_ts[tf] = None
-                else:
-                    last_ts[tf] = None
-
-            counts: Dict[str, int] = {}
-            for tf, c in raw_counts.items():
-                counts[tf] = int(c) if c else 0
-
-            self._cache[sym].append(_CandleMeta(
-                ts=ts_float,
-                last_candle_ts=last_ts,
-                candle_counts=counts,
-            ))
 
     def get_mock_candle_manager(
         self,

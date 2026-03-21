@@ -38,8 +38,8 @@ class ReplayTickerProvider:
         end: datetime,
     ) -> None:
         """Bulk-load all snapshots in [start, end] for *symbols* into memory."""
-        Session = sessionmaker(bind=self._engine)
-        session = Session()
+        SessionLocal = sessionmaker(bind=self._engine)
+        session = SessionLocal()
         try:
             rows = (
                 session.query(MarketSnapshot)
@@ -51,24 +51,25 @@ class ReplayTickerProvider:
                 .order_by(MarketSnapshot.symbol, MarketSnapshot.ts_utc)
                 .all()
             )
+            # Extract all ORM attributes into plain cache entries while
+            # the session is still open to avoid DetachedInstanceError.
+            self._cache.clear()
+            for row in rows:
+                sym = row.symbol
+                if sym not in self._cache:
+                    self._cache[sym] = []
+                ts_float = row.ts_utc.timestamp() if row.ts_utc.tzinfo else row.ts_utc.replace(tzinfo=timezone.utc).timestamp()
+                self._cache[sym].append(_CacheEntry(
+                    ts=ts_float,
+                    bid=_to_dec(row.futures_bid),
+                    ask=_to_dec(row.futures_ask),
+                    volume_24h=_to_dec(row.futures_volume_usd_24h),
+                    open_interest=_to_dec(row.open_interest_usd),
+                    funding_rate=_to_dec(row.funding_rate),
+                    error_code=row.error_code,
+                ))
         finally:
             session.close()
-
-        self._cache.clear()
-        for row in rows:
-            sym = row.symbol
-            if sym not in self._cache:
-                self._cache[sym] = []
-            ts_float = row.ts_utc.timestamp() if row.ts_utc.tzinfo else row.ts_utc.replace(tzinfo=timezone.utc).timestamp()
-            self._cache[sym].append(_CacheEntry(
-                ts=ts_float,
-                bid=_to_dec(row.futures_bid),
-                ask=_to_dec(row.futures_ask),
-                volume_24h=_to_dec(row.futures_volume_usd_24h),
-                open_interest=_to_dec(row.open_interest_usd),
-                funding_rate=_to_dec(row.funding_rate),
-                error_code=row.error_code,
-            ))
 
     # ------------------------------------------------------------------
     # Lookup
