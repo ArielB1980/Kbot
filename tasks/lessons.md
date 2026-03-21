@@ -7,3 +7,7 @@
 - Guardrail: Repository read APIs that feed runtime managers should return detached-safe payloads (dict/dataclass), not live ORM model objects.
 - Pattern: `make deploy` is blocked by any untracked local files (for example `tasks/todo.md`) due the clean-working-tree gate.
 - Guardrail: Before deploy, either commit/stash/remove untracked files or use `./scripts/deploy.sh --skip-commit` when code is already pushed and server-safe.
+
+## 2026-03-15
+- Pattern: When research quality is low due to missing timeframe coverage, proposing gating/bypass without first exhausting data acquisition violates user intent.
+- Guardrail: For replay/data-quality failures, always prioritize fetching required candles (all required symbols/timeframes with freshness targets), verify coverage evidence, and only then run optimization.

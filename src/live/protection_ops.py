@@ -812,7 +812,15 @@ async def place_tp_backfill(
         )
         return
 
-    for tp_id in existing_tp_ids:
+    # Cancel ALL matching TP orders on exchange (not just DB-tracked IDs) to prevent
+    # orphaned orders when DB state diverges from exchange state.
+    all_tp_ids_to_cancel = set(existing_tp_ids)
+    for o in existing_tp_orders:
+        oid = o.get("id")
+        if oid:
+            all_tp_ids_to_cancel.add(oid)
+
+    for tp_id in all_tp_ids_to_cancel:
         try:
             await lt.futures_adapter.cancel_order(tp_id, symbol)
             logger.debug("Cancelled existing TP for backfill", order_id=tp_id, symbol=symbol)

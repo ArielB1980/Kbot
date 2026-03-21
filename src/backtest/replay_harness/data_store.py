@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from src.domain.models import Candle
+from src.monitoring.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -70,8 +73,21 @@ class ReplayDataStore:
         # symbol -> timeframe -> index cursor for current replay position
         self._cursors: Dict[str, Dict[str, int]] = {}
 
+    # Timeframe → number of 1m bars per candle, used for aggregation.
+    _TF_MINUTES: Dict[str, int] = {
+        "1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440,
+    }
+
+    # Timeframes the strategy needs beyond whatever the caller requests.
+    _HTF_REQUIRED: List[str] = ["15m", "1h", "4h", "1d"]
+
     def load(self) -> None:
-        """Load all data from disk."""
+        """Load all data from disk.
+
+        After loading CSV files for the requested timeframes, automatically
+        aggregate 1m bars into any missing higher timeframes that the strategy
+        needs (15m, 1h, 4h, 1d).
+        """
         for symbol in self._symbols:
             self._candles[symbol] = {}
             self._cursors[symbol] = {}
@@ -79,7 +95,74 @@ class ReplayDataStore:
                 bars = self._load_candles(symbol, tf)
                 self._candles[symbol][tf] = bars
                 self._cursors[symbol][tf] = 0
+
+            # Aggregate 1m → HTF for any missing timeframes
+            base_bars = self._candles[symbol].get("1m", [])
+            if base_bars:
+                for htf in self._HTF_REQUIRED:
+                    if htf not in self._candles[symbol] or not self._candles[symbol][htf]:
+                        agg = self._aggregate_bars(base_bars, htf)
+                        if agg:
+                            self._candles[symbol][htf] = agg
+                            self._cursors[symbol][htf] = 0
+                            logger.info(
+                                "REPLAY_AGGREGATED_HTF",
+                                symbol=symbol,
+                                timeframe=htf,
+                                bars=len(agg),
+                            )
+
             self._liquidity[symbol] = self._load_or_derive_liquidity(symbol)
+
+    def _aggregate_bars(self, bars_1m: List[CandleBar], target_tf: str) -> List[CandleBar]:
+        """Aggregate 1m bars into a higher timeframe."""
+        minutes = self._TF_MINUTES.get(target_tf)
+        if not minutes or minutes <= 1:
+            return []
+
+        result: List[CandleBar] = []
+        bucket: List[CandleBar] = []
+        bucket_start: Optional[datetime] = None
+
+        for bar in bars_1m:
+            # Determine which bucket this bar belongs to
+            total_min = int(bar.timestamp.timestamp()) // 60
+            bucket_idx = total_min // minutes
+            this_start = datetime.fromtimestamp(
+                bucket_idx * minutes * 60, tz=timezone.utc,
+            )
+
+            if bucket_start is None:
+                bucket_start = this_start
+
+            if this_start != bucket_start:
+                # Flush previous bucket
+                if bucket:
+                    result.append(CandleBar(
+                        timestamp=bucket_start,
+                        open=bucket[0].open,
+                        high=max(b.high for b in bucket),
+                        low=min(b.low for b in bucket),
+                        close=bucket[-1].close,
+                        volume=sum(b.volume for b in bucket),
+                    ))
+                bucket = [bar]
+                bucket_start = this_start
+            else:
+                bucket.append(bar)
+
+        # Flush final bucket
+        if bucket and bucket_start is not None:
+            result.append(CandleBar(
+                timestamp=bucket_start,
+                open=bucket[0].open,
+                high=max(b.high for b in bucket),
+                low=min(b.low for b in bucket),
+                close=bucket[-1].close,
+                volume=sum(b.volume for b in bucket),
+            ))
+
+        return result
 
     def _load_candles(self, symbol: str, timeframe: str) -> List[CandleBar]:
         """Load candles from CSV. Expected columns: timestamp,open,high,low,close,volume."""
