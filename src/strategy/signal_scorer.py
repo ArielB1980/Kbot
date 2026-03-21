@@ -147,10 +147,6 @@ class SignalScorer:
             else:
                 threshold = self.config.min_score_wide_structure_neutral
 
-        if os.getenv("REPLAY_ABLATE_DISABLE_SCORE_GATE", "0") == "1":
-            logger.info("Ablation: bypassing score gate in replay", score=score, threshold=threshold)
-            return True, float(threshold)
-
         override = os.getenv("REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD")
         if override is not None and override.strip():
             try:

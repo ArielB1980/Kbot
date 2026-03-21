@@ -951,17 +951,8 @@ class SMCEngine:
                 regime = classification_info['regime']
                 
                 if regime == "tight_smc":
-                    disable_fib_gate = os.getenv("REPLAY_ABLATE_DISABLE_FIB_GATE", "0") == "1"
-                    disable_ote_check = os.getenv("REPLAY_ABLATE_DISABLE_FIB_OTE_CHECK", "0") == "1"
-                    disable_confluence_check = (
-                        os.getenv("REPLAY_ABLATE_DISABLE_FIB_CONFLUENCE_CHECK", "0") == "1"
-                    )
-                    if disable_fib_gate:
-                        logger.info("Ablation: bypassing fib gate in replay", symbol=symbol)
-                        reasoning_parts.append("🧪 Ablation: bypass fib gate")
-                        fib_valid = True
                     # HARD REQUIREMENT: Must be in OTE or near key level
-                    elif fib_levels:
+                    if fib_levels:
                         # Check OTE
                         in_ote = self.fibonacci_engine.is_in_ote_zone(entry_price, fib_levels)
                         # Check specific levels
@@ -980,16 +971,6 @@ class SMCEngine:
                             fib_levels, 
                             tolerance_pct=fib_proximity_bps / 10000
                         )
-                        if disable_ote_check:
-                            logger.info("Ablation: bypassing OTE sub-check in fib gate", symbol=symbol)
-                            in_ote = False
-                        if disable_confluence_check:
-                            logger.info(
-                                "Ablation: bypassing confluence sub-check in fib gate",
-                                symbol=symbol,
-                            )
-                            is_near = False
-                        
                         if not (in_ote or is_near):
                             reasoning_parts.append(f"❌ Rejected: tight_smc entry not in OTE/Key Fib (Gate)")
                             fib_valid = False
@@ -1324,9 +1305,6 @@ class SMCEngine:
 
             dedupe_minutes = int(getattr(self.config, "signal_structure_dedupe_minutes", 0) or 0)
             dedupe_enabled = bool(getattr(self.config, "signal_structure_dedupe_enabled", False)) and dedupe_minutes > 0
-            if os.getenv("REPLAY_ABLATE_DISABLE_STRUCTURE_DEDUPE", "0") == "1":
-                logger.info("Ablation: bypassing duplicate-structure debounce in replay")
-                dedupe_enabled = False
             dedupe_override = os.getenv("REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES")
             if dedupe_override is not None and dedupe_override.strip():
                 try:
