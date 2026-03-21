@@ -66,6 +66,39 @@ journalctl -u trading-bot.service --no-pager | grep 'Alert\|send_alert' | tail -
 - **One-time seed:** To start live with the research universe and no overrides, ensure `live_research_overrides.yaml` exists (repo includes a default with the 12-coin whitelist). To add the latest research overrides (e.g. ETH c004), run once: `scripts/apply_research_to_live.py --run-dir data/research/continuous_daemon/runs/<run_id> --live-universe "BTC/USD,ETH/USD,..."`.
 - **Research always on:** Keep the continuous research daemon running (e.g. `make research-continuous-start` or systemd/cron). It runs cycle after cycle and updates `live_research_overrides.yaml` whenever it finds sufficient results.
 
+### Automated baseline recovery (continuous research)
+
+To prevent replay drift/stalls from silently degrading output, the research loop now includes automated recovery:
+
+- **Daemon preflight self-heal** (`scripts/research_continuous.sh`):
+  - Repairs autocontext overrides each cycle to keep:
+    - `RESEARCH_CONT_AUTO_BACKFILL_DATA=1`
+    - `REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY` at or below configured floor (default `20`)
+  - Repairs `daemon.pid` if drifted.
+  - Bounds counterfactual posthooks with timeouts so they cannot block next cycle indefinitely.
+
+- **Recovery watchdog** (`scripts/research_recovery_watchdog.sh`):
+  - Detects daemon down, stale `state.json`, symbol-iteration stagnation, and override drift.
+  - Auto-remediates by restarting daemon and repairing overrides.
+  - Optionally triggers targeted candle backfill for the current symbol when "No candles for" spikes.
+
+Operator commands:
+
+```bash
+# One-off health/remediation pass
+./scripts/research_control.sh watchdog-run
+
+# Detection-only pass
+./scripts/research_control.sh watchdog-run --dry-run
+
+# Cron management for watchdog
+./scripts/research_control.sh watchdog-install-schedule
+./scripts/research_control.sh watchdog-schedule-status
+./scripts/research_control.sh watchdog-remove-schedule
+```
+
+If needed, disable active remediation temporarily by running only `--dry-run` and reviewing `data/research/continuous_daemon/logs/watchdog.log`.
+
 ### When is a coin ready to be promoted to live?
 
 - **Already in the live whitelist (12 coins):** You don’t need to “promote” them. Research applies **strategy overrides** automatically after each cycle for any symbol that has a sufficient result (non-baseline, `trade_count` ≥ `--min-trades`, default 2). Restart live (or reload config) to pick up the new overrides.

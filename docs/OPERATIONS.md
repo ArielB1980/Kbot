@@ -79,6 +79,48 @@ tail -50 /home/trading/TradingSystem/data/research/continuous_daemon/logs/daily_
 tail -50 /home/trading/TradingSystem/data/research/continuous_daemon/logs/live_whitelist_refresh.log
 ```
 
+### Automated baseline recovery loop (continuous research)
+
+Continuous research now has two automated recovery layers:
+
+- **In-daemon self-heal** (`scripts/research_continuous.sh`):
+  - Pre-cycle override repair to enforce:
+    - `RESEARCH_CONT_AUTO_BACKFILL_DATA=1`
+    - `REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY<=20`
+  - PID drift repair (`daemon.pid` forced to current daemon process).
+  - Bounded counterfactual post-hooks with timeouts:
+    - `RESEARCH_CONT_CF_TIMEOUT_SECONDS` (default `300`)
+    - `RESEARCH_CONT_CF_BATCH_TIMEOUT_SECONDS` (default `300`)
+- **External watchdog** (`scripts/research_recovery_watchdog.sh`):
+  - Detects daemon down, stale run state, stagnation, and override drift.
+  - Auto-remediates by repairing overrides, restarting daemon, and optionally running targeted candle backfill.
+
+Watchdog controls:
+
+```bash
+# Run once now
+./scripts/research_control.sh watchdog-run
+
+# Dry-run (detection only)
+./scripts/research_control.sh watchdog-run --dry-run
+
+# Install/remove cron for watchdog
+./scripts/research_control.sh watchdog-install-schedule
+./scripts/research_control.sh watchdog-schedule-status
+./scripts/research_control.sh watchdog-remove-schedule
+```
+
+Key watchdog tuning env vars (server `.env`):
+
+- `WATCHDOG_MAX_STATE_AGE_SECONDS` (default `1800`)
+- `WATCHDOG_MAX_LOG_QUIET_SECONDS` (default `600`)
+- `WATCHDOG_MAX_STAGNANT_SECONDS` (default `2400`)
+- `WATCHDOG_CANONICAL_CONVICTION` (default `20`)
+- `WATCHDOG_FORCE_AUTO_BACKFILL` (default `1`)
+- `WATCHDOG_ENABLE_TARGETED_BACKFILL` (default `1`)
+- `WATCHDOG_NO_CANDLES_SPIKE_THRESHOLD` (default `50`)
+- `WATCHDOG_BACKFILL_BOOTSTRAP_DAYS` (default `30`)
+
 ## Kill Switch Recovery
 
 1. **Check status**: `ssh <droplet> systemctl status trading-bot`
@@ -196,6 +238,57 @@ make research-schedule-status
 - `RESEARCH_NIGHTLY_REPLAY_DATA_DIR` (default `data/replay`)
 - `RESEARCH_NIGHTLY_REPLAY_TIMEOUT_SECONDS` (default `1200`)
 - `RESEARCH_NIGHTLY_AUTO_QUEUE_PROMOTION` (`0`/`1`, default `1`)
+
+## REPLAY_* Toggle Reference
+
+Environment variables used to control strategy behavior during replay/backtest runs.
+These are **not** set in production — they only apply inside the replay harness and research automation.
+
+### Override flags (parameterize thresholds)
+
+Set by `research_continuous.sh`, `research_autolearn.py`, and replay validation scripts.
+
+| Flag | Location | Purpose |
+|------|----------|---------|
+| `REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY` | `src/strategy/smc_engine.py` | Minimum conviction score for entry |
+| `REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD` | `src/strategy/signal_scorer.py` | Minimum signal score to pass gate |
+| `REPLAY_OVERRIDE_ADX_THRESHOLD` | `src/strategy/smc_engine.py` | ADX threshold for trend detection |
+| `REPLAY_OVERRIDE_FIB_PROXIMITY_BPS` | `src/strategy/smc_engine.py` | Fibonacci proximity tolerance (bps) |
+| `REPLAY_OVERRIDE_STRUCTURE_DEDUPE_MINUTES` | `src/strategy/smc_engine.py` | Structure signal deduplication window |
+| `REPLAY_OVERRIDE_TIGHT_SMC_MIN_RR` | `src/risk/risk_manager.py` | Minimum R:R for tight SMC setups |
+| `REPLAY_OVERRIDE_THESIS_REENTRY_BLOCK_THRESHOLD` | `src/memory/institutional_memory.py` | Thesis re-entry block threshold |
+
+### Ablation flags (disable features for isolation testing)
+
+Set to `"1"` to disable specific features. Used by `research_continuous.sh` for automated ablation.
+
+| Flag | Location |
+|------|----------|
+| `REPLAY_ABLATE_DISABLE_WEEKLY_ZONE` | `src/strategy/smc_engine.py` |
+| `REPLAY_ABLATE_DISABLE_DECISION_STRUCTURE` | `src/strategy/smc_engine.py` |
+| `REPLAY_ABLATE_DISABLE_MS_CONFIRMATION` | `src/strategy/smc_engine.py` |
+| `REPLAY_ABLATE_DISABLE_WAIT_STRUCTURE_BREAK` | `src/strategy/smc_engine.py` |
+| `REPLAY_ABLATE_DISABLE_RECONFIRMATION` | `src/strategy/smc_engine.py` |
+
+### Diagnostic flags
+
+| Flag | Location | Purpose |
+|------|----------|---------|
+| `REPLAY_GATE_DIAGNOSTICS` | `src/strategy/smc_engine.py` | Log gate rejection reasons per tick |
+
+### Infrastructure flags (replay harness internals)
+
+Set automatically by `src/backtest/replay_harness/runner.py`. Do not set manually unless debugging the harness itself.
+
+| Flag | Location | Default | Purpose |
+|------|----------|---------|---------|
+| `REPLAY_FORCE_MARKET_ENTRY` | `src/execution/execution_gateway.py` | `0` | Force market orders (no limit) |
+| `REPLAY_RELAX_ORDER_RATE_LIMITER` | `src/execution/execution_gateway.py` | `0` | Bypass order rate limits |
+| `REPLAY_SKIP_STALE_PENDING_CLOSE` | `src/execution/position_state_machine.py` | `0` | Skip stale pending close checks |
+| `REPLAY_RESEARCH_MINIMAL_LOGS` | `src/runtime/cycle_guard.py` | `0` | Reduce log noise in research |
+| `REPLAY_FORCE_FLAT_AT_END` | `src/backtest/replay_harness/runner.py` | `1` | Close all positions at replay end |
+| `REPLAY_DISABLE_DB_MOCK` | `src/backtest/replay_harness/runner.py` | `0` | Use real DB instead of mock |
+| `REPLAY_RELAX_MIN_SCORES` | `src/backtest/replay_harness/runner.py` | `1` | Relax minimum score requirements |
 
 ## Log Patterns
 

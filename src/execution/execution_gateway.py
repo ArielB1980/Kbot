@@ -1247,7 +1247,7 @@ class ExecutionGateway:
             )
             position.trade_recorded = True
             try:
-                from src.monitoring.alerting import send_alert
+                from src.monitoring.alert_dispatcher import send_alert
                 await send_alert(
                     "TRADE_RECORD_EXHAUSTED",
                     f"Trade recording permanently failed for {position.symbol} "
@@ -1285,7 +1285,7 @@ class ExecutionGateway:
                 missing_qty=str(missing_qty),
             )
             try:
-                from src.monitoring.alerting import send_alert, fmt_size
+                from src.monitoring.alert_dispatcher import send_alert, fmt_size
                 await send_alert(
                     "POSITION_CLOSED_UNPRICED",
                     f"⚠️ Position reconciled closed: {position.symbol}\n"
@@ -1322,7 +1322,7 @@ class ExecutionGateway:
                 
                 # ---- Send POSITION_CLOSED notification ----
                 try:
-                    from src.monitoring.alerting import send_alert, fmt_price, fmt_size
+                    from src.monitoring.alert_dispatcher import send_alert, fmt_price, fmt_size
                     
                     pnl_sign = "+" if trade.net_pnl >= 0 else ""
                     pnl_emoji = "\u2705" if trade.net_pnl >= 0 else "\u274c"
@@ -1384,7 +1384,7 @@ class ExecutionGateway:
                 error_type=type(e).__name__,
             )
             try:
-                from src.monitoring.alerting import send_alert
+                from src.monitoring.alert_dispatcher import send_alert
                 await send_alert(
                     "TRADE_RECORD_FAILURE",
                     f"Failed to record trade for {position.symbol}: {type(e).__name__}: {e}",
@@ -2356,7 +2356,7 @@ class ExecutionGateway:
                     error_type=type(e).__name__,
                 )
                 try:
-                    from src.monitoring.alerting import send_alert
+                    from src.monitoring.alert_dispatcher import send_alert
                     import asyncio
                     await send_alert(
                         "PHANTOM_IMPORT_FAILED",

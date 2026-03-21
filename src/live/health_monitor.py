@@ -13,15 +13,20 @@ All functions receive the LiveTrading instance as their first argument (``lt``)
 to access shared state, following the same delegate pattern used by
 protection_ops, signal_handler, auction_runner, and exchange_sync.
 """
+
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from datetime import datetime, timedelta, timezone
+import subprocess
+import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from src.exceptions import OperationalError, DataError
+from src.exceptions import DataError, OperationalError
 from src.execution.equity import calculate_effective_equity
 from src.monitoring.logger import get_logger
 from src.utils.kill_switch import KillSwitchReason
@@ -36,7 +41,8 @@ logger = get_logger(__name__)
 # Order polling
 # ---------------------------------------------------------------------------
 
-async def run_order_polling(lt: "LiveTrading", interval_seconds: int = 12) -> None:
+
+async def run_order_polling(lt: LiveTrading, interval_seconds: int = 12) -> None:
     """Poll pending entry order status, process fills, trigger PLACE_STOP (SL/TP)."""
     while lt.active:
         await asyncio.sleep(interval_seconds)
@@ -58,7 +64,8 @@ async def run_order_polling(lt: "LiveTrading", interval_seconds: int = 12) -> No
 # Protection checks
 # ---------------------------------------------------------------------------
 
-async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -> None:
+
+async def run_protection_checks(lt: LiveTrading, interval_seconds: int = 30) -> None:
     """
     V2 protection monitor loop with escalation policy.
 
@@ -82,7 +89,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
     )
     await asyncio.sleep(startup_grace_seconds)
 
-    consecutive_naked_count: Dict[str, int] = {}
+    consecutive_naked_count: dict[str, int] = {}
     # Escalation thresholds:
     # - At HEAL_THRESHOLD: attempt to place missing stops (self-heal)
     # - At KILL_THRESHOLD: if still naked after heal attempt, activate kill switch
@@ -93,8 +100,8 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
     _heal_attempted = False
 
     # ── Self-heal counters (readable via lt for dashboards / alerts) ──
-    from src.monitoring.alerting import send_alert
-    
+    from src.monitoring.alert_dispatcher import send_alert
+
     # Stored on the LiveTrading object so they survive across function calls
     # and are accessible from other monitors.
     if not hasattr(lt, "_stop_heal_metrics"):
@@ -121,9 +128,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
 
                 # ── TIER 3: Kill switch (heal failed) ──
                 persistent_naked = [
-                    s
-                    for s in naked
-                    if consecutive_naked_count.get(s, 0) >= KILL_THRESHOLD
+                    s for s in naked if consecutive_naked_count.get(s, 0) >= KILL_THRESHOLD
                 ]
 
                 if persistent_naked:
@@ -135,9 +140,9 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                             s: consecutive_naked_count[s] for s in persistent_naked
                         },
                     )
-                    is_prod_live = (
-                        os.getenv("ENVIRONMENT", "").strip().lower() == "prod"
-                    ) and (not lt.config.system.dry_run)
+                    is_prod_live = (os.getenv("ENVIRONMENT", "").strip().lower() == "prod") and (
+                        not lt.config.system.dry_run
+                    )
                     if is_prod_live:
                         await lt.kill_switch.activate(
                             KillSwitchReason.RECONCILIATION_FAILURE, emergency=True
@@ -147,9 +152,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
 
                 # ── TIER 2: Self-heal attempt (place missing stops) ──
                 heal_candidates = [
-                    s
-                    for s in naked
-                    if consecutive_naked_count.get(s, 0) >= HEAL_THRESHOLD
+                    s for s in naked if consecutive_naked_count.get(s, 0) >= HEAL_THRESHOLD
                 ]
 
                 if heal_candidates and not _heal_attempted:
@@ -159,14 +162,13 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                     logger.warning(
                         "NAKED_POSITIONS: attempting self-heal (placing missing stops)",
                         naked_symbols=heal_candidates,
-                        consecutive_counts={
-                            s: consecutive_naked_count[s] for s in heal_candidates
-                        },
+                        consecutive_counts={s: consecutive_naked_count[s] for s in heal_candidates},
                         stop_self_heal_attempts_total=metrics["stop_self_heal_attempts_total"],
                     )
                     try:
                         raw_positions = await lt.client.get_all_futures_positions()
                         from src.live.protection_ops import place_missing_stops_for_unprotected
+
                         await place_missing_stops_for_unprotected(
                             lt, raw_positions, max_per_tick=10
                         )
@@ -180,8 +182,12 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                             logger.info(
                                 "Self-heal SUCCESS: naked positions now protected",
                                 healed_symbols=heal_candidates,
-                                stop_self_heal_success_total=metrics["stop_self_heal_success_total"],
-                                stop_self_heal_attempts_total=metrics["stop_self_heal_attempts_total"],
+                                stop_self_heal_success_total=metrics[
+                                    "stop_self_heal_success_total"
+                                ],
+                                stop_self_heal_attempts_total=metrics[
+                                    "stop_self_heal_attempts_total"
+                                ],
                             )
                             try:
                                 await send_alert(
@@ -203,8 +209,12 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                                 "Self-heal PARTIAL: some positions still naked after stop placement",
                                 still_naked=still_naked,
                                 healed=[s for s in heal_candidates if s not in still_naked],
-                                stop_self_heal_failures_total=metrics["stop_self_heal_failures_total"],
-                                stop_self_heal_attempts_total=metrics["stop_self_heal_attempts_total"],
+                                stop_self_heal_failures_total=metrics[
+                                    "stop_self_heal_failures_total"
+                                ],
+                                stop_self_heal_attempts_total=metrics[
+                                    "stop_self_heal_attempts_total"
+                                ],
                             )
                             try:
                                 await send_alert(
@@ -245,9 +255,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                     "NAKED_POSITIONS_DETECTED (monitoring, self-heal pending)",
                     naked_symbols=naked,
                     details=results,
-                    consecutive_counts={
-                        s: consecutive_naked_count.get(s, 0) for s in naked
-                    },
+                    consecutive_counts={s: consecutive_naked_count.get(s, 0) for s in naked},
                     heal_at=HEAL_THRESHOLD,
                     kill_at=KILL_THRESHOLD,
                 )
@@ -269,10 +277,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
                 and hasattr(lt._protection_monitor, "layer3_saves_total")
                 else 0
             )
-            if (
-                metrics["stop_self_heal_attempts_total"] > 0
-                or layer3_saves > 0
-            ):
+            if metrics["stop_self_heal_attempts_total"] > 0 or layer3_saves > 0:
                 logger.info(
                     "STOP_HEAL_METRICS",
                     stop_self_heal_attempts_total=metrics["stop_self_heal_attempts_total"],
@@ -296,8 +301,9 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
 # Trade starvation monitor
 # ---------------------------------------------------------------------------
 
+
 async def run_trade_starvation_monitor(
-    lt: "LiveTrading",
+    lt: LiveTrading,
     check_interval_seconds: int = 300,
     *,
     starvation_window_hours: float = 6.0,
@@ -319,7 +325,7 @@ async def run_trade_starvation_monitor(
     The monitor tracks per-cycle stats from the CycleGuard (via the
     safety integration layer) and from the auction runner logs.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     # Rolling window accumulators: (cycle_end_ts, signals, orders_placed)
     _history: list[tuple[datetime, int, int]] = []
@@ -330,7 +336,7 @@ async def run_trade_starvation_monitor(
 
     while lt.active:
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cutoff = now - timedelta(hours=starvation_window_hours)
 
             # Collect current cycle stats from the CycleGuard
@@ -367,9 +373,10 @@ async def run_trade_starvation_monitor(
             db_evidence = 0
             try:
                 from src.storage.repository import (
-                    count_trades_opened_since,
                     count_open_positions_opened_since,
+                    count_trades_opened_since,
                 )
+
                 closed_in_window = await asyncio.to_thread(count_trades_opened_since, cutoff)
                 open_in_window = await asyncio.to_thread(count_open_positions_opened_since, cutoff)
                 db_evidence = closed_in_window + open_in_window
@@ -434,8 +441,9 @@ async def run_trade_starvation_monitor(
 # Winner churn monitor
 # ---------------------------------------------------------------------------
 
+
 async def run_winner_churn_monitor(
-    lt: "LiveTrading",
+    lt: LiveTrading,
     check_interval_seconds: int = 300,
     *,
     max_wins_without_entry: int = 5,
@@ -456,7 +464,7 @@ async def run_winner_churn_monitor(
         If a symbol has >= ``max_wins_without_entry`` wins in
         ``decay_hours`` without a single successful entry, fire an alert.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     # symbols already alerted (to de-duplicate)
     _alerted_symbols: set[str] = set()
@@ -466,7 +474,7 @@ async def run_winner_churn_monitor(
 
     while lt.active:
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cutoff = now - timedelta(hours=decay_hours)
 
             # ---- Read auction tracking data from LiveTrading ----
@@ -495,14 +503,10 @@ async def run_winner_churn_monitor(
 
             if churn_symbols:
                 new_churn = [
-                    (sym, count)
-                    for sym, count in churn_symbols
-                    if sym not in _alerted_symbols
+                    (sym, count) for sym, count in churn_symbols if sym not in _alerted_symbols
                 ]
                 if new_churn:
-                    symbols_str = ", ".join(
-                        f"{sym} ({count} wins)" for sym, count in new_churn
-                    )
+                    symbols_str = ", ".join(f"{sym} ({count} wins)" for sym, count in new_churn)
                     blocker_parts = []
                     blocker_summary = {}
                     for sym, _count in new_churn:
@@ -514,9 +518,7 @@ async def run_winner_churn_monitor(
                             blocker_parts.append(f"{sym}: {reason}")
                             blocker_summary[sym] = reason
                     blocker_hint = (
-                        f"\nObserved blockers: {'; '.join(blocker_parts)}"
-                        if blocker_parts
-                        else ""
+                        f"\nObserved blockers: {'; '.join(blocker_parts)}" if blocker_parts else ""
                     )
                     msg = (
                         f"WINNER CHURN: {symbols_str} won the auction "
@@ -565,8 +567,9 @@ async def run_winner_churn_monitor(
 # Trade recording invariant monitor
 # ---------------------------------------------------------------------------
 
+
 async def run_trade_recording_monitor(
-    lt: "LiveTrading",
+    lt: LiveTrading,
     check_interval_seconds: int = 300,
 ) -> None:
     """
@@ -587,7 +590,7 @@ async def run_trade_recording_monitor(
 
     while lt.active:
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cutoff = now - timedelta(hours=24)
 
             # Source 1: closed positions in recent history (SQLite registry)
@@ -606,6 +609,7 @@ async def run_trade_recording_monitor(
             trades_in_window = 0
             try:
                 from src.storage.repository import get_trades_since
+
                 trades = await asyncio.to_thread(get_trades_since, cutoff)
                 trades_in_window = len(trades)
             except (OperationalError, DataError, OSError):
@@ -627,7 +631,8 @@ async def run_trade_recording_monitor(
                     window_hours=24,
                 )
                 try:
-                    from src.monitoring.alerting import send_alert
+                    from src.monitoring.alert_dispatcher import send_alert
+
                     await send_alert(
                         "TRADE_RECORDING_STALL",
                         f"{recent_closes} positions closed in 24h but 0 trades recorded.\n"
@@ -676,7 +681,8 @@ async def run_trade_recording_monitor(
 # System status (Telegram data provider)
 # ---------------------------------------------------------------------------
 
-async def get_system_status(lt: "LiveTrading") -> dict:
+
+async def get_system_status(lt: LiveTrading) -> dict:
     """
     Data provider for Telegram command handler.
     Returns current system state for /status and /positions commands.
@@ -701,16 +707,14 @@ async def get_system_status(lt: "LiveTrading") -> dict:
         )
         result["equity"] = equity
         result["margin_used"] = margin_used
-        result["margin_pct"] = (
-            float((margin_used / equity) * 100) if equity > 0 else 0
-        )
+        result["margin_pct"] = float((margin_used / equity) * 100) if equity > 0 else 0
     except (OperationalError, DataError) as e:
         logger.warning("Status: failed to get equity", error=str(e))
 
     try:
         positions = await lt.client.get_all_futures_positions()
         active_positions = [p for p in positions if p.get("size", 0) != 0]
-        
+
         # Enrich positions with mark prices and compute unrealized PnL
         # Kraken's openpositions endpoint does NOT return unrealizedPnl or markPrice
         if active_positions:
@@ -730,7 +734,7 @@ async def get_system_status(lt: "LiveTrading") -> dict:
                             p["unrealized_pnl"] = (entry - mark) * size
             except (ValueError, TypeError, ArithmeticError, KeyError) as e:
                 logger.debug("Status: failed to enrich mark prices", error=str(e))
-        
+
         result["positions"] = active_positions
     except (OperationalError, DataError) as e:
         logger.warning("Status: failed to get positions", error=str(e))
@@ -742,15 +746,14 @@ async def get_system_status(lt: "LiveTrading") -> dict:
         result["system_state"] = "KILL_SWITCH"
     elif lt.hardening and hasattr(lt.hardening, "invariant_monitor"):
         inv_state = lt.hardening.invariant_monitor.state.value
-        result["system_state"] = (
-            inv_state.upper() if inv_state != "active" else "NORMAL"
-        )
+        result["system_state"] = inv_state.upper() if inv_state != "active" else "NORMAL"
     else:
         result["system_state"] = "NORMAL"
 
     # Connection pool health
     try:
         from src.storage.db import get_pool_status
+
         result["db_pool"] = get_pool_status()
     except (OperationalError, DataError, OSError, ImportError):
         pass
@@ -762,21 +765,20 @@ async def get_system_status(lt: "LiveTrading") -> dict:
 # Daily P&L summary
 # ---------------------------------------------------------------------------
 
-async def run_daily_summary(lt: "LiveTrading") -> None:
+
+async def run_daily_summary(lt: LiveTrading) -> None:
     """
     Send a daily P&L summary via Telegram at midnight UTC.
 
     Calculates: equity, daily P&L, open positions, trades today, win rate.
     Runs in a background loop, sleeping until the next midnight.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     while lt.active:
         try:
-            now = datetime.now(timezone.utc)
-            tomorrow = (now + timedelta(days=1)).replace(
-                hour=0, minute=0, second=5, microsecond=0
-            )
+            now = datetime.now(UTC)
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
             sleep_seconds = (tomorrow - now).total_seconds()
             await asyncio.sleep(sleep_seconds)
 
@@ -787,14 +789,10 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
                 account_info = await lt.client.get_futures_account_info()
                 equity = Decimal(str(account_info.get("equity", 0)))
                 margin_used = Decimal(str(account_info.get("marginUsed", 0)))
-                margin_pct = (
-                    float((margin_used / equity) * 100) if equity > 0 else 0
-                )
+                margin_pct = float((margin_used / equity) * 100) if equity > 0 else 0
 
                 positions = await lt.client.get_all_futures_positions()
-                open_positions = [
-                    p for p in positions if p.get("size", 0) != 0
-                ]
+                open_positions = [p for p in positions if p.get("size", 0) != 0]
 
                 # Enrich open positions with mark prices and computed unrealized PnL
                 if open_positions:
@@ -829,19 +827,11 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
                         error_type=type(trades_err).__name__,
                     )
 
-                wins = sum(
-                    1 for t in today_trades if getattr(t, "net_pnl", 0) > 0
-                )
-                losses = sum(
-                    1 for t in today_trades if getattr(t, "net_pnl", 0) <= 0
-                )
-                total_pnl = sum(
-                    getattr(t, "net_pnl", Decimal("0")) for t in today_trades
-                )
+                wins = sum(1 for t in today_trades if getattr(t, "net_pnl", 0) > 0)
+                losses = sum(1 for t in today_trades if getattr(t, "net_pnl", 0) <= 0)
+                total_pnl = sum(getattr(t, "net_pnl", Decimal("0")) for t in today_trades)
                 win_rate = (
-                    f"{(wins / (wins + losses) * 100):.0f}%"
-                    if (wins + losses) > 0
-                    else "N/A"
+                    f"{(wins / (wins + losses) * 100):.0f}%" if (wins + losses) > 0 else "N/A"
                 )
 
                 pnl_sign = "+" if total_pnl >= 0 else ""
@@ -851,21 +841,11 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
                 for p in open_positions[:10]:
                     sym = p.get("symbol", "?")
                     side = p.get("side", "?")
-                    upnl = Decimal(
-                        str(
-                            p.get(
-                                "unrealizedPnl", p.get("unrealized_pnl", 0)
-                            )
-                        )
-                    )
+                    upnl = Decimal(str(p.get("unrealizedPnl", p.get("unrealized_pnl", 0))))
                     upnl_sign = "+" if upnl >= 0 else ""
-                    pos_lines.append(
-                        f"  \u2022 {sym} ({side}) {upnl_sign}${upnl:.2f}"
-                    )
+                    pos_lines.append(f"  \u2022 {sym} ({side}) {upnl_sign}${upnl:.2f}")
 
-                positions_str = (
-                    "\n".join(pos_lines) if pos_lines else "  None"
-                )
+                positions_str = "\n".join(pos_lines) if pos_lines else "  None"
 
                 summary = (
                     f"{pnl_emoji} Daily Summary ({now.strftime('%Y-%m-%d')})\n"
@@ -900,9 +880,7 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
                     logger.warning("Position DB cleanup failed", error=str(cleanup_err))
 
             except (OperationalError, DataError) as e:
-                logger.warning(
-                    "Failed to gather daily summary data", error=str(e)
-                )
+                logger.warning("Failed to gather daily summary data", error=str(e))
 
         except asyncio.CancelledError:
             raise
@@ -915,7 +893,8 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
 # Startup position protection validation
 # ---------------------------------------------------------------------------
 
-async def validate_position_protection(lt: "LiveTrading") -> None:
+
+async def validate_position_protection(lt: LiveTrading) -> None:
     """
     Validate all positions have protection (startup safety gate).
 
@@ -957,9 +936,7 @@ async def validate_position_protection(lt: "LiveTrading") -> None:
             positions=unprotected,
         )
         for up in unprotected:
-            await async_record_event(
-                "UNPROTECTED_POSITION", up["symbol"], up
-            )
+            await async_record_event("UNPROTECTED_POSITION", up["symbol"], up)
     else:
         logger.info(
             "All positions are protected",
@@ -971,7 +948,8 @@ async def validate_position_protection(lt: "LiveTrading") -> None:
 # Auto-recovery from kill switch
 # ---------------------------------------------------------------------------
 
-async def try_auto_recovery(lt: "LiveTrading") -> bool:
+
+async def try_auto_recovery(lt: LiveTrading) -> bool:
     """
     Attempt automatic recovery from kill switch (margin_critical only).
 
@@ -989,7 +967,7 @@ async def try_auto_recovery(lt: "LiveTrading") -> bool:
     if lt.kill_switch.reason != KillSwitchReason.MARGIN_CRITICAL:
         return False
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Rule 2: Cooldown since halt activation
     if lt.kill_switch.activated_at:
@@ -1054,7 +1032,7 @@ async def try_auto_recovery(lt: "LiveTrading") -> bool:
             lt.hardening.clear_halt(operator="auto_recovery")
 
         try:
-            from src.monitoring.alerting import send_alert_sync
+            from src.monitoring.alert_dispatcher import send_alert_sync
 
             send_alert_sync(
                 "AUTO_RECOVERY",
@@ -1069,7 +1047,80 @@ async def try_auto_recovery(lt: "LiveTrading") -> bool:
         return True
 
     except (OperationalError, DataError) as e:
-        logger.warning(
-            "Auto-recovery: failed to check margin", error=str(e)
-        )
+        logger.warning("Auto-recovery: failed to check margin", error=str(e))
         return False
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+
+
+def write_heartbeat(lt: LiveTrading) -> None:
+    """Write heartbeat file with timestamp, phase, and health banner.
+
+    External watchdog (systemd timer / sidecar) checks file staleness.
+    If timestamp > 60s old → process is hung → restart.
+
+    Health banner includes breaker state, self-heal metrics, rate limiter,
+    and trade recording failures — gives immediate "are we drifting?" visibility.
+    """
+    try:
+        heartbeat_dir = Path("runtime")
+        heartbeat_dir.mkdir(parents=True, exist_ok=True)
+        heartbeat_path = heartbeat_dir / "heartbeat.json"
+
+        # Core identity
+        data = {
+            "timestamp": time.time(),
+            "iso": datetime.now(UTC).isoformat(),
+            "startup_phase": lt._startup_sm.phase.value if lt._startup_sm else "unknown",
+            "cycle": getattr(lt, "_last_cycle_count", 0),
+            "kill_switch_active": lt.kill_switch.is_active() if lt.kill_switch else False,
+        }
+
+        # Git commit hash (cached after first call)
+        if not hasattr(lt, "_git_sha"):
+            try:
+                lt._git_sha = (
+                    subprocess.check_output(
+                        ["git", "rev-parse", "--short", "HEAD"],
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                    .decode()
+                    .strip()
+                )
+            except Exception:
+                lt._git_sha = "unknown"
+        data["git_sha"] = lt._git_sha
+
+        # Circuit breaker state
+        if hasattr(lt.client, "api_breaker"):
+            breaker = lt.client.api_breaker
+            state = getattr(breaker, "_state", None)
+            data["breaker_state"] = state.value if hasattr(state, "value") else str(state)
+            data["breaker_failure_count"] = getattr(breaker, "_failure_count", 0)
+
+        # Stop self-heal metrics
+        heal = getattr(lt, "_stop_heal_metrics", {})
+        if heal:
+            data["stop_self_heal_attempts"] = heal.get("stop_self_heal_attempts_total", 0)
+            data["stop_self_heal_success"] = heal.get("stop_self_heal_success_total", 0)
+            data["stop_self_heal_failures"] = heal.get("stop_self_heal_failures_total", 0)
+            data["layer3_saves"] = heal.get("layer3_saves_total", 0)
+
+        # Execution gateway metrics
+        if hasattr(lt, "execution_gateway"):
+            gw = lt.execution_gateway
+            data["trade_record_failures"] = gw.metrics.get("trade_record_failures_total", 0)
+            data["orders_blocked_by_rate_limit"] = gw._order_rate_limiter.orders_blocked_total
+            data["orders_per_minute"] = gw._order_rate_limiter.orders_last_minute
+            data["gateway_errors"] = gw.metrics.get("errors", 0)
+
+        # Atomic write: write to temp then rename
+        tmp_path = heartbeat_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data))
+        tmp_path.rename(heartbeat_path)
+    except OSError as e:
+        logger.debug("Failed to write heartbeat", error=str(e))

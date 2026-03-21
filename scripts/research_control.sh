@@ -51,6 +51,8 @@ RUN_ID=""
 CANDIDATE_ID=""
 ALLOW_OVERLAP="false"
 CRON_EXPR="15 2 * * *"
+WATCHDOG_DRY_RUN="false"
+WATCHDOG_CRON_EXPR="*/10 * * * *"
 
 usage() {
   cat <<'EOF'
@@ -62,6 +64,10 @@ Commands:
   start-continuous  Start continuous supervisor loop on server
   status-continuous Show continuous supervisor status
   stop-continuous   Request continuous supervisor stop
+  watchdog-run      Run research recovery watchdog once
+  watchdog-install-schedule  Install watchdog cron on server
+  watchdog-schedule-status   Show watchdog cron entries
+  watchdog-remove-schedule   Remove watchdog cron entries
   status    Print current run status
   pause     Pause current run
   resume    Resume current run
@@ -98,6 +104,7 @@ Options:
   --cron "<expr>"         Cron expression for install-schedule (default: 15 2 * * *)
   --candidate <id>        Candidate id for promote command
   --follow                Follow logs continuously (logs only)
+  --dry-run               Watchdog-only: evaluate and log without mutations
 
 Notes:
   - This script writes run data under /home/trading/TradingSystem/data/research/<run_id>/
@@ -224,6 +231,10 @@ parse_common_args() {
         ;;
       --follow)
         FOLLOW="true"
+        shift
+        ;;
+      --dry-run)
+        WATCHDOG_DRY_RUN="true"
         shift
         ;;
       -h|--help)
@@ -411,6 +422,52 @@ cmd_stop_continuous() {
   '"
 }
 
+cmd_watchdog_run() {
+  require_ssh
+  local dry_flag=""
+  if [[ "${WATCHDOG_DRY_RUN}" == "true" ]]; then
+    dry_flag="--dry-run"
+  fi
+  ssh -i "${SSH_KEY}" "${SERVER}" "sudo -u ${TRADING_USER} bash -lc '
+    set -euo pipefail
+    cd \"${TRADING_DIR}\"
+    mkdir -p data/research/continuous_daemon/logs
+    bash \"${TRADING_DIR}/scripts/research_recovery_watchdog.sh\" ${dry_flag}
+  '"
+}
+
+cmd_watchdog_install_schedule() {
+  require_ssh
+  local cron_line="${WATCHDOG_CRON_EXPR} cd ${TRADING_DIR} && bash scripts/research_recovery_watchdog.sh >> data/research/continuous_daemon/logs/watchdog.log 2>&1"
+  ssh -i "${SSH_KEY}" "${SERVER}" "sudo -u ${TRADING_USER} bash -lc '
+    set -euo pipefail
+    EXISTING=\$(crontab -l 2>/dev/null || true)
+    FILTERED=\$(printf \"%s\n\" \"\${EXISTING}\" | grep -v \"scripts/research_recovery_watchdog.sh\" || true)
+    { printf \"%s\n\" \"\${FILTERED}\"; printf \"%s\n\" \"${cron_line}\"; } | crontab -
+    echo \"installed watchdog schedule: ${cron_line}\"
+  '"
+}
+
+cmd_watchdog_schedule_status() {
+  require_ssh
+  ssh -i "${SSH_KEY}" "${SERVER}" "sudo -u ${TRADING_USER} bash -lc '
+    CRON=\$(crontab -l 2>/dev/null || true)
+    echo \"Current watchdog schedule entries:\"
+    echo \"\${CRON}\" | grep \"scripts/research_recovery_watchdog.sh\" || echo \"(none)\"
+  '"
+}
+
+cmd_watchdog_remove_schedule() {
+  require_ssh
+  ssh -i "${SSH_KEY}" "${SERVER}" "sudo -u ${TRADING_USER} bash -lc '
+    set -euo pipefail
+    EXISTING=\$(crontab -l 2>/dev/null || true)
+    FILTERED=\$(printf \"%s\n\" \"\${EXISTING}\" | grep -v \"scripts/research_recovery_watchdog.sh\" || true)
+    printf \"%s\n\" \"\${FILTERED}\" | crontab -
+    echo \"removed watchdog schedule entries\"
+  '"
+}
+
 cmd_status() {
   require_ssh
   local rid
@@ -586,6 +643,18 @@ case "${COMMAND}" in
     ;;
   stop-continuous)
     cmd_stop_continuous
+    ;;
+  watchdog-run)
+    cmd_watchdog_run
+    ;;
+  watchdog-install-schedule)
+    cmd_watchdog_install_schedule
+    ;;
+  watchdog-schedule-status)
+    cmd_watchdog_schedule_status
+    ;;
+  watchdog-remove-schedule)
+    cmd_watchdog_remove_schedule
     ;;
   status)
     cmd_status

@@ -324,6 +324,11 @@ class BacktestRunner:
         _replay_cache = tempfile.mktemp(suffix="_replay_specs.json", prefix="instrument_specs_")
         os.environ["INSTRUMENT_SPECS_CACHE_PATH"] = _replay_cache
 
+        # Isolate peak equity state so replay doesn't read stale production peaks
+        # that would trigger DEGRADED mode (90% phantom drawdown).
+        _replay_peak = tempfile.mktemp(suffix="_peak_equity.json", prefix="replay_")
+        os.environ["PEAK_EQUITY_STATE_PATH"] = _replay_peak
+
         config = load_config()
 
         # Apply overrides

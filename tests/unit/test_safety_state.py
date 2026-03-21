@@ -252,7 +252,7 @@ class TestImplausibleDrawdown:
         async def mock_refetch():
             return Decimal("332.50")
         
-        with patch("src.monitoring.alerting.send_alert_sync", side_effect=lambda *a, **kw: None):
+        with patch("src.monitoring.alert_dispatcher.send_alert_sync", side_effect=lambda *a, **kw: None):
             state = await monitor.check_all(
                 current_equity=Decimal("332.82"),
                 open_positions=[],
@@ -315,7 +315,7 @@ class TestImplausibleDrawdown:
         async def mock_refetch():
             return Decimal("333.0")
         
-        with patch("src.monitoring.alerting.send_alert_sync", side_effect=lambda *a, **kw: None):
+        with patch("src.monitoring.alert_dispatcher.send_alert_sync", side_effect=lambda *a, **kw: None):
             state = await monitor.check_all(
                 current_equity=Decimal("332.82"),
                 open_positions=[],
@@ -341,7 +341,7 @@ class TestImplausibleDrawdown:
         async def failing_refetch():
             raise ConnectionError("API down")
         
-        with patch("src.monitoring.alerting.send_alert_sync", side_effect=lambda *a, **kw: None):
+        with patch("src.monitoring.alert_dispatcher.send_alert_sync", side_effect=lambda *a, **kw: None):
             state = await monitor.check_all(
                 current_equity=Decimal("332.82"),
                 open_positions=[],

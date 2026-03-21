@@ -324,7 +324,7 @@ async def handle_signal_v2(
 
     # Send thesis-aware open alert (urgent=True so opens are never rate-limited).
     try:
-        from src.monitoring.alerting import send_alert_sync, fmt_price, fmt_size
+        from src.monitoring.alert_dispatcher import send_alert_sync, fmt_price, fmt_size
 
         tp_line = ""
         if tp1_price:

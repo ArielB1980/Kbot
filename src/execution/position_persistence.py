@@ -621,7 +621,7 @@ class PositionPersistence:
                 registry._closed_positions.append(pos)
                 corrupted_symbols.append(symbol)
                 try:
-                    from src.monitoring.alerting import send_alert
+                    from src.monitoring.alert_dispatcher import send_alert
                     import asyncio
                     asyncio.get_event_loop().create_task(send_alert(
                         "CORRUPTED_POSITION",
