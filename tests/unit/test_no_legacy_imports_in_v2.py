@@ -5,7 +5,8 @@ import textwrap
 from pathlib import Path
 
 
-def test_live_trading_module_does_not_import_legacy_position_manager_when_v2_enabled():
+def test_live_trading_module_imports_unified_position_manager():
+    """Verify live_trading imports the unified PositionManager (KBO-29), not raw V2."""
     repo_root = Path(__file__).resolve().parent.parent.parent
 
     code = textwrap.dedent(
@@ -17,7 +18,8 @@ def test_live_trading_module_does_not_import_legacy_position_manager_when_v2_ena
 
         import src.live.live_trading  # noqa: F401
 
-        assert "src.execution.position_manager" not in sys.modules, "legacy PositionManager imported"
+        # Unified PositionManager should be imported
+        assert "src.execution.position_manager" in sys.modules, "unified PositionManager not imported"
         print("OK")
         """
     ).strip()
@@ -38,4 +40,3 @@ def test_live_trading_module_does_not_import_legacy_position_manager_when_v2_ena
 
     assert res.returncode == 0, f"stdout={res.stdout}\nstderr={res.stderr}"
     assert "OK" in (res.stdout or "")
-

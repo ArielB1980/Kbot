@@ -20,9 +20,7 @@ from src.execution.execution_engine import ExecutionEngine
 from src.execution.execution_gateway import ExecutionGateway
 from src.execution.executor import Executor
 from src.execution.futures_adapter import FuturesAdapter
-from src.execution.position_manager_v2 import (
-    PositionManagerV2,
-)
+from src.execution.position_manager import PositionManager
 from src.execution.position_persistence import PositionPersistence
 
 # Production-Grade Position State Machine
@@ -280,20 +278,22 @@ class LiveTrading:
             # Initialize Persistence (SQLite)
             self.position_persistence = PositionPersistence("data/positions.db")
 
-            # Initialize Position Manager V2 (pass multi_tp config for runner mode)
-            self.position_manager_v2 = PositionManagerV2(
+            # Unified Position Manager (KBO-29): single source of truth
+            self.position_manager = PositionManager(
                 registry=self.position_registry,
                 multi_tp_config=getattr(self.config, "multi_tp", None),
                 instrument_spec_registry=getattr(self, "instrument_spec_registry", None),
                 strategy_config=self.config.strategy,
                 institutional_memory=self.institutional_memory_manager,
             )
+            # Backward compat alias (deprecated)
+            self.position_manager_v2 = self.position_manager
 
             # Initialize Execution Gateway - ALL orders flow through here
             self.execution_gateway = ExecutionGateway(
                 exchange_client=self.client,
                 registry=self.position_registry,
-                position_manager=self.position_manager_v2,
+                position_manager=self.position_manager,
                 persistence=self.position_persistence,
                 on_partial_close=lambda _: setattr(
                     self, "_last_partial_close_at", datetime.now(UTC)
@@ -722,8 +722,8 @@ class LiveTrading:
                     positions_count = 0
                     if self.use_state_machine_v2 and self.execution_gateway:
                         positions_count = len(self.execution_gateway.registry.get_all_active())
-                    elif self.position_manager_v2:
-                        positions_count = len(self.position_manager_v2.get_all_positions())
+                    elif self.position_manager:
+                        positions_count = len(self.position_manager.get_all_active())
 
                     kill_active = self.kill_switch.is_active() if self.kill_switch else False
                     system_state = "NORMAL"
