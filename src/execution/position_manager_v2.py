@@ -29,7 +29,7 @@ from src.execution.instrument_specs import InstrumentSpecRegistry
 from src.data.symbol_utils import position_symbol_matches_order
 from src.domain.models import Side, OrderType, Signal, SignalType
 from src.monitoring.logger import get_logger
-from src.monitoring.alerting import send_alert_sync
+from src.monitoring.alert_dispatcher import send_alert_sync
 
 logger = get_logger(__name__)
 

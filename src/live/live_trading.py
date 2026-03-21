@@ -2670,7 +2670,7 @@ class LiveTrading:
 
             strategy_cfg = getattr(self.config, "strategy", None)
             if bool(getattr(strategy_cfg, "thesis_alerts_enabled", False)):
-                from src.monitoring.alerting import send_alert, fmt_price, fmt_size
+                from src.monitoring.alert_dispatcher import send_alert, fmt_price, fmt_size
 
                 thesis_outcome = "inconclusive"
                 thesis_context = "Thesis: unavailable"
@@ -2737,7 +2737,7 @@ class LiveTrading:
                 else Decimal("0")
             )
             if daily_loss_pct > Decimal(str(self.config.risk.daily_loss_limit_pct * 0.7)):
-                from src.monitoring.alerting import send_alert
+                from src.monitoring.alert_dispatcher import send_alert
                 
                 limit_pct = self.config.risk.daily_loss_limit_pct * 100
                 await send_alert(

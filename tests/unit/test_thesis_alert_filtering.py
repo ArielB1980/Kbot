@@ -1,14 +1,16 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from src.config.config import StrategyConfig
 from src.memory.institutional_memory import InstitutionalMemoryManager
 from src.memory.thesis import Thesis
-from src.monitoring.alerting import _THESIS_ALLOWED_EVENT_TYPES
+from src.monitoring.alert_dispatcher import (
+    THESIS_ALLOWED_EVENT_TYPES as _THESIS_ALLOWED_EVENT_TYPES,
+)
 
 
 def _thesis() -> Thesis:
-    formed = datetime.now(timezone.utc) - timedelta(hours=14)
+    formed = datetime.now(UTC) - timedelta(hours=14)
     return Thesis(
         thesis_id="thesis-filter-1",
         symbol="BTC/USD",
@@ -35,7 +37,10 @@ def test_thesis_alerts_suppressed_without_open_position(monkeypatch):
     t = _thesis()
 
     sent = []
-    monkeypatch.setattr("src.memory.institutional_memory.send_alert_sync", lambda *args, **kwargs: sent.append((args, kwargs)))
+    monkeypatch.setattr(
+        "src.memory.institutional_memory.send_alert_sync",
+        lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
     monkeypatch.setattr("src.memory.institutional_memory.get_active_position", lambda symbol: None)
     monkeypatch.setattr(mgr, "_persist", lambda thesis: None)
 
@@ -59,8 +64,13 @@ def test_thesis_alerts_emit_with_open_position(monkeypatch):
     t = _thesis()
 
     sent = []
-    monkeypatch.setattr("src.memory.institutional_memory.send_alert_sync", lambda *args, **kwargs: sent.append((args, kwargs)))
-    monkeypatch.setattr("src.memory.institutional_memory.get_active_position", lambda symbol: object())
+    monkeypatch.setattr(
+        "src.memory.institutional_memory.send_alert_sync",
+        lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        "src.memory.institutional_memory.get_active_position", lambda symbol: object()
+    )
     monkeypatch.setattr(mgr, "_persist", lambda thesis: None)
 
     mgr.update_conviction(

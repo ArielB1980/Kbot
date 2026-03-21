@@ -107,7 +107,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             # Patch sleep to not actually wait
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
@@ -140,7 +140,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -168,7 +168,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
                 # DB backstop: closed trades=1, open positions=0 (repeat for each loop iteration)
@@ -202,7 +202,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
                 # DB backstop: closed trades=0, open positions=1 (repeat for each loop iteration)
@@ -233,7 +233,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -254,7 +254,7 @@ class TestTradeStarvationMonitor:
         lt = FakeLiveTradingBase()
         lt.hardening_layer = None
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -281,7 +281,7 @@ class TestTradeStarvationMonitor:
         ]
         lt.hardening_layer = FakeHardeningLayer(FakeCycleGuard(cycles))
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 # Let it run 4 iterations
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=5)
@@ -330,7 +330,7 @@ class TestTradeStarvationMonitor:
 
         lt.hardening_layer = FakeHardeningLayer(guard)
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = switch_to_resolved
 
@@ -365,7 +365,7 @@ class TestWinnerChurnMonitor:
             now - timedelta(hours=i) for i in range(7)
         ]
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -395,7 +395,7 @@ class TestWinnerChurnMonitor:
         ]
         lt._auction_entry_log["SOL/USD"] = now - timedelta(hours=1)
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -421,7 +421,7 @@ class TestWinnerChurnMonitor:
             now - timedelta(hours=i) for i in range(3)
         ]
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -447,7 +447,7 @@ class TestWinnerChurnMonitor:
             now - timedelta(hours=20 + i) for i in range(10)
         ]
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -472,7 +472,7 @@ class TestWinnerChurnMonitor:
             now - timedelta(hours=i) for i in range(7)
         ]
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=5)
 
@@ -501,7 +501,7 @@ class TestWinnerChurnMonitor:
             now - timedelta(hours=i) for i in range(8)
         ]
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = _quick_sleep_then_stop(lt, max_iterations=2)
 
@@ -541,7 +541,7 @@ class TestWinnerChurnMonitor:
                 lt.active = False
             return asyncio.sleep(0)
 
-        with patch("src.monitoring.alerting.send_alert", new_callable=AsyncMock) as mock_alert:
+        with patch("src.monitoring.alert_dispatcher.send_alert", new_callable=AsyncMock) as mock_alert:
             with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = resolve_after_iteration
 

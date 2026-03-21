@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 from src.monitoring.logger import get_logger
-from src.monitoring.alerting import send_alert_sync
+from src.monitoring.alert_dispatcher import send_alert_sync
 from src.exceptions import OperationalError, DataError, InvariantError
 
 logger = get_logger(__name__)

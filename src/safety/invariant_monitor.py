@@ -360,7 +360,7 @@ class InvariantMonitor:
                     
                     # Alert via Telegram
                     try:
-                        from src.monitoring.alerting import send_alert_sync
+                        from src.monitoring.alert_dispatcher import send_alert_sync
                         send_alert_sync(
                             "STALE_PEAK_EQUITY",
                             f"Peak equity likely stale!\n"

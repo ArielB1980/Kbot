@@ -350,7 +350,7 @@ async def save_trade_history(
             if daily_loss_pct > Decimal(
                 str(lt.config.risk.daily_loss_limit_pct * 0.7)
             ):
-                from src.monitoring.alerting import send_alert
+                from src.monitoring.alert_dispatcher import send_alert
 
                 limit_pct = lt.config.risk.daily_loss_limit_pct * 100
                 await send_alert(
@@ -377,7 +377,7 @@ async def save_trade_history(
 
         # Send close alert via Telegram
         try:
-            from src.monitoring.alerting import send_alert, fmt_price
+            from src.monitoring.alert_dispatcher import send_alert, fmt_price
 
             pnl_sign = "+" if net_pnl >= 0 else ""
             pnl_emoji = "\u2705" if net_pnl >= 0 else "\u274c"

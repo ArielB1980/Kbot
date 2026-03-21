@@ -261,7 +261,7 @@ class TelegramCommandHandler:
             pnl_pct = (upnl / notional * 100) if notional > 0 else Decimal("0")
             pnl_pct_sign = "+" if pnl_pct >= 0 else ""
             
-            from src.monitoring.alerting import fmt_price, fmt_size
+            from src.monitoring.alert_dispatcher import fmt_price, fmt_size
 
             lines.append(
                 f"{side_emoji} <b>{symbol}</b> ({side})\n"

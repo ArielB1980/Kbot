@@ -153,7 +153,7 @@ async def update_market_universe(lt: "LiveTrading") -> None:
                 dropped_pct=f"{(1 - new_count / last_discovered_count) * 100:.0f}%",
             )
             try:
-                from src.monitoring.alerting import send_alert
+                from src.monitoring.alert_dispatcher import send_alert
 
                 await send_alert(
                     "UNIVERSE_SHRINK",

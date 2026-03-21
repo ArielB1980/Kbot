@@ -129,7 +129,7 @@ async def _execute_dca_purchase(lt, dca_cfg, symbol: str) -> tuple[bool, bool]:
         - completed=False and retryable_error=True means retry is recommended
     """
     try:
-        from src.monitoring.alerting import send_alert
+        from src.monitoring.alert_dispatcher import send_alert
     except ImportError:
         send_alert = None
 

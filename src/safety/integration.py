@@ -429,7 +429,7 @@ class ProductionHardeningLayer:
         
         # Send alert for halt state (alert failure must never block halt persistence)
         try:
-            from src.monitoring.alerting import send_alert_sync
+            from src.monitoring.alert_dispatcher import send_alert_sync
             violations_str = "\n".join(f"• {v}" for v in violations[:5])
             send_alert_sync(
                 "SYSTEM_HALTED",

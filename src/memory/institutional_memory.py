@@ -9,7 +9,7 @@ import uuid
 
 from src.memory.thesis import Thesis
 from src.monitoring.logger import get_logger
-from src.monitoring.alerting import send_alert_sync
+from src.monitoring.alert_dispatcher import send_alert_sync
 from src.storage.repository import get_active_position, get_latest_thesis_for_symbol, upsert_thesis
 
 logger = get_logger(__name__)

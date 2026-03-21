@@ -93,7 +93,7 @@ async def run_protection_checks(lt: "LiveTrading", interval_seconds: int = 30) -
     _heal_attempted = False
 
     # ── Self-heal counters (readable via lt for dashboards / alerts) ──
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
     
     # Stored on the LiveTrading object so they survive across function calls
     # and are accessible from other monitors.
@@ -319,7 +319,7 @@ async def run_trade_starvation_monitor(
     The monitor tracks per-cycle stats from the CycleGuard (via the
     safety integration layer) and from the auction runner logs.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     # Rolling window accumulators: (cycle_end_ts, signals, orders_placed)
     _history: list[tuple[datetime, int, int]] = []
@@ -456,7 +456,7 @@ async def run_winner_churn_monitor(
         If a symbol has >= ``max_wins_without_entry`` wins in
         ``decay_hours`` without a single successful entry, fire an alert.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     # symbols already alerted (to de-duplicate)
     _alerted_symbols: set[str] = set()
@@ -627,7 +627,7 @@ async def run_trade_recording_monitor(
                     window_hours=24,
                 )
                 try:
-                    from src.monitoring.alerting import send_alert
+                    from src.monitoring.alert_dispatcher import send_alert
                     await send_alert(
                         "TRADE_RECORDING_STALL",
                         f"{recent_closes} positions closed in 24h but 0 trades recorded.\n"
@@ -769,7 +769,7 @@ async def run_daily_summary(lt: "LiveTrading") -> None:
     Calculates: equity, daily P&L, open positions, trades today, win rate.
     Runs in a background loop, sleeping until the next midnight.
     """
-    from src.monitoring.alerting import send_alert
+    from src.monitoring.alert_dispatcher import send_alert
 
     while lt.active:
         try:
@@ -1054,7 +1054,7 @@ async def try_auto_recovery(lt: "LiveTrading") -> bool:
             lt.hardening.clear_halt(operator="auto_recovery")
 
         try:
-            from src.monitoring.alerting import send_alert_sync
+            from src.monitoring.alert_dispatcher import send_alert_sync
 
             send_alert_sync(
                 "AUTO_RECOVERY",
