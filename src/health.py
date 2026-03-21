@@ -13,19 +13,37 @@ Production uses: worker_health_app (via `python -m src.entrypoints.prod_live` wi
 Standalone: app (via python -m src.health)
 """
 import html as html_module
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-import os
 
-from src.exceptions import OperationalError, DataError
+from src.exceptions import DataError, OperationalError
 from src.health_checks import check_required_secrets_and_db, quick_connectivity_snapshot
-import time
-import subprocess
-import sys
-from typing import Optional, Tuple
+
+# Global coordinator reference — set at runtime by live trading or entrypoints.
+_coordinator: object | None = None
+
+
+def set_coordinator(coordinator: object) -> None:
+    """Register the ``HealthCheckCoordinator`` for HTTP exposure.
+
+    Args:
+        coordinator: A ``HealthCheckCoordinator`` instance.
+    """
+    global _coordinator
+    _coordinator = coordinator
+
+
+def get_coordinator() -> object | None:
+    """Return the registered coordinator, or *None*."""
+    return _coordinator
 
 # Standalone health app (for python -m src.health - legacy, kept for backwards compatibility)
 app = FastAPI(title="Trading System Health Check")
@@ -135,6 +153,23 @@ def get_worker_health_app(enable_debug: bool = False) -> FastAPI:
         data = _debug_signals_impl(symbol_filter=symbol)
         return _debug_signals_respond(data, request, format_param=format)
 
+    @w.get("/api/monitoring/status")
+    async def api_monitoring_status():
+        """Health monitoring pipeline status from HealthCheckCoordinator."""
+        if _coordinator is None:
+            return JSONResponse(
+                content={"status": "unavailable", "reason": "no coordinator registered"},
+                status_code=200,
+            )
+        try:
+            snapshot = _coordinator.snapshot()  # type: ignore[union-attr]
+            return JSONResponse(content=snapshot, status_code=200)
+        except (OperationalError, DataError, OSError, RuntimeError) as e:
+            return JSONResponse(
+                content={"status": "error", "message": str(e)[:200]},
+                status_code=500,
+            )
+
     @w.get("/api/metrics")
     async def api_metrics():
         content, status = _metrics_json()
@@ -225,6 +260,28 @@ async def metrics_prometheus():
 
 
 
+@app.get("/api/monitoring/status")
+async def monitoring_status():
+    """Health monitoring pipeline status from HealthCheckCoordinator.
+
+    Returns the coordinator snapshot when available, or a minimal
+    response when no coordinator has been registered.
+    """
+    if _coordinator is None:
+        return JSONResponse(
+            content={"status": "unavailable", "reason": "no coordinator registered"},
+            status_code=200,
+        )
+    try:
+        snapshot = _coordinator.snapshot()  # type: ignore[union-attr]
+        return JSONResponse(content=snapshot, status_code=200)
+    except (OperationalError, DataError, OSError, RuntimeError) as e:
+        return JSONResponse(
+            content={"status": "error", "message": str(e)[:200]},
+            status_code=500,
+        )
+
+
 @app.get("/api/quick-test")
 async def quick_test():
     """Quick system connectivity test."""
@@ -235,9 +292,9 @@ async def quick_test():
 async def test_system():
     """Run system tests (API, data, signals)."""
     import asyncio
+    import os
     import subprocess
     import sys
-    import os
     
     results = {
         "status": "running",
