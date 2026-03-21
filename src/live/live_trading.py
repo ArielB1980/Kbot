@@ -693,7 +693,41 @@ class LiveTrading:
                 except (OperationalError, DataError) as e:
                     logger.error("Startup trade recording retry failed", error=str(e), error_type=type(e).__name__)
 
-            # 2.6 PositionProtectionMonitor (Invariant K) - periodic check when V2 live
+            # 2.6 LivePollingMonitor — unified facade for background monitors
+            from src.monitoring.live_polling_monitor import LivePollingMonitor
+            self._polling_monitor = LivePollingMonitor(self)
+
+            # 2.6.0 HealthCheckCoordinator — wire into HTTP layer for /api/monitoring/status
+            try:
+                from src.monitoring.health_coordinator import HealthCheckCoordinator
+                from src.monitoring.health_checks_impl import (
+                    ExchangeConnectivityCheck,
+                    BalanceCheck,
+                    ProcessHealthCheck,
+                )
+                from src.health import set_coordinator
+
+                coordinator = HealthCheckCoordinator(default_interval=60.0)
+                coordinator.register(
+                    ExchangeConnectivityCheck(client_factory=lambda: self.client),
+                    interval_seconds=60,
+                )
+                coordinator.register(
+                    BalanceCheck(client_factory=lambda: self.client),
+                    interval_seconds=120,
+                )
+                coordinator.register(
+                    ProcessHealthCheck(client_factory=lambda: self.client),
+                    interval_seconds=60,
+                )
+                set_coordinator(coordinator)
+                self._health_coordinator = coordinator
+                self._health_coordinator_task = asyncio.create_task(coordinator.start())
+                logger.info("HealthCheckCoordinator started and registered with HTTP layer")
+            except (ValueError, TypeError, RuntimeError, ImportError) as e:
+                logger.warning("Failed to start HealthCheckCoordinator", error=str(e), error_type=type(e).__name__)
+
+            # 2.6a PositionProtectionMonitor (Invariant K) - periodic check when V2 live
             if (
                 self.use_state_machine_v2
                 and self.execution_gateway
@@ -706,8 +740,8 @@ class LiveTrading:
                         self.client, self.position_registry, enforcer,
                         persistence=self.position_persistence,
                     )
-                    self._protection_task = asyncio.create_task(
-                        self._run_protection_checks(interval_seconds=30)
+                    self._protection_task = self._polling_monitor.spawn(
+                        self._polling_monitor.run_protection_checks(interval_seconds=30)
                     )
                     logger.info("PositionProtectionMonitor started (interval=30s)")
                 except (ValueError, TypeError, RuntimeError) as e:
@@ -716,8 +750,8 @@ class LiveTrading:
             # 2.6b Order-status polling: detect entry fills, trigger PLACE_STOP (SL/TP)
             if self.use_state_machine_v2 and self.execution_gateway:
                 try:
-                    self._order_poll_task = asyncio.create_task(
-                        self._run_order_polling(interval_seconds=12)
+                    self._order_poll_task = self._polling_monitor.spawn(
+                        self._polling_monitor.run_order_polling(interval_seconds=12)
                     )
                     logger.info("Order-status polling started (interval=12s)")
                 except (ValueError, TypeError, RuntimeError) as e:
@@ -725,8 +759,8 @@ class LiveTrading:
 
             # 2.6c Daily P&L summary (runs once per day at midnight UTC)
             try:
-                self._daily_summary_task = asyncio.create_task(
-                    self._run_daily_summary()
+                self._daily_summary_task = self._polling_monitor.spawn(
+                    self._polling_monitor.run_daily_summary()
                 )
                 logger.info("Daily summary task started")
             except (ValueError, TypeError, RuntimeError) as e:
@@ -755,24 +789,24 @@ class LiveTrading:
 
             # 2.6d Runtime regression monitors (trade starvation + winner churn)
             try:
-                self._starvation_monitor_task = asyncio.create_task(
-                    self._run_trade_starvation_monitor(interval_seconds=300)
+                self._starvation_monitor_task = self._polling_monitor.spawn(
+                    self._polling_monitor.run_trade_starvation_monitor(interval_seconds=300)
                 )
                 logger.info("Trade starvation monitor started (interval=300s)")
             except (ValueError, TypeError, RuntimeError) as e:
                 logger.error("Failed to start trade starvation monitor", error=str(e), error_type=type(e).__name__)
 
             try:
-                self._churn_monitor_task = asyncio.create_task(
-                    self._run_winner_churn_monitor(interval_seconds=300)
+                self._churn_monitor_task = self._polling_monitor.spawn(
+                    self._polling_monitor.run_winner_churn_monitor(interval_seconds=300)
                 )
                 logger.info("Winner churn monitor started (interval=300s)")
             except (ValueError, TypeError, RuntimeError) as e:
                 logger.error("Failed to start winner churn monitor", error=str(e), error_type=type(e).__name__)
 
             try:
-                self._trade_recording_monitor_task = asyncio.create_task(
-                    self._run_trade_recording_monitor(interval_seconds=300)
+                self._trade_recording_monitor_task = self._polling_monitor.spawn(
+                    self._polling_monitor.run_trade_recording_monitor(interval_seconds=300)
                 )
                 logger.info("Trade recording invariant monitor started (interval=300s)")
             except (ValueError, TypeError, RuntimeError) as e:
@@ -782,7 +816,7 @@ class LiveTrading:
             try:
                 from src.monitoring.telegram_bot import TelegramCommandHandler
                 self._telegram_handler = TelegramCommandHandler(
-                    data_provider=self._get_system_status
+                    data_provider=self._polling_monitor.get_system_status
                 )
                 self._telegram_cmd_task = asyncio.create_task(
                     self._telegram_handler.run()
@@ -853,7 +887,7 @@ class LiveTrading:
             
             # 4.6. Validate position protection (startup safety gate)
             try:
-                await self._validate_position_protection()
+                await self._polling_monitor.validate_position_protection()
             except (OperationalError, DataError) as e:
                 logger.error("Position protection validation failed", error=str(e), error_type=type(e).__name__)
 
@@ -876,7 +910,7 @@ class LiveTrading:
                     # Attempt auto-recovery for margin_critical (the most common false-positive halt)
                     recovered = False
                     if self.kill_switch.reason == KillSwitchReason.MARGIN_CRITICAL:
-                        recovered = await self._try_auto_recovery()
+                        recovered = await self._polling_monitor.try_auto_recovery()
                     
                     if not recovered:
                         logger.critical("Kill switch active - pausing loop",
@@ -1062,22 +1096,18 @@ class LiveTrading:
             self.active = False
             if getattr(self, "_protection_monitor", None):
                 self._protection_monitor.stop()
-            if getattr(self, "_protection_task", None) and not self._protection_task.done():
-                self._protection_task.cancel()
+            # Stop LivePollingMonitor (cancels all managed tasks: protection,
+            # order polling, daily summary, starvation, churn, trade recording)
+            if getattr(self, "_polling_monitor", None):
+                await self._polling_monitor.stop()
+
+            # Stop HealthCheckCoordinator
+            if getattr(self, "_health_coordinator", None):
+                self._health_coordinator.stop()
+            if getattr(self, "_health_coordinator_task", None) and not self._health_coordinator_task.done():
+                self._health_coordinator_task.cancel()
                 try:
-                    await self._protection_task
-                except asyncio.CancelledError:
-                    pass
-            if getattr(self, "_order_poll_task", None) and not self._order_poll_task.done():
-                self._order_poll_task.cancel()
-                try:
-                    await self._order_poll_task
-                except asyncio.CancelledError:
-                    pass
-            if getattr(self, "_daily_summary_task", None) and not self._daily_summary_task.done():
-                self._daily_summary_task.cancel()
-                try:
-                    await self._daily_summary_task
+                    await self._health_coordinator_task
                 except asyncio.CancelledError:
                     pass
             if getattr(self, "_spot_dca_task", None) and not self._spot_dca_task.done():
@@ -1108,49 +1138,12 @@ class LiveTrading:
                     await self._telegram_cmd_task
                 except asyncio.CancelledError:
                     pass
-            if getattr(self, "_starvation_monitor_task", None) and not self._starvation_monitor_task.done():
-                self._starvation_monitor_task.cancel()
-                try:
-                    await self._starvation_monitor_task
-                except asyncio.CancelledError:
-                    pass
-            if getattr(self, "_churn_monitor_task", None) and not self._churn_monitor_task.done():
-                self._churn_monitor_task.cancel()
-                try:
-                    await self._churn_monitor_task
-                except asyncio.CancelledError:
-                    pass
-            if getattr(self, "_trade_recording_monitor_task", None) and not self._trade_recording_monitor_task.done():
-                self._trade_recording_monitor_task.cancel()
-                try:
-                    await self._trade_recording_monitor_task
-                except asyncio.CancelledError:
-                    pass
             await self.data_acq.stop()
             await self.client.close()
             # Persist data quality state so SUSPENDED/DEGRADED symbols survive restart
             self.data_quality_tracker.force_persist()
             logger.info("Live trading shutdown complete")
 
-    async def _run_order_polling(self, interval_seconds: int = 12) -> None:
-        """Poll pending entry order status -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_order_polling
-        await run_order_polling(self, interval_seconds)
-
-    async def _run_protection_checks(self, interval_seconds: int = 30) -> None:
-        """V2 protection monitor loop -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_protection_checks
-        await run_protection_checks(self, interval_seconds)
-
-    async def _get_system_status(self) -> dict:
-        """System status for Telegram -- delegates to health_monitor module."""
-        from src.live.health_monitor import get_system_status
-        return await get_system_status(self)
-
-    async def _run_daily_summary(self) -> None:
-        """Daily P&L summary at midnight UTC -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_daily_summary
-        await run_daily_summary(self)
 
     async def _run_spot_dca(self) -> None:
         """Daily spot DCA purchase -- delegates to spot_dca module."""
@@ -1199,20 +1192,6 @@ class LiveTrading:
         )
         await self._ws_candle_feed.run()
 
-    async def _run_trade_starvation_monitor(self, interval_seconds: int = 300) -> None:
-        """Trade starvation sentinel -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_trade_starvation_monitor
-        await run_trade_starvation_monitor(self, interval_seconds)
-
-    async def _run_winner_churn_monitor(self, interval_seconds: int = 300) -> None:
-        """Winner churn sentinel -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_winner_churn_monitor
-        await run_winner_churn_monitor(self, interval_seconds)
-
-    async def _run_trade_recording_monitor(self, interval_seconds: int = 300) -> None:
-        """Trade recording invariant monitor -- delegates to health_monitor module."""
-        from src.live.health_monitor import run_trade_recording_monitor
-        await run_trade_recording_monitor(self, interval_seconds)
 
     def _convert_to_position(self, data: Dict) -> Position:
         """Convert raw exchange position dict to Position domain object -- delegates to exchange_sync module."""
@@ -1246,10 +1225,6 @@ class LiveTrading:
         except Exception as log_err:
             logger.warning("Failed to write crash log file", error=str(log_err))
 
-    async def _validate_position_protection(self):
-        """Startup position protection validation -- delegates to health_monitor module."""
-        from src.live.health_monitor import validate_position_protection
-        await validate_position_protection(self)
 
     def _rate_limited_log(self, key: str, interval_seconds: int) -> tuple[bool, int]:
         """Return (emit_now, suppressed_since_last_emit)."""
@@ -2533,10 +2508,6 @@ class LiveTrading:
     _AUTO_RECOVERY_COOLDOWN_SECONDS = 300  # 5 minutes since halt
     _AUTO_RECOVERY_MARGIN_SAFE_PCT = 85  # Must be below this to recover
 
-    async def _try_auto_recovery(self) -> bool:
-        """Auto-recovery from kill switch -- delegates to health_monitor module."""
-        from src.live.health_monitor import try_auto_recovery
-        return await try_auto_recovery(self)
 
     async def _sync_account_state(self):
         """Fetch and persist real-time account state -- delegates to exchange_sync module."""
