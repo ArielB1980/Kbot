@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 from decimal import Decimal
 
 
-from src.live.live_trading import _exchange_position_side, LiveTrading
+from src.data.symbol_utils import exchange_position_side as _exchange_position_side
+from src.live.live_trading import LiveTrading
 from src.execution.execution_gateway import ExecutionResult
 
 

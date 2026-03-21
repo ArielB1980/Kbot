@@ -2,10 +2,10 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from src.live.live_trading import (
-    _build_4h_warmup_skip_diagnostic,
-    _resolve_post_close_cooldown_kind_and_minutes,
-    _resolve_signal_cooldown_params,
+from src.live.cooldown_resolver import (
+    build_4h_warmup_skip_diagnostic as _build_4h_warmup_skip_diagnostic,
+    resolve_post_close_cooldown_kind_and_minutes as _resolve_post_close_cooldown_kind_and_minutes,
+    resolve_signal_cooldown_params as _resolve_signal_cooldown_params,
 )
 from src.domain.models import Candle
 

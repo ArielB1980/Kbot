@@ -1,4 +1,4 @@
-from src.live.live_trading import _attach_thesis_trace_fields
+from src.live.cooldown_resolver import attach_thesis_trace_fields as _attach_thesis_trace_fields
 
 
 def test_attach_thesis_trace_fields_adds_conviction_payload() -> None:
