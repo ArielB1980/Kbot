@@ -552,12 +552,38 @@ class ManagedPosition:
             or is_tp1
             or is_tp2
         )
+
+        fill_qty = event.fill_qty
+        if is_exit:
+            remaining_before = self.remaining_qty
+            if self.is_terminal or remaining_before <= 0:
+                logger.warning(
+                    "Skipping exit fill on terminal/flat position",
+                    symbol=self.symbol,
+                    order_id=event.order_id,
+                    fill_id=event.fill_id,
+                    state=self.state.value,
+                    remaining_before=str(remaining_before),
+                    fill_qty=str(fill_qty),
+                )
+                return False
+
+            if fill_qty > remaining_before:
+                logger.critical(
+                    "Capping overflow exit fill to preserve INVARIANT B",
+                    symbol=self.symbol,
+                    order_id=event.order_id,
+                    fill_id=event.fill_id,
+                    fill_qty=str(fill_qty),
+                    remaining_before=str(remaining_before),
+                )
+                fill_qty = remaining_before
         
         fill = FillRecord(
             fill_id=event.fill_id or f"{event.order_id}-{event.event_seq}",
             order_id=event.order_id,
             side=self.side if is_entry else (Side.SHORT if self.side == Side.LONG else Side.LONG),
-            qty=event.fill_qty,
+            qty=fill_qty,
             price=event.fill_price,
             timestamp=event.timestamp,
             is_entry=is_entry

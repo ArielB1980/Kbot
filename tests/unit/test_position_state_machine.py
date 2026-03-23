@@ -111,6 +111,89 @@ class TestInvariants:
         pos.apply_order_event(exit_event)
         
         assert pos.remaining_qty == Decimal("0")
+
+    def test_invariant_b_duplicate_terminal_exit_fill_is_ignored(self):
+        """Terminal positions must ignore additional exit fills."""
+        pos = self._create_position()
+
+        entry_event = OrderEvent(
+            order_id="entry-1",
+            client_order_id="client-1",
+            event_type=OrderEventType.FILLED,
+            event_seq=1,
+            timestamp=datetime.now(timezone.utc),
+            fill_qty=Decimal("0.1"),
+            fill_price=Decimal("50000"),
+            fill_id="fill-1",
+        )
+        pos.entry_order_id = "entry-1"
+        assert pos.apply_order_event(entry_event) is True
+
+        exit_event = OrderEvent(
+            order_id="exit-1",
+            client_order_id="client-2",
+            event_type=OrderEventType.FILLED,
+            event_seq=2,
+            timestamp=datetime.now(timezone.utc),
+            fill_qty=Decimal("0.1"),
+            fill_price=Decimal("52000"),
+            fill_id="fill-2",
+        )
+        pos.pending_exit_order_id = "exit-1"
+        assert pos.apply_order_event(exit_event) is True
+        assert pos.remaining_qty == Decimal("0")
+        assert pos.is_terminal is True
+        assert len(pos.exit_fills) == 1
+
+        duplicate_exit_event = OrderEvent(
+            order_id="exit-1",
+            client_order_id="client-2",
+            event_type=OrderEventType.FILLED,
+            event_seq=3,
+            timestamp=datetime.now(timezone.utc),
+            fill_qty=Decimal("0.05"),
+            fill_price=Decimal("52000"),
+            fill_id="fill-3",
+        )
+        assert pos.apply_order_event(duplicate_exit_event) is False
+        assert pos.remaining_qty == Decimal("0")
+        assert len(pos.exit_fills) == 1
+
+    def test_invariant_b_overflow_exit_fill_is_capped(self):
+        """Exit fill qty larger than remaining must be capped."""
+        pos = self._create_position()
+
+        entry_event = OrderEvent(
+            order_id="entry-1",
+            client_order_id="client-1",
+            event_type=OrderEventType.FILLED,
+            event_seq=1,
+            timestamp=datetime.now(timezone.utc),
+            fill_qty=Decimal("0.1"),
+            fill_price=Decimal("50000"),
+            fill_id="fill-1",
+        )
+        pos.entry_order_id = "entry-1"
+        assert pos.apply_order_event(entry_event) is True
+        assert pos.remaining_qty == Decimal("0.1")
+
+        overflow_exit_event = OrderEvent(
+            order_id="exit-1",
+            client_order_id="client-2",
+            event_type=OrderEventType.FILLED,
+            event_seq=2,
+            timestamp=datetime.now(timezone.utc),
+            fill_qty=Decimal("0.3"),
+            fill_price=Decimal("52000"),
+            fill_id="fill-2",
+        )
+        pos.pending_exit_order_id = "exit-1"
+        assert pos.apply_order_event(overflow_exit_event) is True
+
+        assert pos.remaining_qty == Decimal("0")
+        assert pos.is_terminal is True
+        assert len(pos.exit_fills) == 1
+        assert pos.exit_fills[0].qty == Decimal("0.1")
     
     def test_invariant_c_immutables_locked_after_ack(self):
         """Invariant C: Immutable fields locked after entry acknowledgement."""
