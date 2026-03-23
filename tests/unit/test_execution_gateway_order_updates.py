@@ -11,6 +11,7 @@ from src.execution.execution_gateway import (
     PendingOrder,
 )
 from src.execution.position_manager_v2 import ActionType, ManagementAction
+from src.execution.position_state_machine import PositionState
 
 
 def _build_gateway() -> ExecutionGateway:
@@ -170,4 +171,29 @@ async def test_sync_with_exchange_persists_qty_synced_positions():
     gateway.persistence.save_position.assert_called_with(synced_pos)
     assert result["issues"] == [
         ("ENA/USD", "QTY_SYNCED: exit+39 local=111 exchange=72 price=0.1546")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_with_exchange_persists_closed_positions_after_exit_hysteresis():
+    gateway = _build_gateway()
+    gateway.client.get_all_futures_positions.return_value = []
+    gateway.client.get_futures_open_orders.return_value = []
+    gateway.registry.reconcile_with_exchange.return_value = [
+        ("LTC/USD", "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT: miss_count=2")
+    ]
+    closed_pos = MagicMock()
+    closed_pos.symbol = "LTC/USD"
+    closed_pos.state = PositionState.CLOSED
+    gateway.registry._closed_positions = [closed_pos]
+    gateway.position_manager.reconcile.return_value = []
+    gateway.registry.get_all_active.return_value = []
+    gateway._maybe_record_trade = AsyncMock()
+
+    result = await gateway.sync_with_exchange()
+
+    gateway.persistence.save_position.assert_called_with(closed_pos)
+    gateway._maybe_record_trade.assert_awaited_once_with(closed_pos)
+    assert result["issues"] == [
+        ("LTC/USD", "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT: miss_count=2")
     ]

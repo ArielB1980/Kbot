@@ -1040,6 +1040,73 @@ class TestReconciliation:
             [],
         )
         assert issues_again == []
+
+    def test_reconcile_with_exchange_dedupes_active_symbol_variants(self):
+        """Duplicate active entries for one market should collapse to a single canonical position."""
+        registry = get_position_registry()
+        registry._positions.clear()
+        registry._closed_positions.clear()
+
+        open_pos = ManagedPosition(
+            symbol="DASH/USD",
+            side=Side.SHORT,
+            position_id="dash-open",
+            initial_size=Decimal("3.2"),
+            initial_entry_price=Decimal("33.0"),
+            initial_stop_price=Decimal("35.356"),
+            initial_tp1_price=Decimal("31.943"),
+            initial_tp2_price=None,
+            initial_final_target=None,
+        )
+        open_pos.entry_fills.append(FillRecord(
+            fill_id="dash-open-fill",
+            order_id="dash-entry",
+            side=Side.SHORT,
+            qty=Decimal("3.2"),
+            price=Decimal("33.0"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        ))
+        open_pos.state = PositionState.OPEN
+        open_pos.stop_order_id = "live-stop"
+        registry.register_position(open_pos)
+
+        stale_pos = ManagedPosition(
+            symbol="PF_DASHUSD",
+            side=Side.SHORT,
+            position_id="dash-exit-pending",
+            initial_size=Decimal("3.2"),
+            initial_entry_price=Decimal("33.0"),
+            initial_stop_price=Decimal("35.356"),
+            initial_tp1_price=Decimal("31.943"),
+            initial_tp2_price=None,
+            initial_final_target=None,
+        )
+        stale_pos.entry_fills.append(FillRecord(
+            fill_id="dash-stale-fill",
+            order_id="dash-entry-stale",
+            side=Side.SHORT,
+            qty=Decimal("3.2"),
+            price=Decimal("33.0"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        ))
+        stale_pos.state = PositionState.EXIT_PENDING
+        stale_pos.stop_order_id = "live-stop"
+        stale_pos.updated_at = datetime.now(timezone.utc)
+        registry._positions[stale_pos.symbol] = stale_pos
+
+        issues = registry.reconcile_with_exchange(
+            {"PF_DASHUSD": {"side": "short", "qty": "3.2", "entry_price": "33.0"}},
+            [{"id": "live-stop", "symbol": "DASH/USD:USD"}],
+        )
+
+        assert ("PF_DASHUSD", "DEDUPED: canonical=DASH/USD") in issues
+        assert registry.get_position("PF_DASHUSD") is open_pos
+        assert "PF_DASHUSD" not in registry._positions
+        deduped = [p for p in registry._closed_positions if p.symbol == "PF_DASHUSD"]
+        assert len(deduped) == 1
+        assert deduped[0].state == PositionState.CLOSED
     
     def test_orphaned_with_symbol_normalization(self):
         """Registry has spot format position, exchange has nothing - should orphan."""

@@ -160,6 +160,16 @@ class RiskConfig(BaseSettings):
         le=100.0,
         description="Conviction threshold that activates the high-conviction minimum hold window",
     )
+    auction_pnl_positive_lock_enabled: bool = Field(
+        default=False,
+        description="Lock profitable positions (pnl_R > 0) from auction rotation",
+    )
+    auction_pnl_positive_lock_max_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=360,
+        description="Max extra minutes a profitable position stays locked after min_hold expires",
+    )
     auction_max_trades_per_cycle: int = Field(default=5, ge=1, le=20)
     auction_max_new_opens_per_cycle: int = Field(default=5, ge=1, le=20)
     auction_max_closes_per_cycle: int = Field(default=5, ge=1, le=20)

@@ -1716,6 +1716,8 @@ class ExecutionGateway:
             OrderPurpose.STOP_UPDATE,
             OrderPurpose.EXIT_STOP,
             OrderPurpose.EXIT_MARKET,
+            OrderPurpose.EXIT_TP,
+            OrderPurpose.EXIT_REVERSAL,
         }
 
         processed = 0
@@ -1936,6 +1938,8 @@ class ExecutionGateway:
         # This ensures they're saved as ORPHANED and won't be reloaded as ACTIVE
         orphaned_count = 0
         qty_synced_count = 0
+        deduped_count = 0
+        closed_reconciled_count = 0
         for symbol, issue in issues:
             if "ORPHANED" in issue:
                 # Find in closed positions (just moved there by reconcile)
@@ -1956,14 +1960,41 @@ class ExecutionGateway:
                             self.persistence.save_position(closed_pos)
                             qty_synced_count += 1
                             break
+            elif "DEDUPED" in issue:
+                for closed_pos in self.registry._closed_positions:
+                    if closed_pos.symbol == symbol:
+                        self.persistence.save_position(closed_pos)
+                        deduped_count += 1
+                        break
+            elif (
+                "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT" in issue
+                or "STALE" in issue
+            ):
+                for closed_pos in self.registry._closed_positions:
+                    if closed_pos.symbol == symbol and closed_pos.state == PositionState.CLOSED:
+                        self.persistence.save_position(closed_pos)
+                        closed_reconciled_count += 1
+                        break
         
         if orphaned_count > 0:
             logger.info("Persisted orphaned positions", count=orphaned_count)
         if qty_synced_count > 0:
             logger.warning("Persisted quantity-synced positions", count=qty_synced_count)
+        if deduped_count > 0:
+            logger.info("Persisted deduped positions", count=deduped_count)
+        if closed_reconciled_count > 0:
+            logger.info(
+                "Persisted reconcile-closed positions",
+                count=closed_reconciled_count,
+            )
         
         # Record trades for any positions that reconciliation closed or orphaned
-        recordable_issues = ("STALE", "QTY_SYNCED", "ORPHANED")
+        recordable_issues = (
+            "STALE",
+            "QTY_SYNCED",
+            "ORPHANED",
+            "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT",
+        )
         for symbol, issue in issues:
             if any(tag in issue for tag in recordable_issues):
                 for closed_pos in self.registry._closed_positions:

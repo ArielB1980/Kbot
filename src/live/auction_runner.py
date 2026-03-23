@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING, Dict, List
 
 from src.exceptions import OperationalError, DataError
 from src.execution.equity import calculate_effective_equity
+from src.live.position_state_bridge import load_tracked_position_state
 from src.live.policy_fingerprint import build_policy_hash
 from src.monitoring.logger import get_logger
-from src.storage.repository import get_active_position, get_trades_since
+from src.storage.repository import get_trades_since
 
 if TYPE_CHECKING:
     from src.live.live_trading import LiveTrading
@@ -38,38 +39,29 @@ def _should_emit_replay_tick_log(lt: "LiveTrading", *, force: bool = False, ever
     return cycle_num <= 3 or (cycle_num % max(1, every_cycles) == 0)
 
 
-def _reconcile_issue_is_non_blocking(issue_text: str) -> bool:
+def _is_qty_synced_dust(issue_text: str) -> bool:
     """
-    Return True if a reconcile issue should not suppress auction opens.
+    Treat tiny QTY_SYNCED residuals as non-blocking dust.
 
-    Many registry issues are emitted after state was already converged in the
-    same ``reconcile_with_exchange`` pass (e.g. QTY_SYNCED, PENDING_ADOPTED),
-    or during intentional grace/hysteresis while the exchange view catches up.
-    Those should not set OPEN_RECONCILE_BLOCKING_ISSUES for unrelated symbols.
-
-    Still blocking: PHANTOM, QTY_MISMATCH, unresolved stale/exposure drift, etc.
+    Example issue text:
+    "QTY_SYNCED: exit+0.001 local=0.002 exchange=0.001 price=1954.97"
     """
-    if not isinstance(issue_text, str):
+    if not isinstance(issue_text, str) or not issue_text.startswith("QTY_SYNCED:"):
         return False
-    if issue_text.startswith("ORPHANED:"):
-        return True
-    # Quantity already reconciled to exchange inside the same reconcile pass.
-    if issue_text.startswith("QTY_SYNCED:"):
-        return True
-    if issue_text.startswith("PENDING_ADOPTED:"):
-        return True
-    # Exit/orphan path: exchange snapshot lagging registry; do not freeze opens.
-    if issue_text.startswith("MISSING_ON_EXCHANGE_EXIT_GRACE:"):
-        return True
-    if issue_text.startswith("MISSING_ON_EXCHANGE_PENDING:"):
-        return True
-    if issue_text.startswith("CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT:"):
-        return True
-    if issue_text.startswith("STALE: Registry"):
-        return True
-    if issue_text == "STALE_PENDING_RETAINED_REPLAY":
-        return True
-    return False
+    try:
+        import re
+
+        local_match = re.search(r"local=([0-9]*\.?[0-9]+)", issue_text)
+        exchange_match = re.search(r"exchange=([0-9]*\.?[0-9]+)", issue_text)
+        if not local_match or not exchange_match:
+            return False
+        local_qty = Decimal(local_match.group(1))
+        exchange_qty = Decimal(exchange_match.group(1))
+        delta = abs(local_qty - exchange_qty)
+        # Conservative dust gate: only tiny residuals should bypass open blocking.
+        return delta <= Decimal("0.01") and max(local_qty, exchange_qty) <= Decimal("0.05")
+    except (ArithmeticError, ValueError, TypeError):
+        return False
 
 
 def _split_reconcile_issues(issues: List) -> tuple[List, List]:
@@ -77,8 +69,12 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
     Split reconcile issues into (blocking, non_blocking).
 
     Rationale:
-    - ORPHANED / exchange lag / same-pass sync summaries are often transient.
-    - PHANTOM, QTY_MISMATCH, and true exposure drift remain blocking.
+    - ORPHANED issues are often transient right after stop/TP-driven closes.
+      They indicate registry/exchange convergence in progress and are
+      persisted/handled by gateway reconciliation.
+    - QTY_SYNCED dust residuals are non-blocking to avoid freezing opens on
+      tiny convergence lag.
+    - Other issue classes (PHANTOM, meaningful QTY drift, etc.) remain blocking.
     """
     blocking = []
     non_blocking = []
@@ -88,7 +84,28 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
             isinstance(issue, (list, tuple))
             and len(issue) >= 2
             and isinstance(issue[1], str)
-            and _reconcile_issue_is_non_blocking(issue[1])
+            and issue[1].startswith("ORPHANED:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and issue[1].startswith("CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and issue[1].startswith("DEDUPED:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and _is_qty_synced_dust(issue[1])
         ):
             non_blocking.append(issue)
         else:
@@ -381,25 +398,27 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                 pos = lt._convert_to_position(pos_data)
                 futures_symbol = pos.symbol
 
-                # Merge protection status from database
-                try:
-                    db_pos = await asyncio.to_thread(get_active_position, futures_symbol)
-                    if db_pos:
-                        pos.is_protected = db_pos.is_protected
-                        pos.protection_reason = db_pos.protection_reason
-                        # Preserve true position age from DB so allocator lock checks
-                        # don't treat long-lived positions as newly opened.
-                        pos.opened_at = db_pos.opened_at
-                        pos.stop_loss_order_id = db_pos.stop_loss_order_id
-                        pos.initial_stop_price = db_pos.initial_stop_price
-                        if hasattr(db_pos, "tp_order_ids"):
-                            pos.tp_order_ids = db_pos.tp_order_ids
-                except (OperationalError, DataError) as e:
-                    logger.warning(
-                        "Failed to fetch DB position for protection merge",
+                tracked = await load_tracked_position_state(
+                    lt,
+                    futures_symbol,
+                    pos_data=pos_data,
+                    current_price=pos.current_mark_price,
+                )
+                if tracked:
+                    tracked_pos = tracked.position
+                    pos.is_protected = tracked_pos.is_protected
+                    pos.protection_reason = tracked_pos.protection_reason
+                    # Preserve true position age from persisted state so allocator
+                    # lock checks don't treat long-lived positions as newly opened.
+                    pos.opened_at = tracked_pos.opened_at
+                    pos.stop_loss_order_id = tracked_pos.stop_loss_order_id
+                    pos.initial_stop_price = tracked_pos.initial_stop_price
+                    if hasattr(tracked_pos, "tp_order_ids"):
+                        pos.tp_order_ids = tracked_pos.tp_order_ids
+                else:
+                    logger.debug(
+                        "No persisted protection state for auction merge",
                         symbol=futures_symbol,
-                        error=str(e),
-                        error_type=type(e).__name__,
                     )
 
                 is_protective_live = pos.stop_loss_order_id is not None or (
@@ -771,6 +790,12 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
             "auction_min_hold_minutes": base_min_hold_minutes,
             "auction_min_hold_high_conviction_minutes": high_conviction_min_hold_minutes,
             "auction_min_hold_high_conviction_threshold": high_conviction_threshold,
+            "auction_pnl_positive_lock_enabled": bool(
+                getattr(lt.config.risk, "auction_pnl_positive_lock_enabled", False)
+            ),
+            "auction_pnl_positive_lock_max_minutes": int(
+                getattr(lt.config.risk, "auction_pnl_positive_lock_max_minutes", 60) or 60
+            ),
             "auction_max_new_opens_per_cycle": (
                 chop_max_new_opens
                 if (chop_policy_active and not chop_telemetry_only and not canary_scoped_mode)

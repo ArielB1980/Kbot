@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from src.data.symbol_utils import exchange_position_side as _exchange_position_side
 from src.domain.models import Position, Side
 from src.exceptions import OperationalError, DataError
+from src.live.position_state_bridge import (
+    load_tracked_position_state,
+    persist_tracked_position_state,
+)
 from src.monitoring.logger import get_logger
 
 if TYPE_CHECKING:
@@ -36,7 +40,7 @@ async def reconcile_protective_orders(
     if not lt.config.execution.tp_backfill_enabled:
         return
 
-    from src.storage.repository import get_active_position, save_position, async_record_event
+    from src.storage.repository import async_record_event
 
     skipped_not_protected: List[str] = []
     for pos_data in raw_positions:
@@ -53,9 +57,15 @@ async def reconcile_protective_orders(
                 )
                 continue
 
-            db_pos = await asyncio.to_thread(get_active_position, symbol)
-            if not db_pos:
+            tracked = await load_tracked_position_state(
+                lt,
+                symbol,
+                pos_data=pos_data,
+                current_price=current_prices.get(symbol),
+            )
+            if not tracked:
                 continue
+            db_pos = tracked.position
 
             if not isinstance(current_prices, dict):
                 logger.error(
@@ -133,7 +143,16 @@ async def reconcile_protective_orders(
                 )
                 continue
 
-            await place_tp_backfill(lt, symbol, pos_data, db_pos, tp_plan, symbol_orders, current_price)
+            await place_tp_backfill(
+                lt,
+                symbol,
+                pos_data,
+                db_pos,
+                tp_plan,
+                symbol_orders,
+                current_price,
+                tracked=tracked,
+            )
 
         except (OperationalError, DataError, ValueError) as e:
             logger.exception("TP backfill failed", symbol=symbol, error=str(e), error_type=type(e).__name__)
@@ -161,8 +180,6 @@ async def reconcile_stop_loss_order_ids(lt: "LiveTrading", raw_positions: List[D
     Fixes the issue where stop loss orders exist on exchange but aren't
     tracked in the database, causing false 'UNPROTECTED' alerts.
     """
-    from src.storage.repository import get_active_position, save_position
-
     try:
         open_orders = await lt.client.get_futures_open_orders()
 
@@ -183,15 +200,19 @@ async def reconcile_stop_loss_order_ids(lt: "LiveTrading", raw_positions: List[D
                 continue
 
             try:
-                db_pos = await asyncio.to_thread(get_active_position, symbol)
-                if not db_pos:
+                tracked = await load_tracked_position_state(lt, symbol, pos_data=pos_data)
+                if not tracked:
                     continue
+                db_pos = tracked.position
 
                 if (
+                    tracked.source == "postgres"
+                    and (
                     db_pos.is_protected
                     and db_pos.stop_loss_order_id
                     and db_pos.initial_stop_price
                     and not str(db_pos.stop_loss_order_id).startswith("unknown_")
+                    )
                 ):
                     continue
 
@@ -289,7 +310,7 @@ async def reconcile_stop_loss_order_ids(lt: "LiveTrading", raw_positions: List[D
                                 is_protected=True,
                             )
 
-                        await asyncio.to_thread(save_position, db_pos)
+                        await persist_tracked_position_state(lt, tracked)
 
             except (OperationalError, DataError, ValueError) as e:
                 logger.warning(
@@ -771,9 +792,10 @@ async def place_tp_backfill(
     tp_plan: List[Decimal],
     symbol_orders: List[Dict],
     current_price: Decimal,
+    tracked=None,
 ) -> None:
     """Place / repair TP orders on exchange."""
-    from src.storage.repository import save_position, async_record_event
+    from src.storage.repository import async_record_event
 
     existing_tp_ids = db_pos.tp_order_ids or []
 
@@ -873,7 +895,8 @@ async def place_tp_backfill(
             runner_mode=len(tp_plan) == 2,
         )
 
-        await asyncio.to_thread(save_position, db_pos)
+        if tracked is not None:
+            await persist_tracked_position_state(lt, tracked)
 
         lt.tp_backfill_cooldowns[symbol] = datetime.now(timezone.utc)
 

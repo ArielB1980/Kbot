@@ -502,7 +502,17 @@ class AuctionAllocator:
             0,
         )
         high_conviction_min_hold_seconds = high_conviction_min_hold_minutes * 60
-        
+        pnl_positive_lock_enabled = bool(
+            portfolio_state.get("auction_pnl_positive_lock_enabled", False)
+        )
+        pnl_positive_lock_max_seconds = max(
+            int(
+                portfolio_state.get("auction_pnl_positive_lock_max_minutes", 60)
+                or 60
+            ),
+            0,
+        ) * 60
+
         # Add open positions
         now = datetime.now(timezone.utc)
         for op_meta in open_positions:
@@ -525,10 +535,22 @@ class AuctionAllocator:
                 )
             # Mark as locked if within MIN_HOLD, protective orders not live, or UNPROTECTED
             is_unprotected = not getattr(op_meta.position, 'is_protected', True)
+            # R4: PnL-positive lock — protect profitable positions from rotation
+            # Cap: only applies for max_minutes after min_hold expires
+            pnl_positive_lock = False
+            if (
+                pnl_positive_lock_enabled
+                and op_meta.current_pnl_R > Decimal("0")
+                and op_meta.age_seconds >= min_hold_seconds_effective
+            ):
+                time_since_unlock = op_meta.age_seconds - min_hold_seconds_effective
+                if time_since_unlock < pnl_positive_lock_max_seconds:
+                    pnl_positive_lock = True
             locked = (
                 op_meta.age_seconds < min_hold_seconds_effective or
                 not op_meta.is_protective_orders_live or
-                is_unprotected
+                is_unprotected or
+                pnl_positive_lock
             )
             if is_unprotected:
                 logger.warning(

@@ -17,6 +17,17 @@ def test_split_reconcile_issues_only_orphaned_non_blocking():
     assert len(non_blocking) == 1
 
 
+def test_split_reconcile_issues_treats_resolved_cleanup_as_non_blocking():
+    blocking, non_blocking = _split_reconcile_issues(
+        [
+            ("AAVE/USD", "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT: miss_count=2"),
+            ("PF_DASHUSD", "DEDUPED: canonical=DASH/USD"),
+        ]
+    )
+    assert blocking == []
+    assert len(non_blocking) == 2
+
+
 def test_split_reconcile_issues_blocks_non_orphaned():
     blocking, non_blocking = _split_reconcile_issues(
         [

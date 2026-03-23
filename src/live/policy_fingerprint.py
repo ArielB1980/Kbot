@@ -33,6 +33,12 @@ def build_auction_policy_snapshot(config: Any) -> Dict[str, Any]:
         "auction_min_hold_high_conviction_threshold": float(
             getattr(risk, "auction_min_hold_high_conviction_threshold", 0.0)
         ),
+        "auction_pnl_positive_lock_enabled": bool(
+            getattr(risk, "auction_pnl_positive_lock_enabled", False)
+        ),
+        "auction_pnl_positive_lock_max_minutes": int(
+            getattr(risk, "auction_pnl_positive_lock_max_minutes", 60)
+        ),
         "auction_max_new_opens_per_cycle": int(getattr(risk, "auction_max_new_opens_per_cycle", 0)),
         "auction_no_signal_close_persistence_cycles": int(
             getattr(risk, "auction_no_signal_close_persistence_cycles", 0)

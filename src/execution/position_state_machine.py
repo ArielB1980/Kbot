@@ -39,6 +39,18 @@ def _normalize_symbol(symbol: str) -> str:
     return normalize_symbol_for_position_match(symbol)
 
 
+def _duplicate_state_rank(state: "PositionState") -> int:
+    ranks = {
+        PositionState.PROTECTED: 5,
+        PositionState.PARTIAL: 4,
+        PositionState.OPEN: 3,
+        PositionState.PENDING: 2,
+        PositionState.EXIT_PENDING: 1,
+        PositionState.CANCEL_PENDING: 0,
+    }
+    return ranks.get(state, -1)
+
+
 # ============ INVARIANT CHECKING ============
 
 class InvariantViolation(Exception):
@@ -1479,6 +1491,17 @@ class PositionRegistry:
         for ex_symbol, ex_pos in exchange_positions.items():
             norm_key = normalize_symbol_for_position_match(ex_symbol)
             exchange_normalized[norm_key] = (ex_symbol, ex_pos)
+
+        exchange_order_ids_by_norm: Dict[str, Set[str]] = {}
+        for order in exchange_orders or []:
+            order_symbol = order.get("symbol")
+            if not order_symbol:
+                continue
+            order_norm = normalize_symbol_for_position_match(order_symbol)
+            order_id = order.get("id") or order.get("order_id") or (order.get("info") or {}).get("order_id")
+            if not order_id:
+                continue
+            exchange_order_ids_by_norm.setdefault(order_norm, set()).add(str(order_id))
         
         # Update known exchange symbols for the duplicate-entry guard.
         # This is the defense-in-depth: even if the registry loses a position,
@@ -1490,6 +1513,61 @@ class PositionRegistry:
         matched_exchange_keys: set[str] = set()
         
         with self._lock:
+            by_norm: Dict[str, List[tuple[str, ManagedPosition]]] = {}
+            for symbol, pos in self._positions.items():
+                if pos.is_terminal:
+                    continue
+                by_norm.setdefault(normalize_symbol_for_position_match(symbol), []).append((symbol, pos))
+
+            for norm_key, entries in by_norm.items():
+                if len(entries) < 2:
+                    continue
+
+                exchange_symbol = None
+                exchange_qty = Decimal("0")
+                if norm_key in exchange_normalized:
+                    exchange_symbol, exchange_pos = exchange_normalized[norm_key]
+                    try:
+                        exchange_qty = Decimal(str(exchange_pos.get("qty", 0)))
+                    except (ArithmeticError, TypeError, ValueError):
+                        exchange_qty = Decimal("0")
+                live_order_ids = exchange_order_ids_by_norm.get(norm_key, set())
+
+                def _candidate_score(item: tuple[str, ManagedPosition]):
+                    symbol, pos = item
+                    stop_matches_exchange = int(
+                        bool(pos.stop_order_id and str(pos.stop_order_id) in live_order_ids)
+                    )
+                    state_rank = _duplicate_state_rank(pos.state)
+                    exact_exchange_symbol = int(bool(exchange_symbol and symbol == exchange_symbol))
+                    qty_delta = abs(pos.remaining_qty - exchange_qty)
+                    updated = pos.updated_at or datetime.min.replace(tzinfo=timezone.utc)
+                    return (
+                        stop_matches_exchange,
+                        state_rank,
+                        exact_exchange_symbol,
+                        -qty_delta,
+                        updated,
+                    )
+
+                canonical_symbol, canonical_pos = max(entries, key=_candidate_score)
+
+                for symbol, pos in entries:
+                    if symbol == canonical_symbol:
+                        continue
+                    pos._mark_closed(ExitReason.RECONCILIATION)
+                    orphaned_symbols.append(symbol)
+                    issues.append((symbol, f"DEDUPED: canonical={canonical_symbol}"))
+                    logger.warning(
+                        "Duplicate active registry entry archived",
+                        symbol=symbol,
+                        canonical_symbol=canonical_symbol,
+                        state=pos.state.value,
+                        canonical_state=canonical_pos.state.value,
+                        stop_order_id=pos.stop_order_id,
+                        canonical_stop_order_id=canonical_pos.stop_order_id,
+                    )
+
             # Check for orphaned positions (registry has, exchange doesn't)
             for symbol, pos in self._positions.items():
                 symbol_norm = normalize_symbol_for_position_match(symbol)

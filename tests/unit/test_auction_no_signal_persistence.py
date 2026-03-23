@@ -275,6 +275,58 @@ def test_high_conviction_min_hold_override_locks_recent_positions():
     assert plan.opens == []
 
 
+def test_pnl_positive_lock_keeps_profitable_position_during_extra_window():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),
+        swap_threshold=10.0,
+        min_hold_minutes=15,
+    )
+    open_position = _make_open(score=60.0)
+    open_position.age_seconds = 20 * 60  # Past base hold, inside extra lock window.
+    open_position.current_pnl_R = Decimal("0.8")
+    candidate = _make_candidate(score=90.0)
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[candidate],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "auction_pnl_positive_lock_enabled": True,
+            "auction_pnl_positive_lock_max_minutes": 60,
+        },
+    )
+
+    assert plan.closes == []
+    assert plan.opens == []
+
+
+def test_pnl_positive_lock_expires_after_max_window():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),
+        swap_threshold=10.0,
+        min_hold_minutes=15,
+    )
+    open_position = _make_open(score=60.0)
+    open_position.age_seconds = 80 * 60  # Past base hold and extra lock cap.
+    open_position.current_pnl_R = Decimal("0.8")
+    candidate = _make_candidate(score=90.0)
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[candidate],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "auction_pnl_positive_lock_enabled": True,
+            "auction_pnl_positive_lock_max_minutes": 60,
+        },
+    )
+
+    assert plan.closes == [open_position.position.symbol]
+    assert [signal.symbol for signal in plan.opens] == ["BTC/USD"]
+
+
 def test_chop_min_hold_applies_only_to_active_symbols():
     allocator = AuctionAllocator(
         limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),
