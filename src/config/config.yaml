@@ -71,10 +71,12 @@ risk:
   auction_max_margin_util: 0.90  # Maximum margin utilization (90%)
   auction_max_per_cluster: 8  # Maximum positions per cluster (balanced for 25 positions)
   auction_max_per_symbol: 1  # Maximum positions per symbol
-  auction_swap_threshold: 14.0  # Relaxed canary trial: allow more valid replacement opportunities
+  auction_swap_threshold: 18.0  # R4: Tighter swap gate to reduce marginal rotation churn — was 14.0
   auction_min_hold_minutes: 90  # R3: Let 4H theses develop — was 45, still timing out before TP
   auction_min_hold_high_conviction_minutes: 180  # R3: Extended hold for high-conviction — was 120
   auction_min_hold_high_conviction_threshold: 50.0  # Apply extended hold when conviction >= this level
+  auction_pnl_positive_lock_enabled: true  # R4: Protect profitable positions from auction rotation
+  auction_pnl_positive_lock_max_minutes: 60  # R4: Max extra lock time after min_hold for profitable positions
   auction_max_trades_per_cycle: 5  # Maximum total trades per cycle (anti-churn)
   auction_max_new_opens_per_cycle: 1  # Tighter cap to prevent bursty open churn
   auction_max_closes_per_cycle: 1  # Tighter cap to prevent bursty close/reopen churn
@@ -203,7 +205,7 @@ strategy:
   # Indicators
   ema_period: 200
   adx_period: 14
-  adx_threshold: 23.0  # R2: Tightened from 20.0 — filter ranging markets (was 25→20 in KBO-8, now 23 compromise)
+  adx_threshold: 20.0  # KBO-44 trial: relax gate to increase valid signal throughput
   atr_period: 14
   atr_multiplier_stop: 1.5  # ATR multiplier for stop-loss buffer
   rsi_period: 14
@@ -224,10 +226,10 @@ strategy:
 
   # V2.3 Scoring & Regimes (Slightly relaxed)
   ema_neutral_zone_bps: 10.0
-  min_score_tight_smc_aligned: 65.0  # R1: Tightened from 60→65 — middle ground (KBO-8 was 60, original 75)
-  min_score_tight_smc_neutral: 70.0  # R1: Tightened from 65→70 — middle ground
-  min_score_wide_structure_aligned: 60.0  # R1: Tightened from 55→60 — middle ground
-  min_score_wide_structure_neutral: 65.0  # R1: Tightened from 60→65 — middle ground
+  min_score_tight_smc_aligned: 60.0  # KBO-44 trial: relax gate to increase valid signal throughput
+  min_score_tight_smc_neutral: 65.0  # KBO-44 trial: relax gate to increase valid signal throughput
+  min_score_wide_structure_aligned: 55.0  # KBO-44 trial: relax gate to increase valid signal throughput
+  min_score_wide_structure_neutral: 60.0  # KBO-44 trial: relax gate to increase valid signal throughput
   fib_proximity_bps: 60.0
   # Adaptive fib tolerance — Profile C (KBO-8)
   fib_proximity_adaptive_enabled: true
