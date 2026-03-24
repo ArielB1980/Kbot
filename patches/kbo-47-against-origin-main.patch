@@ -1,0 +1,127 @@
+--- a/src/live/auction_runner.py	2026-03-24 18:45:50
++++ b/src/live/auction_runner.py	2026-03-24 18:46:27
+@@ -38,29 +38,38 @@
+     return cycle_num <= 3 or (cycle_num % max(1, every_cycles) == 0)
+ 
+ 
+-def _is_qty_synced_dust(issue_text: str) -> bool:
++def _reconcile_issue_is_non_blocking(issue_text: str) -> bool:
+     """
+-    Treat tiny QTY_SYNCED residuals as non-blocking dust.
++    Return True if a reconcile issue should not suppress auction opens.
+ 
+-    Example issue text:
+-    "QTY_SYNCED: exit+0.001 local=0.002 exchange=0.001 price=1954.97"
++    Many registry issues are emitted after state was already converged in the
++    same ``reconcile_with_exchange`` pass (e.g. QTY_SYNCED, PENDING_ADOPTED),
++    or during intentional grace/hysteresis while the exchange view catches up.
++    Those should not set OPEN_RECONCILE_BLOCKING_ISSUES for unrelated symbols.
++
++    Still blocking: PHANTOM, QTY_MISMATCH, unresolved stale/exposure drift, etc.
+     """
+-    if not isinstance(issue_text, str) or not issue_text.startswith("QTY_SYNCED:"):
++    if not isinstance(issue_text, str):
+         return False
+-    try:
+-        import re
+-
+-        local_match = re.search(r"local=([0-9]*\.?[0-9]+)", issue_text)
+-        exchange_match = re.search(r"exchange=([0-9]*\.?[0-9]+)", issue_text)
+-        if not local_match or not exchange_match:
+-            return False
+-        local_qty = Decimal(local_match.group(1))
+-        exchange_qty = Decimal(exchange_match.group(1))
+-        delta = abs(local_qty - exchange_qty)
+-        # Conservative dust gate: only tiny residuals should bypass open blocking.
+-        return delta <= Decimal("0.01") and max(local_qty, exchange_qty) <= Decimal("0.05")
+-    except (ArithmeticError, ValueError, TypeError):
+-        return False
++    if issue_text.startswith("ORPHANED:"):
++        return True
++    # Quantity already reconciled to exchange inside the same reconcile pass.
++    if issue_text.startswith("QTY_SYNCED:"):
++        return True
++    if issue_text.startswith("PENDING_ADOPTED:"):
++        return True
++    # Exit/orphan path: exchange snapshot lagging registry; do not freeze opens.
++    if issue_text.startswith("MISSING_ON_EXCHANGE_EXIT_GRACE:"):
++        return True
++    if issue_text.startswith("MISSING_ON_EXCHANGE_PENDING:"):
++        return True
++    if issue_text.startswith("CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT:"):
++        return True
++    if issue_text.startswith("STALE: Registry"):
++        return True
++    if issue_text == "STALE_PENDING_RETAINED_REPLAY":
++        return True
++    return False
+ 
+ 
+ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
+@@ -68,12 +77,8 @@
+     Split reconcile issues into (blocking, non_blocking).
+ 
+     Rationale:
+-    - ORPHANED issues are often transient right after stop/TP-driven closes.
+-      They indicate registry/exchange convergence in progress and are
+-      persisted/handled by gateway reconciliation.
+-    - QTY_SYNCED dust residuals are non-blocking to avoid freezing opens on
+-      tiny convergence lag.
+-    - Other issue classes (PHANTOM, meaningful QTY drift, etc.) remain blocking.
++    - ORPHANED / exchange lag / same-pass sync summaries are often transient.
++    - PHANTOM, QTY_MISMATCH, and true exposure drift remain blocking.
+     """
+     blocking = []
+     non_blocking = []
+@@ -83,14 +88,7 @@
+             isinstance(issue, (list, tuple))
+             and len(issue) >= 2
+             and isinstance(issue[1], str)
+-            and issue[1].startswith("ORPHANED:")
+-        ):
+-            non_blocking.append(issue)
+-        elif (
+-            isinstance(issue, (list, tuple))
+-            and len(issue) >= 2
+-            and isinstance(issue[1], str)
+-            and _is_qty_synced_dust(issue[1])
++            and _reconcile_issue_is_non_blocking(issue[1])
+         ):
+             non_blocking.append(issue)
+         else:
+--- a/tests/unit/test_auction_reconcile_gate.py	2026-03-24 18:45:51
++++ b/tests/unit/test_auction_reconcile_gate.py	2026-03-24 18:39:17
+@@ -29,6 +29,33 @@
+     assert len(blocking) == 2
+ 
+ 
++def test_split_reconcile_issues_qty_synced_non_blocking_after_convergence():
++    """QTY_SYNCED is informational: qty was aligned in the same reconcile pass."""
++    blocking, non_blocking = _split_reconcile_issues(
++        [
++            (
++                "PF_ETHUSD",
++                "QTY_SYNCED: entry+0.5 local=0.0 exchange=0.5 price=3000",
++            ),
++        ]
++    )
++    assert blocking == []
++    assert len(non_blocking) == 1
++
++
++def test_split_reconcile_issues_missing_exchange_pending_non_blocking():
++    blocking, non_blocking = _split_reconcile_issues(
++        [
++            (
++                "PF_SOLUSD",
++                "MISSING_ON_EXCHANGE_PENDING: miss_count=1/3",
++            ),
++        ]
++    )
++    assert blocking == []
++    assert len(non_blocking) == 1
++
++
+ def test_filter_strategic_closes_allows_when_trading_allowed():
+     closes = ["PF_SOLUSD", "PF_XLMUSD"]
+     assert _filter_strategic_closes_for_gate(closes, trading_allowed=True) == closes

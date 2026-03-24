@@ -351,7 +351,19 @@ class StrategyConfig(BaseSettings):
     # Legacy compatibility (deprecated)
     bias_timeframes: List[str] = ["4h", "1d"]
     execution_timeframes: List[str] = ["15m", "1h"]
-    
+
+    # Tier 2 (KBO-13): 1H structure fallback when 4H has no OB/FVG/BOS (smc_engine; default off)
+    structure_fallback_enabled: bool = Field(
+        default=False,
+        description="Use 1H-detected structure when 4H structure is missing; score premium applies.",
+    )
+    structure_fallback_score_premium: float = Field(
+        default=15.0,
+        ge=0.0,
+        le=50.0,
+        description="Points subtracted from total score before gate for 1H fallback signals.",
+    )
+
     # Indicators
     ema_period: int = Field(default=200, ge=50, le=300)
     adx_period: int = Field(default=14, ge=7, le=30)

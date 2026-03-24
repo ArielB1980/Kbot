@@ -113,6 +113,20 @@ def test_config_schema_version_present():
     assert len(CONFIG_SCHEMA_VERSION) > 0
 
 
+
+
+def test_strategy_config_tier2_structure_fallback_fields():
+    """Tier 2 (KBO-13) 1H fallback flags are validated and default-off."""
+    from src.config.config import StrategyConfig
+
+    s = StrategyConfig()
+    assert s.structure_fallback_enabled is False
+    assert s.structure_fallback_score_premium == 15.0
+
+    s2 = StrategyConfig(structure_fallback_enabled=True, structure_fallback_score_premium=12.0)
+    assert s2.structure_fallback_enabled is True
+    assert s2.structure_fallback_score_premium == 12.0
+
 def test_symbol_override_resolvers():
     """Per-symbol override resolvers should apply only to target symbol."""
     from src.config.config import (

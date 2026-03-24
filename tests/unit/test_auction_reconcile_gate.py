@@ -29,6 +29,33 @@ def test_split_reconcile_issues_blocks_non_orphaned():
     assert len(blocking) == 2
 
 
+def test_split_reconcile_issues_qty_synced_non_blocking_after_convergence():
+    """QTY_SYNCED is informational: qty was aligned in the same reconcile pass."""
+    blocking, non_blocking = _split_reconcile_issues(
+        [
+            (
+                "PF_ETHUSD",
+                "QTY_SYNCED: entry+0.5 local=0.0 exchange=0.5 price=3000",
+            ),
+        ]
+    )
+    assert blocking == []
+    assert len(non_blocking) == 1
+
+
+def test_split_reconcile_issues_missing_exchange_pending_non_blocking():
+    blocking, non_blocking = _split_reconcile_issues(
+        [
+            (
+                "PF_SOLUSD",
+                "MISSING_ON_EXCHANGE_PENDING: miss_count=1/3",
+            ),
+        ]
+    )
+    assert blocking == []
+    assert len(non_blocking) == 1
+
+
 def test_filter_strategic_closes_allows_when_trading_allowed():
     closes = ["PF_SOLUSD", "PF_XLMUSD"]
     assert _filter_strategic_closes_for_gate(closes, trading_allowed=True) == closes

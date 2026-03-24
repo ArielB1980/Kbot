@@ -281,10 +281,22 @@ ssh -i "$SSH_KEY" "$SERVER" << DEPLOY_EOF
     su - $TRADING_USER -c "cd $TRADING_DIR && git reset --hard origin/main"
     
     echo "📦 Installing/updating dependencies..."
+    # Use python -m pip: some venvs ship non-executable pip stubs (Permission denied on venv/bin/pip).
+    # Prefer requirements.txt when present; otherwise editable install from pyproject (uv-style repos).
     if [ -d "$TRADING_DIR/venv" ]; then
-        su - $TRADING_USER -c "cd $TRADING_DIR && venv/bin/pip install --upgrade pip && venv/bin/pip install -r requirements.txt"
+        su - $TRADING_USER -c "cd $TRADING_DIR && venv/bin/python -m pip install --upgrade pip"
+        if su - $TRADING_USER -c "test -f $TRADING_DIR/requirements.txt"; then
+            su - $TRADING_USER -c "cd $TRADING_DIR && venv/bin/python -m pip install -r requirements.txt"
+        else
+            su - $TRADING_USER -c "cd $TRADING_DIR && venv/bin/python -m pip install -e ."
+        fi
     elif [ -d "$TRADING_DIR/.venv" ]; then
-        su - $TRADING_USER -c "cd $TRADING_DIR && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt"
+        su - $TRADING_USER -c "cd $TRADING_DIR && .venv/bin/python -m pip install --upgrade pip"
+        if su - $TRADING_USER -c "test -f $TRADING_DIR/requirements.txt"; then
+            su - $TRADING_USER -c "cd $TRADING_DIR && .venv/bin/python -m pip install -r requirements.txt"
+        else
+            su - $TRADING_USER -c "cd $TRADING_DIR && .venv/bin/python -m pip install -e ."
+        fi
     else
         echo "⚠️  No venv found; assuming dependencies installed via system Python or other method"
     fi
