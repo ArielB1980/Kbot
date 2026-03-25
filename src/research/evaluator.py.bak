@@ -43,8 +43,8 @@ class EvaluationSpec:
     auto_backfill_data: bool = True
     min_coverage_ratio: float = 0.95
     min_partial_coverage_ratio: float = 0.05
-    replay_eval_timeout_seconds: int = 3600
-    replay_max_ticks: int = 20000
+    replay_eval_timeout_seconds: int = 30
+    replay_max_ticks: int = 600
     max_paused_candle_health_ratio: float = 0.80
 
 
@@ -303,7 +303,7 @@ class CandidateEvaluator:
                     symbols=[symbol],
                     start=start_date,
                     end=end_date,
-                    tick_interval_seconds=900,
+                    tick_interval_seconds=60,
                     max_ticks=max(1, int(self.spec.replay_max_ticks)),
                     timeframes=list(self.spec.replay_timeframes),
                     config_overrides=params,

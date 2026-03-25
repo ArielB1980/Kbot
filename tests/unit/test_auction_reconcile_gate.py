@@ -1,6 +1,10 @@
+import pytest
+
 from types import SimpleNamespace
 
 from src.live.auction_runner import (
+    _compute_symbol_churn_cooldowns,
+    _db_backed_cooldowns_enabled,
     _split_reconcile_issues,
     _filter_strategic_closes_for_gate,
     _resolve_symbol_cooldown_params,
@@ -131,3 +135,33 @@ def test_symbol_in_canary_true_when_canary_empty():
 
 def test_symbol_in_canary_normalizes_symbols():
     assert _symbol_in_canary("PF_SOLUSD", ["SOL/USD"]) is True
+
+
+def test_db_backed_cooldowns_enabled_by_default():
+    assert _db_backed_cooldowns_enabled(SimpleNamespace()) is True
+
+
+@pytest.mark.asyncio
+async def test_compute_symbol_churn_cooldowns_skips_live_db_in_replay(monkeypatch):
+    def _unexpected_query(_since):
+        raise AssertionError("replay cooldown path should not query live trade history")
+
+    monkeypatch.setattr("src.live.auction_runner.get_trades_since", _unexpected_query)
+
+    lt = SimpleNamespace(
+        _replay_disable_db_backed_cooldowns=True,
+        config=SimpleNamespace(
+            risk=SimpleNamespace(
+                auction_churn_guard_enabled=True,
+                auction_churn_window_hours=6,
+                auction_churn_hold_max_minutes=60,
+                auction_churn_reopen_max_minutes=120,
+                auction_churn_max_events=2,
+                auction_churn_cooldown_tier1_minutes=30,
+                auction_churn_cooldown_tier2_minutes=120,
+                auction_churn_cooldown_tier3_minutes=360,
+            )
+        ),
+    )
+
+    assert await _compute_symbol_churn_cooldowns(lt) == {}

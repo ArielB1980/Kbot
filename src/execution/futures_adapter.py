@@ -465,7 +465,7 @@ class FuturesAdapter:
                 symbol=symbol,
                 side=kraken_side,
                 order_type=kraken_order_type,
-                size=float(size_contracts),
+                size=size_contracts,
                 price=price,
                 stop_price=price if order_type in [OrderType.STOP_LOSS, OrderType.TAKE_PROFIT] else None,
                 reduce_only=reduce_only,
@@ -612,4 +612,3 @@ class FuturesAdapter:
             )
         
         return size_notional
-

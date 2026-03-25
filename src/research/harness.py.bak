@@ -56,7 +56,7 @@ class HarnessConfig:
     min_probe_iterations_before_skip: int = 8
     min_partial_coverage_ratio: float = 0.05
     min_promotion_comparability: float = 0.50
-    replay_eval_timeout_seconds: int = 3600
+    replay_eval_timeout_seconds: int = 600
     replay_max_ticks: int = 20000
     max_paused_candle_health_ratio: float = 0.80
     max_symbols_per_cycle: int = 40
@@ -644,35 +644,6 @@ class SandboxAutoresearchHarness:
             for r in sorted(self.results, key=lambda x: x.score, reverse=True)
         ]
         self.store.update(leaderboard=board, best_candidate_id=best_candidate_id)
-        self._write_incremental_reports(best_candidate_id)
-
-    def _write_incremental_reports(self, best_candidate_id: str) -> None:
-        if not self.results:
-            return
-
-        base = Path(self.cfg.out_dir)
-        write_leaderboard(
-            path=base / f"{self.run_id}_leaderboard.json",
-            run_id=self.run_id,
-            baseline_id="baseline",
-            results=self.results,
-        )
-
-        best = next((r for r in self.results if r.candidate_id == best_candidate_id), None)
-        if best is not None:
-            write_summary(
-                path=base / f"{self.run_id}_summary.md",
-                run_id=self.run_id,
-                baseline=self.results[0],
-                best=best,
-            )
-
-        if self.best_by_symbol:
-            write_per_symbol_best(
-                path=base / f"{self.run_id}_best_by_symbol.json",
-                run_id=self.run_id,
-                best_by_symbol=self.best_by_symbol,
-            )
 
     def _write_reports(self, best: CandidateResult) -> tuple[Path, Path]:
         base = Path(self.cfg.out_dir)
@@ -885,3 +856,4 @@ async def run_sandbox_autoresearch(
     if on_complete:
         on_complete(outputs[0], outputs[1])
     return outputs
+

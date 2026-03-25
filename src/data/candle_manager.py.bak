@@ -40,15 +40,11 @@ class CandleManager:
         spot_to_futures: Optional[Callable[[str], str]] = None,
         use_futures_fallback: bool = False,
         ohlcv_fetcher: Optional[Any] = None,
-        now_fn: Optional[Callable[[], datetime]] = None,
     ):
         self.client = client
         self.spot_to_futures = spot_to_futures
         self.use_futures_fallback = use_futures_fallback
         self.ohlcv_fetcher = ohlcv_fetcher
-        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
-        # When True, skip DB lookups for candle timestamps (used in replay).
-        self._skip_db_lookups = False
         self._futures_fallback_symbols: set = set()  # Symbols that used futures OHLCV (cleared each summary)
         # Storage: timeframe -> symbol -> list[Candle]
         self.candles: Dict[str, Dict[str, List[Candle]]] = {
@@ -97,7 +93,7 @@ class CandleManager:
             else: self._merge_candles(s, "1d", cands)
         
         # Initialize update trackers
-        now = self._now_fn()
+        now = datetime.now(timezone.utc)
         for symbol in markets:
             self.last_candle_update[symbol] = {
                 "15m": self.candles["15m"].get(symbol, [])[-1].timestamp if self.candles["15m"].get(symbol) else datetime.min.replace(tzinfo=timezone.utc),
@@ -212,7 +208,7 @@ class CandleManager:
 
     async def update_candles(self, symbol: str):
         """Update candles for a symbol (Incremental). Uses spot OHLCV; if unavailable and use_futures_fallback, uses futures OHLCV."""
-        now = self._now_fn()
+        now = datetime.now(timezone.utc)
         if symbol not in self.last_candle_update:
             self.last_candle_update[symbol] = {}
 
@@ -256,7 +252,7 @@ class CandleManager:
             existing = buffer.get(symbol, [])
             if existing:
                 last_ts = existing[-1].timestamp
-            elif not self._skip_db_lookups:
+            else:
                 last_ts = await asyncio.to_thread(get_latest_candle_timestamp, symbol, tf)
             since_ms = int(last_ts.replace(tzinfo=timezone.utc).timestamp() * 1000) if last_ts else None
 

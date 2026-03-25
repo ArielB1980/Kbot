@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -37,29 +36,6 @@ from src.exceptions import InvariantError, OperationalError, DataError
 from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-def _build_replay_synthetic_spec(symbol: str):
-    """Create a synthetic futures spec using the exchange-native symbol alias."""
-    from src.execution.instrument_specs import InstrumentSpec
-
-    base = symbol.split("/")[0] if "/" in symbol else symbol
-    raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
-    return InstrumentSpec(
-        symbol_raw=f"PF_{raw_base}USD",
-        symbol_ccxt=f"{raw_base}/USD:USD",
-        base=base.upper(),
-        quote="USD",
-        contract_size=Decimal("1"),
-        min_size=Decimal("1"),
-        size_step=Decimal("1"),
-        size_step_source="replay_synthetic",
-        price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
-        max_leverage=50,
-        leverage_mode="flexible",
-        supports_reduce_only=True,
-        last_updated_ts=time.time(),
-    )
 
 
 class BacktestRunner:
@@ -102,9 +78,9 @@ class BacktestRunner:
         self._config_overrides = config_overrides or {}
         self._max_ticks = max_ticks
         resolved_timeframes = list(timeframes or ["1m"])
-        # 1m bars improve fill precision but are optional; the exchange sim
-        # falls back to coarser timeframes (15m, 1h, …) when 1m is absent.
-        # Deep 1m history is expensive to obtain, so allow callers to omit it.
+        if "1m" not in resolved_timeframes:
+            # Exchange simulation fill model requires 1m bars.
+            resolved_timeframes = ["1m", *resolved_timeframes]
         self._timeframes = resolved_timeframes
         self._disable_cycle_guard_throttle = disable_cycle_guard_throttle
         self._disable_db_mock = disable_db_mock
@@ -334,8 +310,6 @@ class BacktestRunner:
         # Set env vars for config loading
         os.environ.setdefault("ENV", "local")
         os.environ.setdefault("DRY_RUN", "0")
-        # Enable position state-machine so TP/SL/runner exits fire in replay.
-        os.environ["USE_STATE_MACHINE_V2"] = "true"
         # Reduce noisy per-tick logs in replay research loops.
         os.environ["REPLAY_RESEARCH_MINIMAL_LOGS"] = "1"
         # Replay research: prefer filled entries to avoid stale pending churn.
@@ -434,35 +408,10 @@ class BacktestRunner:
             lt.futures_adapter.client = self._exchange
         if hasattr(lt, "candle_manager"):
             lt.candle_manager.client = self._exchange
-            lt.candle_manager._now_fn = self._clock.now
-            # Skip DB lookups — production DB timestamps poison the
-            # `since` parameter and filter out all replay-era candles.
-            lt.candle_manager._skip_db_lookups = True
-            # Re-wire OHLCVFetcher client — it takes priority over
-            # candle_manager.client for candle fetches.
-            if getattr(lt.candle_manager, "ohlcv_fetcher", None) is not None:
-                lt.candle_manager.ohlcv_fetcher.client = self._exchange
         # Replay should not stall on live candle-health entry gate.
         lt._replay_disable_candle_health_gate = True
         # Replay research should bypass strict live gating for signal discovery.
         lt._replay_relaxed_signal_gates = True
-        # DB-backed cooldowns are calibrated for live trading and wall-clock
-        # time; using them in replay contaminates research with live history.
-        lt._replay_disable_db_backed_cooldowns = True
-
-        # Pre-populate instrument spec registry with synthetic specs for replay symbols.
-        # Without this, the auction runner rejects every signal with NO_SPEC because
-        # the replay exchange doesn't implement get_instruments().
-        if hasattr(lt, "instrument_spec_registry"):
-            synthetic_specs = [_build_replay_synthetic_spec(sym) for sym in self._symbols]
-            if synthetic_specs:
-                lt.instrument_spec_registry._index(synthetic_specs)
-                lt.instrument_spec_registry._loaded_at = time.time()
-                logger.info(
-                    "REPLAY_SYNTHETIC_SPECS_LOADED",
-                    count=len(synthetic_specs),
-                    symbols=[s.symbol_ccxt for s in synthetic_specs],
-                )
 
         # Advance startup state machine to READY so _tick() is allowed.
         # In real production, LiveTrading.run() goes through SYNCING →

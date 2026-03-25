@@ -341,12 +341,31 @@ class ReplayKrakenClient:
         now = now or self._clock.now()
         new_fills: List[SimFill] = []
 
+        pending_count = sum(
+            1 for o in self._orders.values()
+            if o.status not in (OrderStatus.FILLED, OrderStatus.CANCELLED)
+        )
+        if pending_count > 0:
+            logger.info(
+                "EXCHANGE_SIM_STEP",
+                now=str(now),
+                pending_orders=pending_count,
+                total_orders=len(self._orders),
+            )
+
         for order_id, order in list(self._orders.items()):
             if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
                 continue
 
             bar = self._market_bar_at(order.symbol, now)
             if bar is None:
+                logger.info(
+                    "EXCHANGE_SIM_NO_BAR",
+                    order_id=order.id,
+                    symbol=order.symbol,
+                    order_type=order.order_type.value,
+                    now=str(now),
+                )
                 continue
 
             liq = self._data.get_liquidity_at(order.symbol, now)
@@ -376,6 +395,18 @@ class ReplayKrakenClient:
             # Process limit orders: check if price crossed
             if order.order_type == OrderType.LIMIT and order.status == OrderStatus.OPEN:
                 fills = self._try_fill_limit(order, bar, liq, now)
+                if fills:
+                    logger.info(
+                        "LIMIT_ORDER_FILLED",
+                        order_id=order.id,
+                        symbol=order.symbol,
+                        side=order.side,
+                        price=str(order.price),
+                        size=str(fills[0].size),
+                        bar_low=str(bar.low),
+                        bar_high=str(bar.high),
+                        reduce_only=order.reduce_only,
+                    )
                 new_fills.extend(fills)
 
         # Apply funding
@@ -890,6 +921,7 @@ class ReplayKrakenClient:
         return {
             "symbol": pos.symbol,
             "side": pos.side,
+            "size": float(pos.size),
             "contracts": float(pos.size),
             "contractSize": 1,
             "entryPrice": float(pos.entry_price),

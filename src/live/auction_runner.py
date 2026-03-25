@@ -171,6 +171,11 @@ def _resolve_symbol_cooldown_params(strategy_config, symbol: str) -> Dict[str, f
     return params
 
 
+def _db_backed_cooldowns_enabled(lt: "LiveTrading") -> bool:
+    """Replay research must not consult live DB-backed cooldown history."""
+    return not bool(getattr(lt, "_replay_disable_db_backed_cooldowns", False))
+
+
 def _symbol_in_canary(symbol: str, canary_symbols: List[str]) -> bool:
     if not canary_symbols:
         return True
@@ -280,6 +285,8 @@ async def _compute_symbol_churn_cooldowns(lt: "LiveTrading") -> Dict[str, dateti
     """
     risk_cfg = lt.config.risk
     if not bool(getattr(risk_cfg, "auction_churn_guard_enabled", False)):
+        return {}
+    if not _db_backed_cooldowns_enabled(lt):
         return {}
 
     window_hours = int(getattr(risk_cfg, "auction_churn_window_hours", 6) or 6)
@@ -554,7 +561,10 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                     )
                     continue
 
-                if getattr(lt.config.strategy, "symbol_loss_cooldown_enabled", True):
+                if (
+                    _db_backed_cooldowns_enabled(lt)
+                    and getattr(lt.config.strategy, "symbol_loss_cooldown_enabled", True)
+                ):
                     cooldown_params = _resolve_symbol_cooldown_params(lt.config.strategy, signal.symbol)
                     if cooldown_params["canary_applied"]:
                         canary_overrides_applied += 1

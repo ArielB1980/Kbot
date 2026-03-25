@@ -83,7 +83,7 @@ class TestDirectContractSizing:
 
         assert order.order_id == "test-order-123"
         call_args = kraken.place_futures_order.call_args
-        assert call_args.kwargs.get("size") == pytest.approx(0.1)
+        assert call_args.kwargs.get("size") == Decimal("0.1")
 
     @pytest.mark.asyncio
     async def test_override_still_validates_min_size(self):
@@ -145,7 +145,7 @@ class TestDirectContractSizing:
 
         call_args = kraken.place_futures_order.call_args
         placed_size = call_args.kwargs.get("size")
-        assert placed_size == pytest.approx(0.2)  # ROUND_UP for reduce_only
+        assert placed_size == Decimal("0.2")  # ROUND_UP for reduce_only
 
     @pytest.mark.asyncio
     async def test_notional_round_trip_fails_but_override_succeeds(self):
