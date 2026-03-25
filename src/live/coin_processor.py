@@ -49,6 +49,25 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _normalize_symbol_for_filter(symbol: str) -> str:
+    return (symbol or "").strip().upper().split(":")[0]
+
+
+def _asset_allow_block_sets(lt: LiveTrading) -> tuple[str, set[str], set[str]]:
+    mode = str(getattr(lt.config.assets, "mode", "auto") or "auto").strip().lower()
+    whitelist = {
+        _normalize_symbol_for_filter(s)
+        for s in (getattr(lt.config.assets, "whitelist", []) or [])
+        if str(s).strip()
+    }
+    blocklist = {
+        _normalize_symbol_for_filter(s)
+        for s in (getattr(lt.config.assets, "blacklist", []) or [])
+        if str(s).strip()
+    }
+    return mode, whitelist, blocklist
+
+
 # ---------------------------------------------------------------------------
 # TickContext: bundles per-tick batch-fetched data for process_coin
 # ---------------------------------------------------------------------------
@@ -82,11 +101,12 @@ class TickContext:
 
 def market_symbols(lt: LiveTrading) -> list[str]:
     """Return list of spot symbols. Handles both list and dict. Excludes blocklist."""
+    mode, whitelist, asset_blacklist = _asset_allow_block_sets(lt)
     blocklist = set(
         s.strip().upper() for s in getattr(lt.config.exchange, "spot_ohlcv_blocklist", []) or []
     )
     # Also honor assets.blacklist
-    blocklist |= set(s.strip().upper() for s in getattr(lt.config.assets, "blacklist", []) or [])
+    blocklist |= asset_blacklist
     # Also honor execution entry blocklist for universe filtering
     blocklist |= set(
         s.strip().upper().split(":")[0]
@@ -106,8 +126,10 @@ def market_symbols(lt: LiveTrading) -> list[str]:
 
     out: list[str] = []
     for s in raw:
-        key = s.strip().upper().split(":")[0] if s else ""
+        key = _normalize_symbol_for_filter(s)
         if not key:
+            continue
+        if mode == "whitelist" and whitelist and key not in whitelist:
             continue
         if key in blocklist:
             continue
@@ -179,6 +201,14 @@ async def update_market_universe(lt: LiveTrading) -> None:
                 )
                 lt._last_discovery_error_log_time = now
             return
+
+        mode, whitelist, _asset_blacklist = _asset_allow_block_sets(lt)
+        if mode == "whitelist":
+            mapping = {
+                spot: fut
+                for spot, fut in mapping.items()
+                if _normalize_symbol_for_filter(spot) in whitelist
+            }
 
         # Shrink protection: if new universe is <50% of LAST DISCOVERED
         # universe, something is wrong (API issue, temporary outage).

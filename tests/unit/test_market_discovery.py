@@ -240,6 +240,74 @@ async def test_live_trading_keeps_existing_universe_and_logs_critical():
     assert "Market discovery empty" in str(critical_calls[0])
 
 
+@pytest.mark.asyncio
+async def test_live_trading_discovery_respects_whitelist_mode():
+    """Discovery updates must not re-add symbols excluded by assets.whitelist."""
+    from src.live.live_trading import LiveTrading
+
+    config = MagicMock()
+    config.exchange = MagicMock()
+    config.exchange.use_market_discovery = True
+    config.exchange.market_discovery_failure_log_cooldown_minutes = 60
+    config.exchange.market_discovery_cache_minutes = 60
+    config.exchange.api_key = "k"
+    config.exchange.api_secret = "s"
+    config.exchange.futures_api_key = "fk"
+    config.exchange.futures_api_secret = "fs"
+    config.exchange.use_testnet = False
+    config.exchange.spot_markets = ["BTC/USD", "ETH/USD"]
+    config.exchange.futures_markets = ["BTCUSD-PERP", "ETHUSD-PERP"]
+    config.exchange.position_size_is_notional = False
+    config.system = MagicMock()
+    config.system.dry_run = True
+    config.risk = MagicMock()
+    config.risk.auction_mode_enabled = False
+    config.risk.shock_guard_enabled = False
+    config.strategy = MagicMock()
+    config.strategy.bias_timeframes = ["4h"]
+    config.strategy.execution_timeframes = ["15m"]
+    config.execution = MagicMock()
+    config.execution.tp_backfill_enabled = False
+    config.execution.order_timeout_seconds = 120
+    config.execution.entry_blocklist_spot_symbols = []
+    config.execution.entry_blocklist_bases = []
+    config.assets = MagicMock()
+    config.assets.mode = "whitelist"
+    config.assets.whitelist = ["BTC/USD", "XRP/USD"]
+    config.assets.blacklist = []
+    config.coin_universe = MagicMock()
+    config.coin_universe.enabled = False
+    config.data = MagicMock()
+    config.data.min_healthy_coins = 30
+    config.data.min_health_ratio = 0.25
+    config.data.max_concurrent_ohlcv = 8
+    config.reconciliation = MagicMock()
+    config.reconciliation.reconcile_enabled = False
+
+    with patch("src.live.live_trading.KrakenClient"):
+        with patch("src.live.live_trading.DataAcquisition"):
+            with patch("src.live.live_trading.CandleManager", MagicMock()):
+                lt = LiveTrading(config)
+
+    with patch.object(
+        lt.market_discovery,
+        "discover_markets",
+        new_callable=AsyncMock,
+        return_value={
+            "BTC/USD": "PF_XBTUSD",
+            "ETH/USD": "PF_ETHUSD",
+            "SOL/USD": "PF_SOLUSD",
+            "XRP/USD": "PF_XRPUSD",
+        },
+    ):
+        await lt._update_market_universe()
+
+    assert set(lt.markets.keys()) == {"BTC/USD", "XRP/USD"}
+    lt.data_acq.update_symbols.assert_called_once()
+    args, _kwargs = lt.data_acq.update_symbols.call_args
+    assert set(args[0]) == {"BTC/USD", "XRP/USD"}
+
+
 def test_market_discovery_service_pinned_majors_default_to_tier_a():
     """Pinned majors should resolve Tier A even if discovery cache is empty."""
     config = MagicMock()
