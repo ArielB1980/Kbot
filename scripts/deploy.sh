@@ -13,16 +13,27 @@ step() {
 
 step "Deploying to ${REMOTE_HOST}:${REMOTE_DIR}"
 
+LOCAL_ORIGIN_URL="$(git remote get-url origin)"
+
 ssh "${SSH_OPTS[@]}" "${REMOTE_HOST}" "bash -s" <<REMOTE_EOF
 set -euo pipefail
 
 REPO_DIR="${REMOTE_DIR}"
 SERVICE="${SERVICE_NAME}"
 LOG_LINES="${LOG_LINES}"
+FALLBACK_ORIGIN_URL="${LOCAL_ORIGIN_URL}"
 
 cd "\${REPO_DIR}"
 echo "remote_pwd=\$(pwd)"
 echo "remote_head_before=\$(git rev-parse HEAD)"
+echo "remote_origin_before=\$(git remote get-url origin)"
+
+if ! git ls-remote --exit-code origin >/dev/null 2>&1; then
+  if [ -n "\${FALLBACK_ORIGIN_URL}" ]; then
+    echo "Origin remote unreachable; switching to fallback: \${FALLBACK_ORIGIN_URL}"
+    git remote set-url origin "\${FALLBACK_ORIGIN_URL}"
+  fi
+fi
 
 echo "Running: git pull origin main"
 git pull origin main
