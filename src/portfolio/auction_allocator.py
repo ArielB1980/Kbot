@@ -397,8 +397,15 @@ class AuctionAllocator:
                 reasons["skip_symbol_closing"] = reasons.get("skip_symbol_closing", 0) + 1
                 continue
             if op_meta.locked and not allow_locked_rebalancer_trims:
-                reasons["skip_locked"] = reasons.get("skip_locked", 0) + 1
-                continue
+                # Safety-preserving bypass: allow reduceOnly trims for lock reasons that
+                # do not indicate protection risk (e.g. min-hold / pnl-positive lock).
+                is_protected = bool(getattr(op_meta.position, "is_protected", True))
+                has_live_protection = bool(getattr(op_meta, "is_protective_orders_live", False))
+                if is_protected and has_live_protection:
+                    reasons["locked_safe_trim_allowed"] = reasons.get("locked_safe_trim_allowed", 0) + 1
+                else:
+                    reasons["skip_locked"] = reasons.get("skip_locked", 0) + 1
+                    continue
 
             size_notional = getattr(op_meta.position, "size_notional", Decimal("0")) or Decimal("0")
             size_qty = getattr(op_meta.position, "size", Decimal("0")) or Decimal("0")
@@ -582,7 +589,11 @@ class AuctionAllocator:
         # Capital reallocation rate limit: skip new opens when within partial-close cooldown
         last_partial = portfolio_state.get("last_partial_close_at")
         cooldown_sec = portfolio_state.get("partial_close_cooldown_seconds", 0) or 0
+        # Cooldown only applies while there is still live inventory to de-churn.
+        # If book is flat, stale timestamps must not block fresh entries.
         in_cooldown = (
+            bool(open_positions)
+            and
             cooldown_sec > 0
             and last_partial is not None
             and (now - last_partial).total_seconds() < cooldown_sec

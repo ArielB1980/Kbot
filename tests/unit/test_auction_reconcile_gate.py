@@ -71,6 +71,19 @@ def test_split_reconcile_issues_missing_exchange_pending_non_blocking():
     assert len(non_blocking) == 1
 
 
+def test_split_reconcile_issues_missing_exchange_exit_grace_non_blocking():
+    blocking, non_blocking = _split_reconcile_issues(
+        [
+            (
+                "PF_LINKUSD",
+                "MISSING_ON_EXCHANGE_EXIT_GRACE: age=1.8s",
+            ),
+        ]
+    )
+    assert blocking == []
+    assert len(non_blocking) == 1
+
+
 def test_filter_strategic_closes_allows_when_trading_allowed():
     closes = ["PF_SOLUSD", "PF_XLMUSD"]
     assert _filter_strategic_closes_for_gate(closes, trading_allowed=True) == closes

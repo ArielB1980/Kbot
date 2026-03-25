@@ -1659,8 +1659,26 @@ class ExecutionGateway:
             fill_id=fill_id,
         )
         
+        def _safe_exit_qty(position: ManagedPosition | None) -> Decimal:
+            if position is None:
+                return Decimal("0")
+            raw_qty = getattr(position, "filled_exit_qty", Decimal("0"))
+            if isinstance(raw_qty, Decimal):
+                return raw_qty
+            try:
+                return Decimal(str(raw_qty))
+            except Exception:
+                return Decimal("0")
+
+        pre_event_position = self.registry.get_position_any_state(pending.symbol)
+        pre_exit_qty = _safe_exit_qty(pre_event_position)
+
         follow_up = self.position_manager.handle_order_event(pending.symbol, event)
-        if self._on_partial_close and event_type in (OrderEventType.FILLED, OrderEventType.PARTIAL_FILL):
+
+        post_event_position = self.registry.get_position_any_state(pending.symbol)
+        post_exit_qty = _safe_exit_qty(post_event_position)
+        exit_progressed = post_exit_qty > pre_exit_qty
+        if self._on_partial_close and exit_progressed and event_type in (OrderEventType.FILLED, OrderEventType.PARTIAL_FILL):
             if client_order_id and (client_order_id.startswith("tp1-") or client_order_id.startswith("tp2-")):
                 self._on_partial_close(pending.symbol)
         
@@ -1682,7 +1700,7 @@ class ExecutionGateway:
             pending.status = "rejected"
             self.metrics["orders_rejected"] += 1
         
-        position = self.registry.get_position_any_state(pending.symbol)
+        position = post_event_position
         if position:
             self.persistence.save_position(position)
             await self._maybe_record_trade(position)

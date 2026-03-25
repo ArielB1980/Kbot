@@ -107,6 +107,13 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
             isinstance(issue, (list, tuple))
             and len(issue) >= 2
             and isinstance(issue[1], str)
+            and issue[1].startswith("MISSING_ON_EXCHANGE_EXIT_GRACE:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
             and issue[1].startswith("MISSING_ON_EXCHANGE_PENDING:")
         ):
             non_blocking.append(issue)

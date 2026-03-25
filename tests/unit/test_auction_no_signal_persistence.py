@@ -181,6 +181,70 @@ def test_rebalancer_reductions_still_planned_when_strategic_close_suppressed():
     assert plan.reductions[0][0] == open_position.position.symbol
 
 
+def test_rebalancer_allows_safe_trim_for_locked_but_protected_position():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=2, max_margin_util=0.9, max_per_cluster=2, max_per_symbol=1),
+        swap_threshold=12.0,
+        min_hold_minutes=240,  # Force lock via min-hold.
+        rebalancer_enabled=True,
+        rebalancer_trigger_pct_equity=0.32,
+        rebalancer_clear_pct_equity=0.24,
+        rebalancer_max_reductions_per_cycle=1,
+    )
+    open_position = _make_open()
+    open_position.position.size_notional = Decimal("5000")
+    open_position.position.size = Decimal("100")
+    open_position.position.margin_used = Decimal("1000")
+    open_position.age_seconds = 60 * 60  # Locked because younger than 240m hold.
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "current_cycle": 10,
+            "last_trim_cycle_by_symbol": {},
+        },
+    )
+
+    assert len(plan.reductions) == 1
+    assert plan.reasons["reduction_reasons"].get("locked_safe_trim_allowed", 0) >= 1
+
+
+def test_rebalancer_skips_locked_trim_when_protection_not_live():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=2, max_margin_util=0.9, max_per_cluster=2, max_per_symbol=1),
+        swap_threshold=12.0,
+        min_hold_minutes=240,
+        rebalancer_enabled=True,
+        rebalancer_trigger_pct_equity=0.32,
+        rebalancer_clear_pct_equity=0.24,
+        rebalancer_max_reductions_per_cycle=1,
+    )
+    open_position = _make_open()
+    open_position.position.size_notional = Decimal("5000")
+    open_position.position.size = Decimal("100")
+    open_position.position.margin_used = Decimal("1000")
+    open_position.position.is_protected = False
+    open_position.is_protective_orders_live = False
+    open_position.age_seconds = 60 * 60
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "current_cycle": 10,
+            "last_trim_cycle_by_symbol": {},
+        },
+    )
+
+    assert plan.reductions == []
+    assert plan.reasons["reduction_reasons"].get("skip_locked", 0) >= 1
+
+
 def test_stricter_swap_threshold_rejects_marginal_replacement():
     allocator = AuctionAllocator(
         limits=PortfolioLimits(max_positions=1, max_margin_util=0.9, max_per_cluster=1, max_per_symbol=1),
@@ -378,3 +442,47 @@ def test_chop_swap_threshold_applies_only_to_active_symbols():
     # SOL is chop-active, so stricter threshold (12) applies and rejects replacement.
     assert plan.closes == []
     assert plan.opens == []
+
+
+def test_partial_close_cooldown_blocks_new_open_when_book_not_empty():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=2, max_margin_util=0.9, max_per_cluster=2, max_per_symbol=1),
+        swap_threshold=10.0,
+    )
+    open_position = _make_open(symbol="PF_SOLUSD", score=60.0)
+    candidate = _make_candidate(symbol="BTC/USD", score=95.0)
+
+    plan = allocator.allocate(
+        open_positions=[open_position],
+        candidate_signals=[candidate],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "last_partial_close_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+            "partial_close_cooldown_seconds": 300,
+        },
+    )
+
+    assert plan.opens == []
+
+
+def test_partial_close_cooldown_does_not_block_new_open_when_book_flat():
+    allocator = AuctionAllocator(
+        limits=PortfolioLimits(max_positions=2, max_margin_util=0.9, max_per_cluster=2, max_per_symbol=1),
+        swap_threshold=10.0,
+    )
+    candidate = _make_candidate(symbol="BTC/USD", score=95.0)
+
+    plan = allocator.allocate(
+        open_positions=[],
+        candidate_signals=[candidate],
+        portfolio_state={
+            "account_equity": Decimal("10000"),
+            "available_margin": Decimal("10000"),
+            "last_partial_close_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+            "partial_close_cooldown_seconds": 300,
+        },
+    )
+
+    assert plan.closes == []
+    assert [s.symbol for s in plan.opens] == ["BTC/USD"]

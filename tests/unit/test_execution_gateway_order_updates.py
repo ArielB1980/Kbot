@@ -97,6 +97,95 @@ async def test_process_order_update_uses_incremental_fill_qty_not_cumulative():
 
 
 @pytest.mark.asyncio
+async def test_process_order_update_partial_close_callback_only_when_exit_qty_progresses():
+    gateway = _build_gateway()
+    gateway._on_partial_close = MagicMock()
+
+    pending = PendingOrder(
+        client_order_id="tp1-pos-1",
+        position_id="pos-1",
+        symbol="ETH/USD",
+        purpose=OrderPurpose.EXIT_TP,
+        side=Side.SHORT,
+        size=Decimal("0.5"),
+        price=Decimal("3100"),
+        order_type=OrderType.TAKE_PROFIT,
+        submitted_at=datetime.now(timezone.utc),
+        exchange_order_id="exchange-tp1-1",
+        status="submitted",
+    )
+    gateway._pending_orders[pending.client_order_id] = pending
+    gateway._order_id_map["exchange-tp1-1"] = pending.client_order_id
+    gateway.position_manager.handle_order_event.return_value = []
+    gateway.registry.get_position.return_value = None
+
+    pre_position = MagicMock()
+    pre_position.filled_exit_qty = Decimal("0.3")
+    post_position = MagicMock()
+    post_position.filled_exit_qty = Decimal("0.5")
+    gateway.registry.get_position_any_state.side_effect = [pre_position, post_position]
+
+    await gateway.process_order_update(
+        {
+            "id": "exchange-tp1-1",
+            "clientOrderId": "tp1-pos-1",
+            "status": "closed",
+            "filled": "0.2",
+            "remaining": "0",
+            "average": "3100",
+            "trades": [],
+        }
+    )
+
+    gateway._on_partial_close.assert_called_once_with("ETH/USD")
+
+
+@pytest.mark.asyncio
+async def test_process_order_update_partial_close_callback_ignored_when_exit_qty_unchanged():
+    gateway = _build_gateway()
+    gateway._on_partial_close = MagicMock()
+
+    pending = PendingOrder(
+        client_order_id="tp2-pos-1",
+        position_id="pos-1",
+        symbol="ETH/USD",
+        purpose=OrderPurpose.EXIT_TP,
+        side=Side.SHORT,
+        size=Decimal("0.5"),
+        price=Decimal("3150"),
+        order_type=OrderType.TAKE_PROFIT,
+        submitted_at=datetime.now(timezone.utc),
+        exchange_order_id="exchange-tp2-1",
+        status="submitted",
+    )
+    gateway._pending_orders[pending.client_order_id] = pending
+    gateway._order_id_map["exchange-tp2-1"] = pending.client_order_id
+    gateway.position_manager.handle_order_event.return_value = []
+    gateway.registry.get_position.return_value = None
+
+    # Simulate terminal/ignored TP update where state machine does not increase exit qty.
+    pre_position = MagicMock()
+    pre_position.filled_exit_qty = Decimal("0.5")
+    post_position = MagicMock()
+    post_position.filled_exit_qty = Decimal("0.5")
+    gateway.registry.get_position_any_state.side_effect = [pre_position, post_position]
+
+    await gateway.process_order_update(
+        {
+            "id": "exchange-tp2-1",
+            "clientOrderId": "tp2-pos-1",
+            "status": "closed",
+            "filled": "0.1",
+            "remaining": "0",
+            "average": "3150",
+            "trades": [],
+        }
+    )
+
+    gateway._on_partial_close.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_execute_entry_passes_action_leverage_to_client():
     gateway = _build_gateway()
     gateway.client.create_order.return_value = {"id": "exchange-entry-2"}
