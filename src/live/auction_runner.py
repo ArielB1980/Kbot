@@ -72,8 +72,10 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
     - ORPHANED issues are often transient right after stop/TP-driven closes.
       They indicate registry/exchange convergence in progress and are
       persisted/handled by gateway reconciliation.
-    - QTY_SYNCED dust residuals are non-blocking to avoid freezing opens on
-      tiny convergence lag.
+    - QTY_SYNCED entries are non-blocking because quantity convergence was
+      already applied in the same pass; this is informational.
+    - MISSING_ON_EXCHANGE_PENDING reflects orphan hysteresis in progress and is
+      non-blocking while miss threshold is not reached.
     - Other issue classes (PHANTOM, meaningful QTY drift, etc.) remain blocking.
     """
     blocking = []
@@ -99,6 +101,20 @@ def _split_reconcile_issues(issues: List) -> tuple[List, List]:
             and len(issue) >= 2
             and isinstance(issue[1], str)
             and issue[1].startswith("DEDUPED:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and issue[1].startswith("MISSING_ON_EXCHANGE_PENDING:")
+        ):
+            non_blocking.append(issue)
+        elif (
+            isinstance(issue, (list, tuple))
+            and len(issue) >= 2
+            and isinstance(issue[1], str)
+            and issue[1].startswith("QTY_SYNCED:")
         ):
             non_blocking.append(issue)
         elif (
