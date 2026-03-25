@@ -179,6 +179,18 @@ class RiskConfig(BaseSettings):
     auction_entry_cost: float = Field(default=2.0, ge=0.0, le=10.0)
     auction_exit_cost: float = Field(default=2.0, ge=0.0, le=10.0)
     auction_direction_concentration_penalty: float = Field(default=10.0, ge=0.0, le=50.0, description="Score penalty at max directional imbalance (all positions same side)")
+    auction_max_directional_imbalance_pct: float = Field(
+        default=100.0,
+        ge=50.0,
+        le=100.0,
+        description="Hard cap on directional imbalance: max pct of positions on one side",
+    )
+    auction_max_directional_imbalance_pct: float = Field(
+        default=100.0,
+        ge=50.0,
+        le=100.0,
+        description="Hard cap on directional imbalance: max pct of positions on one side",
+    )
     auction_no_signal_persistence_enabled: bool = Field(
         default=False,
         description="When enabled, suppress strategic auction closes until no-signal streak reaches threshold",

@@ -63,6 +63,7 @@ class PortfolioLimits:
     max_net_long: Optional[Decimal] = None  # Optional net exposure cap
     max_net_short: Optional[Decimal] = None
     direction_concentration_penalty: float = 10.0  # Score penalty at maximum directional imbalance
+    max_directional_imbalance_pct: float = 100.0
 
 
 @dataclass
@@ -758,6 +759,24 @@ class AuctionAllocator:
                     if net_short_margin + contender.required_margin > self.limits.max_net_short:
                         continue
             
+            # Hard directional imbalance cap
+            if self.limits.max_directional_imbalance_pct < 100.0:
+                total_so_far = long_count + short_count
+                if total_so_far > 0:
+                    same_side = (long_count if contender.direction == Side.LONG else short_count) + 1
+                    new_total = total_so_far + 1
+                    if (same_side / new_total) * 100 > self.limits.max_directional_imbalance_pct:
+                        if not contender.locked:
+                            logger.debug(
+                                "Contender rejected by directional imbalance cap",
+                                symbol=contender.symbol,
+                                direction=contender.direction.value,
+                                same_side=same_side,
+                                total=new_total,
+                                cap_pct=self.limits.max_directional_imbalance_pct,
+                            )
+                            continue
+
             # Dynamic directional concentration penalty
             dir_penalty = self._direction_penalty(contender.direction, long_count, short_count)
             adjusted_value = contender.value - dir_penalty

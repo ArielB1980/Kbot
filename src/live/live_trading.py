@@ -229,6 +229,7 @@ class LiveTrading:
                 max_per_cluster=config.risk.auction_max_per_cluster,
                 max_per_symbol=config.risk.auction_max_per_symbol,
                 direction_concentration_penalty=config.risk.auction_direction_concentration_penalty,
+                max_directional_imbalance_pct=config.risk.auction_max_directional_imbalance_pct,
             )
             allocator_kwargs = {
                 "limits": limits,
