@@ -2,10 +2,7 @@ assets:
   mode: whitelist
   whitelist:
   - BTC/USD
-  - ETH/USD
-  - SOL/USD
   - XRP/USD
-  - ADA/USD
   - LINK/USD
   - DOGE/USD
   - AVAX/USD
