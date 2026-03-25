@@ -41,9 +41,8 @@ git pull origin main
 echo "remote_head_after=\$(git rev-parse HEAD)"
 
 if command -v systemctl >/dev/null 2>&1; then
-  if systemctl list-unit-files | grep -q "^\${SERVICE}"; then
-    echo "Restarting systemd service: \${SERVICE}"
-    systemctl restart "\${SERVICE}"
+  if systemctl restart "\${SERVICE}" >/dev/null 2>&1; then
+    echo "Restarted systemd service: \${SERVICE}"
     systemctl is-active --quiet "\${SERVICE}"
     systemctl status "\${SERVICE}" --no-pager | sed -n '1,20p'
     echo "Recent journal logs:"
