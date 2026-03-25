@@ -3,7 +3,7 @@ Persistence functions for storing and retrieving trading data.
 
 Provides repository pattern for clean data access.
 """
-from sqlalchemy import Column, String, Numeric, DateTime, Integer, Boolean, Index, UniqueConstraint
+from sqlalchemy import Column, String, Numeric, DateTime, Integer, Boolean, Index, UniqueConstraint, or_
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -127,6 +127,8 @@ class TradeModel(Base):
     # Fill-type breakdown (nullable for backward compat with existing rows)
     maker_fills_count = Column(Integer, nullable=True)
     taker_fills_count = Column(Integer, nullable=True)
+    # Source tracking: "live" or "replay" (KBO-54)
+    source = Column(String, nullable=True, default="live")
 
 
 class PositionModel(Base):
@@ -534,6 +536,7 @@ def save_trade(trade: Trade) -> None:
             exit_reason=trade.exit_reason,
             maker_fills_count=getattr(trade, "maker_fills_count", None),
             taker_fills_count=getattr(trade, "taker_fills_count", None),
+            source=getattr(trade, "source", "live"),
         )
         session.add(trade_model)
 
@@ -794,11 +797,14 @@ def get_active_positions() -> List[Position]:
         ]
 
 
-def get_all_trades() -> List[Trade]:
-    """Retrieve all trades from the database."""
+def get_all_trades(source: str = "live") -> List[Trade]:
+    """Retrieve all trades from the database, filtered by source."""
     db = get_db()
     with db.get_session() as session:
-        trade_models = session.query(TradeModel).order_by(TradeModel.exited_at.desc()).all()
+        query = session.query(TradeModel)
+        if source:
+            query = query.filter(or_(TradeModel.source == source, TradeModel.source.is_(None)))
+        trade_models = query.order_by(TradeModel.exited_at.desc()).all()
         
         return [
             Trade(
@@ -825,7 +831,7 @@ def get_all_trades() -> List[Trade]:
         ]
 
 
-def get_trades_since(since: datetime) -> List[Trade]:
+def get_trades_since(since: datetime, source: str = "live") -> List[Trade]:
     """
     Retrieve trades closed since a specific time.
     
@@ -838,9 +844,12 @@ def get_trades_since(since: datetime) -> List[Trade]:
     cutoff = _to_naive_utc(since)
     db = get_db()
     with db.get_session() as session:
-        trade_models = session.query(TradeModel).filter(
+        query = session.query(TradeModel).filter(
             TradeModel.exited_at >= cutoff
-        ).order_by(TradeModel.exited_at.desc()).all()
+        )
+        if source:
+            query = query.filter(or_(TradeModel.source == source, TradeModel.source.is_(None)))
+        trade_models = query.order_by(TradeModel.exited_at.desc()).all()
         
         return [
             Trade(

@@ -94,6 +94,7 @@ class Database:
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS size NUMERIC(20,8)",
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS maker_fills_count INTEGER",
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS taker_fills_count INTEGER",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'live'",
         ]
         with self.engine.connect() as conn:
             for stmt in migrations:

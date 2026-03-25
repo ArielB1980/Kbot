@@ -305,6 +305,8 @@ class Trade:
     # Fill-type breakdown (for fee accuracy tracking)
     maker_fills_count: int = 0
     taker_fills_count: int = 0
+    # Source tracking (live vs replay)
+    source: str = "live"
     
     # Metadata
     setup_type: Optional[str] = None
