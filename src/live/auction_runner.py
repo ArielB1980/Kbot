@@ -199,6 +199,18 @@ def _db_backed_cooldowns_enabled(lt: "LiveTrading") -> bool:
     return not bool(getattr(lt, "_replay_disable_db_backed_cooldowns", False))
 
 
+def _should_bypass_churn_cooldowns(lt: "LiveTrading", raw_positions: List[Dict]) -> bool:
+    """Allow a flat book to re-enter after a sustained no-signal regime."""
+    if raw_positions:
+        return False
+
+    no_signal_cycles = int(getattr(lt, "_auction_no_signal_cycles", 0) or 0)
+    threshold = int(
+        getattr(lt.config.risk, "auction_no_signal_close_persistence_cycles", 3) or 3
+    )
+    return no_signal_cycles >= threshold
+
+
 def _symbol_in_canary(symbol: str, canary_symbols: List[str]) -> bool:
     if not canary_symbols:
         return True
@@ -552,6 +564,14 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
         canary_overrides_applied = 0
         now_utc = datetime.now(timezone.utc)
         churn_cooldowns = await _compute_symbol_churn_cooldowns(lt)
+        if churn_cooldowns and _should_bypass_churn_cooldowns(lt, raw_positions):
+            logger.info(
+                "Auction churn cooldowns bypassed in flat no-signal regime",
+                count=len(churn_cooldowns),
+                symbols=sorted(churn_cooldowns.keys())[:15],
+                no_signal_cycles=int(getattr(lt, "_auction_no_signal_cycles", 0) or 0),
+            )
+            churn_cooldowns = {}
         quick_reversal_metrics = await _compute_quick_reversal_metrics(lt)
         signal_scores = [float(sig.score) for sig, _, _ in lt.auction_signals_this_tick]
         cycle_score_std = _score_std(signal_scores)

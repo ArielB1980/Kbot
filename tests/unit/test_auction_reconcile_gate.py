@@ -10,6 +10,7 @@ from src.live.auction_runner import (
     _resolve_is_protective_orders_live,
     _resolve_symbol_cooldown_params,
     _score_std,
+    _should_bypass_churn_cooldowns,
     _symbol_in_canary,
 )
 
@@ -153,6 +154,36 @@ def test_symbol_in_canary_normalizes_symbols():
 
 def test_db_backed_cooldowns_enabled_by_default():
     assert _db_backed_cooldowns_enabled(SimpleNamespace()) is True
+
+
+def test_should_bypass_churn_cooldowns_false_when_book_not_flat():
+    lt = SimpleNamespace(
+        _auction_no_signal_cycles=20,
+        config=SimpleNamespace(
+            risk=SimpleNamespace(auction_no_signal_close_persistence_cycles=8)
+        ),
+    )
+    assert _should_bypass_churn_cooldowns(lt, raw_positions=[{"symbol": "ETH/USD"}]) is False
+
+
+def test_should_bypass_churn_cooldowns_false_before_threshold():
+    lt = SimpleNamespace(
+        _auction_no_signal_cycles=7,
+        config=SimpleNamespace(
+            risk=SimpleNamespace(auction_no_signal_close_persistence_cycles=8)
+        ),
+    )
+    assert _should_bypass_churn_cooldowns(lt, raw_positions=[]) is False
+
+
+def test_should_bypass_churn_cooldowns_true_for_flat_sustained_no_signal_regime():
+    lt = SimpleNamespace(
+        _auction_no_signal_cycles=8,
+        config=SimpleNamespace(
+            risk=SimpleNamespace(auction_no_signal_close_persistence_cycles=8)
+        ),
+    )
+    assert _should_bypass_churn_cooldowns(lt, raw_positions=[]) is True
 
 
 def test_resolve_is_protective_orders_live_true_with_explicit_order_ids():
