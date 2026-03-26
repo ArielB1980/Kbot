@@ -7,6 +7,7 @@ from src.live.auction_runner import (
     _db_backed_cooldowns_enabled,
     _split_reconcile_issues,
     _filter_strategic_closes_for_gate,
+    _resolve_is_protective_orders_live,
     _resolve_symbol_cooldown_params,
     _score_std,
     _symbol_in_canary,
@@ -152,6 +153,33 @@ def test_symbol_in_canary_normalizes_symbols():
 
 def test_db_backed_cooldowns_enabled_by_default():
     assert _db_backed_cooldowns_enabled(SimpleNamespace()) is True
+
+
+def test_resolve_is_protective_orders_live_true_with_explicit_order_ids():
+    pos = SimpleNamespace(
+        stop_loss_order_id="sl-123",
+        tp_order_ids=[],
+        is_protected=False,
+    )
+    assert _resolve_is_protective_orders_live(pos, replay_relaxed=False) is True
+
+
+def test_resolve_is_protective_orders_live_replay_fallback_uses_protected_flag():
+    pos = SimpleNamespace(
+        stop_loss_order_id=None,
+        tp_order_ids=[],
+        is_protected=True,
+    )
+    assert _resolve_is_protective_orders_live(pos, replay_relaxed=True) is True
+
+
+def test_resolve_is_protective_orders_live_live_mode_keeps_strict_order_requirement():
+    pos = SimpleNamespace(
+        stop_loss_order_id=None,
+        tp_order_ids=[],
+        is_protected=True,
+    )
+    assert _resolve_is_protective_orders_live(pos, replay_relaxed=False) is False
 
 
 @pytest.mark.asyncio

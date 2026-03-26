@@ -207,6 +207,25 @@ def _symbol_in_canary(symbol: str, canary_symbols: List[str]) -> bool:
     }
 
 
+def _resolve_is_protective_orders_live(position, *, replay_relaxed: bool) -> bool:
+    """
+    Determine whether allocator safety checks should treat a position as protected.
+
+    In live mode we require concrete protective order ids.
+    In replay-relaxed mode we also trust a reconciled `is_protected` flag because
+    synthetic exchange snapshots may not always carry order identifiers.
+    """
+    has_order_ids = bool(
+        getattr(position, "stop_loss_order_id", None)
+        or getattr(position, "tp_order_ids", None)
+    )
+    if has_order_ids:
+        return True
+    if replay_relaxed and bool(getattr(position, "is_protected", False)):
+        return True
+    return False
+
+
 def _score_std(values: List[float]) -> float:
     if len(values) < 2:
         return 0.0
@@ -451,8 +470,9 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                         symbol=futures_symbol,
                     )
 
-                is_protective_live = pos.stop_loss_order_id is not None or (
-                    hasattr(pos, "tp_order_ids") and pos.tp_order_ids
+                is_protective_live = _resolve_is_protective_orders_live(
+                    pos,
+                    replay_relaxed=bool(getattr(lt, "_replay_relaxed_signal_gates", False)),
                 )
                 meta = position_to_open_metadata(
                     position=pos,
