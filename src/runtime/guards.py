@@ -83,6 +83,18 @@ def assert_prod_live_prereqs() -> None:
             "(legacy position management is not permitted)."
         )
 
+    replay_env_keys = sorted(
+        k for k, v in os.environ.items() if k.startswith("REPLAY_") and str(v).strip() != ""
+    )
+    if replay_env_keys:
+        sample = ", ".join(replay_env_keys[:8])
+        extra = len(replay_env_keys) - 8
+        suffix = f" (+{extra} more)" if extra > 0 else ""
+        raise RuntimeError(
+            "PROD_LIVE_GUARD_FAILED: REPLAY_* environment variables are not allowed in prod live. "
+            f"Remove these before restart: {sample}{suffix}."
+        )
+
 
 def _account_fingerprint_seed() -> str:
     # Prefer explicit, stable, non-secret seed (recommended for multi-venue setups).
@@ -323,4 +335,3 @@ def acquire_prod_live_lock(
     # Start a lightweight monitor: if connection drops, signal termination.
     lock.start_monitor(interval_seconds=int(_env("PROD_LIVE_LOCK_MONITOR_SECONDS", "30") or "30"))
     return lock
-

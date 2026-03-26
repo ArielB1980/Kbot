@@ -96,6 +96,13 @@ log_daemon() {
   echo "[$(date -u +%FT%TZ)] ${msg}" | tee -a "${LOG_DIR}/daemon.log"
 }
 
+write_latest_run_id() {
+  local run_id="$1"
+  local tmp_file="${LATEST_RUN_FILE}.tmp.$$"
+  printf '%s\n' "${run_id}" > "${tmp_file}"
+  mv "${tmp_file}" "${LATEST_RUN_FILE}"
+}
+
 bool_flag() {
   local raw="${1:-0}"
   local on="$2"
@@ -494,7 +501,7 @@ PY
   CONVERGENCE_FLAG="$(bool_flag "${UNTIL_CONVERGENCE}" "--until-convergence" "--no-until-convergence")"
   BACKFILL_FLAG="$(bool_flag "${AUTO_BACKFILL_DATA}" "--auto-backfill-data" "--no-auto-backfill-data")"
 
-  echo "${RUN_ID}" > "${LATEST_RUN_FILE}"
+  write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle start run_id=${RUN_ID}" | tee -a "${LOG_DIR}/daemon.log"
 
   (
@@ -527,6 +534,8 @@ PY
   load_notify_state "${NOTIFY_STATE_FILE}"
 
   while kill -0 "${RESEARCH_PID}" 2>/dev/null; do
+    # Keep watchdog/reporting pointers in sync even if another process rewrites state files.
+    write_latest_run_id "${RUN_ID}"
     PROG="$(poll_symbol_progress "${STATE_FILE}")"
     DONE="$(echo "${PROG}" | cut -d'|' -f1)"
     TOTAL="$(echo "${PROG}" | cut -d'|' -f2)"
@@ -557,7 +566,7 @@ current=${CURRENT_SYMBOL:-none}"
   RESEARCH_RC=$?
   set -e
 
-  echo "${RUN_ID}" > "${LATEST_RUN_FILE}"
+  write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle end run_id=${RUN_ID} rc=${RESEARCH_RC}" | tee -a "${LOG_DIR}/daemon.log"
 
   RUN_SUMMARY="$("${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
@@ -758,4 +767,3 @@ PY
 
   sleep "${SLEEP_SECONDS}"
 done
-

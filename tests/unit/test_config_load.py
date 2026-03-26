@@ -156,3 +156,60 @@ def test_symbol_override_resolvers():
     eth_risk = resolve_risk_for_symbol(risk, "ETH/USD")
     assert btc_risk.target_leverage == 3.0
     assert eth_risk.target_leverage == 7.0
+
+
+def test_live_research_overrides_are_clamped_on_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from src.config.config import load_config
+
+    overrides_path = tmp_path / "live_research_overrides.yaml"
+    overrides_path.write_text(
+        """
+strategy:
+  symbol_overrides:
+    ETH/USD:
+      entry_zone_tolerance_pct: 0.051473
+      fvg_min_size_pct: -0.000248
+risk:
+  symbol_overrides:
+    ETH/USD:
+      target_leverage: 999
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.setenv("RESEARCH_LIVE_OVERRIDES_PATH", str(overrides_path))
+    config = load_config(CONFIG_PATH)
+
+    eth_strategy = config.strategy.symbol_overrides["ETH/USD"]
+    assert eth_strategy.entry_zone_tolerance_pct == 0.05
+    assert eth_strategy.fvg_min_size_pct == 0.0001
+
+    eth_risk = config.risk.symbol_overrides["ETH/USD"]
+    assert eth_risk.target_leverage == 10.0
+
+
+def test_live_research_overrides_drop_non_numeric_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from src.config.config import load_config
+
+    overrides_path = tmp_path / "live_research_overrides.yaml"
+    overrides_path.write_text(
+        """
+strategy:
+  symbol_overrides:
+    BTC/USD:
+      adx_threshold: bad-input
+      signal_cooldown_hours: 2.0
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.setenv("RESEARCH_LIVE_OVERRIDES_PATH", str(overrides_path))
+    config = load_config(CONFIG_PATH)
+
+    btc_strategy = config.strategy.symbol_overrides["BTC/USD"]
+    assert btc_strategy.signal_cooldown_hours == 2.0
+    assert btc_strategy.adx_threshold is None

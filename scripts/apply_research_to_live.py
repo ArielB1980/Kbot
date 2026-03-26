@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -57,6 +58,21 @@ PROMOTION_MIN_NET_RETURN_PCT = -10.0
 PROMOTION_DRAWDOWN_RETURN_CAP_PCT = 20.0  # max drawdown when return < 2%
 PROMOTION_WEAK_RETURN_PCT = 2.0
 
+STRATEGY_OVERRIDE_BOUNDS: dict[str, tuple[float, float]] = {
+    "adx_threshold": (10.0, 40.0),
+    "fvg_min_size_pct": (0.0001, 0.01),
+    "entry_zone_tolerance_pct": (0.005, 0.05),
+    "entry_zone_tolerance_atr_mult": (0.1, 1.0),
+    "min_score_tight_smc_aligned": (0.0, 100.0),
+    "min_score_wide_structure_aligned": (0.0, 100.0),
+    "min_score_wide_structure_neutral": (0.0, 100.0),
+    "signal_cooldown_hours": (0.0, 24.0),
+    "tight_smc_atr_stop_min": (0.05, 1.0),
+    "tight_smc_atr_stop_max": (0.05, 1.0),
+    "wide_structure_atr_stop_min": (0.2, 2.0),
+    "wide_structure_atr_stop_max": (0.2, 2.0),
+}
+
 
 def _params_to_strategy_override(params: dict) -> dict:
     """Map research param keys (strategy.xyz) to StrategySymbolOverride dict (xyz only)."""
@@ -72,6 +88,41 @@ def _params_to_strategy_override(params: dict) -> dict:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _sanitize_strategy_overrides(raw: dict) -> tuple[dict, int]:
+    """
+    Clamp/drop malformed strategy overrides so live config remains startup-safe.
+    Returns (sanitized, change_count).
+    """
+    if not isinstance(raw, dict):
+        return {}, 0
+    sanitized: dict[str, dict] = {}
+    change_count = 0
+    for symbol, params in raw.items():
+        if not isinstance(params, dict):
+            change_count += 1
+            continue
+        symbol_payload: dict[str, float] = {}
+        for key, value in params.items():
+            if key not in STRATEGY_OVERRIDE_BOUNDS:
+                continue
+            lo, hi = STRATEGY_OVERRIDE_BOUNDS[key]
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                change_count += 1
+                continue
+            if not math.isfinite(parsed):
+                change_count += 1
+                continue
+            clamped = min(max(parsed, lo), hi)
+            if clamped != parsed:
+                change_count += 1
+            symbol_payload[key] = clamped
+        if symbol_payload:
+            sanitized[str(symbol)] = symbol_payload
+    return sanitized, change_count
 
 
 def load_best_by_symbol(path: Path) -> dict:
@@ -227,6 +278,8 @@ def main() -> None:
             existing_strategy = existing.get("strategy", {}).get("symbol_overrides") or {}
         except Exception:
             pass
+    existing_strategy, existing_fixups = _sanitize_strategy_overrides(existing_strategy)
+    strategy_overrides, generated_fixups = _sanitize_strategy_overrides(strategy_overrides)
     merged_strategy = {**existing_strategy, **strategy_overrides}
 
     payload = {
@@ -240,7 +293,10 @@ def main() -> None:
     with open(out_path, "w") as f:
         yaml.safe_dump(payload, f, default_flow_style=False, sort_keys=True)
 
+    total_fixups = existing_fixups + generated_fixups
     print(f"Wrote {len(merged_strategy)} symbol overrides and whitelist ({len(live_universe)} symbols) to {out_path}")
+    if total_fixups > 0:
+        print(f"Sanitized {total_fixups} malformed or out-of-range override value(s) during apply")
     if merged_strategy:
         for sym, ov in merged_strategy.items():
             print(f"  {sym}: {list(ov.keys())}")

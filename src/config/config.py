@@ -10,8 +10,37 @@ import yaml
 from pathlib import Path
 from decimal import Decimal
 import os
+import math
+import logging
 
 CONFIG_SCHEMA_VERSION = "2026-02-01"
+logger = logging.getLogger(__name__)
+
+LIVE_RESEARCH_STRATEGY_BOUNDS: dict[str, tuple[float, float]] = {
+    "adx_threshold": (10.0, 40.0),
+    "fvg_min_size_pct": (0.0001, 0.01),
+    "entry_zone_tolerance_pct": (0.005, 0.05),
+    "entry_zone_tolerance_atr_mult": (0.1, 1.0),
+    "min_score_tight_smc_aligned": (0.0, 100.0),
+    "min_score_wide_structure_aligned": (0.0, 100.0),
+    "min_score_wide_structure_neutral": (0.0, 100.0),
+    "signal_cooldown_hours": (0.0, 24.0),
+    "tight_smc_atr_stop_min": (0.05, 1.0),
+    "tight_smc_atr_stop_max": (0.05, 1.0),
+    "wide_structure_atr_stop_min": (0.2, 2.0),
+    "wide_structure_atr_stop_max": (0.2, 2.0),
+    "ema_slope_bonus": (0.0, 15.0),
+}
+
+LIVE_RESEARCH_RISK_BOUNDS: dict[str, tuple[float, float]] = {
+    "risk_per_trade_pct": (0.0001, 0.05),
+    "max_leverage": (1.0, 10.0),
+    "target_leverage": (1.0, 10.0),
+    "max_position_size_usd": (1000.0, 1000000.0),
+    "tight_smc_cost_cap_bps": (10.0, 50.0),
+    "tight_smc_min_rr_multiple": (1.5, 5.0),
+    "wide_structure_max_distortion_pct": (0.10, 0.25),
+}
 
 class ExchangeConfig(BaseSettings):
     """Exchange configuration."""
@@ -1044,6 +1073,71 @@ class SpotDCAConfig(BaseSettings):
 def _merge_live_research_overrides(config_dict: dict, yaml_path: Path) -> None:
     """Merge live_research_overrides.yaml into config_dict (strategy/risk symbol_overrides, optional assets)."""
     import os
+
+    def _coerce_finite_float(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
+
+    def _sanitize_symbol_overrides(
+        raw: Any,
+        *,
+        bounds: dict[str, tuple[float, float]],
+        section: str,
+        path_hint: Path,
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(raw, dict):
+            if raw:
+                logger.warning(
+                    "Ignoring malformed live research override section",
+                    extra={"section": section, "path": str(path_hint)},
+                )
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for symbol, params in raw.items():
+            if not isinstance(params, dict):
+                logger.warning(
+                    "Ignoring malformed live research symbol override",
+                    extra={"section": section, "symbol": str(symbol), "path": str(path_hint)},
+                )
+                continue
+            sanitized: dict[str, Any] = {}
+            for key, value in params.items():
+                if key not in bounds:
+                    sanitized[key] = value
+                    continue
+                lo, hi = bounds[key]
+                parsed = _coerce_finite_float(value)
+                if parsed is None:
+                    logger.warning(
+                        "Dropping non-numeric live research override value",
+                        extra={"section": section, "symbol": str(symbol), "key": key, "path": str(path_hint)},
+                    )
+                    continue
+                clamped = min(max(parsed, lo), hi)
+                if clamped != parsed:
+                    logger.warning(
+                        "Clamped out-of-range live research override value",
+                        extra={
+                            "section": section,
+                            "symbol": str(symbol),
+                            "key": key,
+                            "original": parsed,
+                            "clamped": clamped,
+                            "min": lo,
+                            "max": hi,
+                            "path": str(path_hint),
+                        },
+                    )
+                sanitized[key] = clamped
+            if sanitized:
+                out[str(symbol)] = sanitized
+        return out
+
     overrides_path = os.environ.get("RESEARCH_LIVE_OVERRIDES_PATH")
     if not overrides_path:
         overrides_path = Path(yaml_path).parent / "live_research_overrides.yaml"
@@ -1051,18 +1145,36 @@ def _merge_live_research_overrides(config_dict: dict, yaml_path: Path) -> None:
         overrides_path = Path(overrides_path)
     if not overrides_path.exists():
         return
-    with open(overrides_path, "r") as f:
-        overrides = yaml.safe_load(f) or {}
-    if overrides.get("strategy", {}).get("symbol_overrides"):
+    try:
+        with open(overrides_path, "r") as f:
+            overrides = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        logger.warning("Ignoring unreadable live research overrides file", extra={"path": str(overrides_path)})
+        return
+
+    strategy_symbol_overrides = _sanitize_symbol_overrides(
+        (overrides.get("strategy") or {}).get("symbol_overrides"),
+        bounds=LIVE_RESEARCH_STRATEGY_BOUNDS,
+        section="strategy.symbol_overrides",
+        path_hint=overrides_path,
+    )
+    risk_symbol_overrides = _sanitize_symbol_overrides(
+        (overrides.get("risk") or {}).get("symbol_overrides"),
+        bounds=LIVE_RESEARCH_RISK_BOUNDS,
+        section="risk.symbol_overrides",
+        path_hint=overrides_path,
+    )
+
+    if strategy_symbol_overrides:
         if "strategy" not in config_dict:
             config_dict["strategy"] = {}
         existing = config_dict["strategy"].get("symbol_overrides") or {}
-        config_dict["strategy"]["symbol_overrides"] = {**existing, **overrides["strategy"]["symbol_overrides"]}
-    if overrides.get("risk", {}).get("symbol_overrides"):
+        config_dict["strategy"]["symbol_overrides"] = {**existing, **strategy_symbol_overrides}
+    if risk_symbol_overrides:
         if "risk" not in config_dict:
             config_dict["risk"] = {}
         existing = config_dict["risk"].get("symbol_overrides") or {}
-        config_dict["risk"]["symbol_overrides"] = {**existing, **overrides["risk"]["symbol_overrides"]}
+        config_dict["risk"]["symbol_overrides"] = {**existing, **risk_symbol_overrides}
     if overrides.get("assets"):
         if "assets" not in config_dict:
             config_dict["assets"] = {}
