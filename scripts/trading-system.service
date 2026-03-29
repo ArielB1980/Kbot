@@ -7,7 +7,9 @@ Wants=postgresql.service
 Type=simple
 User=trading
 WorkingDirectory=/home/trading/TradingSystem
-EnvironmentFile=/home/trading/TradingSystem/.env.production
+EnvironmentFile=-/home/trading/TradingSystem/.env.production
+EnvironmentFile=-/home/trading/TradingSystem/.env
+Environment=ENVIRONMENT=prod
 Environment="PATH=/home/trading/TradingSystem/venv/bin:/usr/local/bin:/usr/bin"
 Environment="WITH_HEALTH=1"
 ExecStartPre=/home/trading/TradingSystem/venv/bin/python migrate_schema.py
