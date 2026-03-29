@@ -286,3 +286,50 @@ async def test_sync_with_exchange_persists_closed_positions_after_exit_hysteresi
     assert result["issues"] == [
         ("LTC/USD", "CLOSED_ON_EXCHANGE_MISSING_AFTER_EXIT: miss_count=2")
     ]
+
+
+@pytest.mark.parametrize(
+    "purpose",
+    [OrderPurpose.EXIT_TP, OrderPurpose.EXIT_REVERSAL],
+    ids=["tp", "reversal"],
+)
+async def test_poll_and_process_detects_tp_and_reversal_fills(purpose):
+    """EXIT_TP and EXIT_REVERSAL orders must be polled (KBO-40 fix)."""
+    gateway = _build_gateway()
+
+    pending = PendingOrder(
+        client_order_id="exit-tp-1",
+        position_id="pos-1",
+        symbol="BTC/USD",
+        purpose=purpose,
+        side=Side.SHORT,
+        size=Decimal("0.5"),
+        price=Decimal("55000"),
+        order_type=OrderType.LIMIT,
+        submitted_at=datetime.now(timezone.utc),
+        exchange_order_id="exchange-tp-1",
+        status="submitted",
+    )
+    gateway._pending_orders[pending.client_order_id] = pending
+    gateway._order_id_map["exchange-tp-1"] = pending.client_order_id
+
+    gateway.client.fetch_order = AsyncMock(
+        return_value={
+            "id": "exchange-tp-1",
+            "clientOrderId": "exit-tp-1",
+            "status": "closed",
+            "filled": "0.5",
+            "remaining": "0.0",
+            "average": "55000",
+            "trades": [],
+        }
+    )
+    # Return a non-empty list so poll_and_process counts it as processed
+    gateway.position_manager.handle_order_event.return_value = [MagicMock()]
+    gateway.registry.get_position.return_value = None
+
+    processed = await gateway.poll_and_process_order_updates()
+
+    # Verify the TP/reversal order was polled and processed
+    gateway.client.fetch_order.assert_called_once_with("exchange-tp-1", "BTC/USD")
+    assert processed == 1

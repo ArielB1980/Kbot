@@ -11,3 +11,7 @@
 ## 2026-03-15
 - Pattern: When research quality is low due to missing timeframe coverage, proposing gating/bypass without first exhausting data acquisition violates user intent.
 - Guardrail: For replay/data-quality failures, always prioritize fetching required candles (all required symbols/timeframes with freshness targets), verify coverage evidence, and only then run optimization.
+
+## 2026-03-24
+- Pattern: A local `TradingSystem` clone can have **broken git objects** (`unable to read tree`, `bad object` on fetch, `fsck` broken links) while the working tree still has valid files—`git pull`/`rebase` then cannot integrate `origin/main`.
+- Guardrail: After committing fixes locally, export a **unified diff against `origin/main`** (see `patches/kbo-47-against-origin-main.patch`; apply with `git apply` on a healthy clone checked out to GitHub `main`). If `.git` is corrupted (`unable to read tree`), re-clone or repair before `push`/`pull`; `git format-patch` from a broken repo can misrepresent history.

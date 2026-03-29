@@ -31,6 +31,7 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.bos_volume_threshold_mult",
     "strategy.fib_proximity_adaptive_scale",
     "strategy.fib_proximity_max_bps",
+    "strategy.structure_fallback_score_premium",
 )
 
 # Hard lock these paths even if they appear in future candidate generation logic.

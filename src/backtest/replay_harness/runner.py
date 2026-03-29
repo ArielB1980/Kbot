@@ -464,6 +464,42 @@ class BacktestRunner:
                     symbols=[s.symbol_ccxt for s in synthetic_specs],
                 )
 
+        # Pre-populate instrument spec registry with synthetic specs for replay symbols.
+        # Without this, the auction runner rejects every signal with NO_SPEC because
+        # the replay exchange doesn't implement get_instruments().
+        if hasattr(lt, "instrument_spec_registry"):
+            import time as _time
+
+            from src.execution.instrument_specs import InstrumentSpec
+            synthetic_specs: list[InstrumentSpec] = []
+            for sym in self._symbols:
+                base = sym.split("/")[0] if "/" in sym else sym
+                # BTC -> XBT for Kraken raw format
+                raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
+                synthetic_specs.append(InstrumentSpec(
+                    symbol_raw=f"PF_{raw_base}USD",
+                    symbol_ccxt=f"{base.upper()}/USD:USD",
+                    base=base.upper(),
+                    quote="USD",
+                    contract_size=Decimal("1"),
+                    min_size=Decimal("1") if raw_base == "XBT" else Decimal("1"),
+                    size_step=Decimal("1"),
+                    size_step_source="replay_synthetic",
+                    price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
+                    max_leverage=50,
+                    leverage_mode="flexible",
+                    supports_reduce_only=True,
+                    last_updated_ts=_time.time(),
+                ))
+            if synthetic_specs:
+                lt.instrument_spec_registry._index(synthetic_specs)
+                lt.instrument_spec_registry._loaded_at = _time.time()
+                logger.info(
+                    "REPLAY_SYNTHETIC_SPECS_LOADED",
+                    count=len(synthetic_specs),
+                    symbols=[s.symbol_ccxt for s in synthetic_specs],
+                )
+
         # Advance startup state machine to READY so _tick() is allowed.
         # In real production, LiveTrading.run() goes through SYNCING →
         # RECONCILING → READY. In replay we skip that (no real exchange

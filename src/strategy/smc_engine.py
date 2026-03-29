@@ -558,7 +558,8 @@ class SMCEngine:
         
         structures = {}
         regime_early = None
-        
+        used_fallback_tf = False  # Tier 2 (KBO-13): tracks if 1H fallback was used
+
         if signal is None:
             # Detect structure on decision timeframe
             structure_decision = self._detect_structure(
@@ -598,6 +599,44 @@ class SMCEngine:
                     }
                 }
                 has_decision_structure = True
+
+            # Tier 2 (KBO-13): 1H structure fallback when no 4H structure exists
+            if (
+                not has_decision_structure
+                and bool(getattr(self.config, "structure_fallback_enabled", False))
+                and decision_tf_label == "4H"
+                and refine_candles_1h
+            ):
+                structure_fallback = self._detect_structure(
+                    refine_candles_1h,
+                    refine_candles_1h,
+                    bias,
+                    reasoning_parts,
+                    symbol=symbol,
+                )
+                has_fallback = (
+                    structure_fallback
+                    and (
+                        structure_fallback.get("order_block")
+                        or structure_fallback.get("fvg")
+                        or structure_fallback.get("bos")
+                    )
+                )
+                if has_fallback:
+                    structure_decision = structure_fallback
+                    has_decision_structure = True
+                    used_fallback_tf = True
+                    reasoning_parts.append(
+                        "⚠️ 1H Fallback Structure Used (score premium applies)"
+                    )
+                    logger.info(
+                        "1H fallback structure found",
+                        symbol=symbol,
+                        fallback_structure_type=next(
+                            (k for k in ("order_block", "fvg", "bos") if structure_fallback.get(k)),
+                            "unknown",
+                        ),
+                    )
 
             if not has_decision_structure:
                 reasoning_parts.append(f"❌ No valid {decision_tf_label} decision structure")
@@ -1107,6 +1146,16 @@ class SMCEngine:
                         ev_result = self.ev_engine.compute(ev_inputs)
                         self.ev_engine.log_ev_trace(ev_result, ev_inputs)
                     
+                    # Tier 2 (KBO-13): Apply score premium for 1H fallback signals
+                    if used_fallback_tf:
+                        fallback_premium = float(
+                            getattr(self.config, "structure_fallback_score_premium", 15.0)
+                        )
+                        score_obj.total_score -= fallback_premium
+                        reasoning_parts.append(
+                            f"📊 1H fallback score premium: -{fallback_premium:.0f} points"
+                        )
+
                     # GATE: Check score
                     passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias)
                     
@@ -1260,6 +1309,7 @@ class SMCEngine:
                                 },
                                 "thesis": thesis_snapshot or {},
                                 "decision_id": decision_id,
+                                "structure_source": "1h_fallback" if used_fallback_tf else "4h_decision",
                             }
                         )
                 elif signal is None:

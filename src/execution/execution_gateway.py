@@ -1497,6 +1497,17 @@ class ExecutionGateway:
                     t_price = Decimal(str(t.get("price", 0)))
                     
                     if t_side == exit_side_str and t_amount > 0 and t_price > 0:
+                        # Guard: prevent exit fills from exceeding entry qty
+                        if position.filled_exit_qty + t_amount > entry_qty:
+                            logger.warning(
+                                "Skipping backfill exit fill that would exceed entry qty",
+                                symbol=symbol,
+                                trade_id=t.get("id"),
+                                exit_qty_so_far=str(position.filled_exit_qty),
+                                fill_amount=str(t_amount),
+                                entry_qty=str(entry_qty),
+                            )
+                            continue
                         fill = FillRecord(
                             fill_id=f"backfill-trade-{t.get('id', 'unknown')}",
                             order_id=t.get("order", "unknown"),

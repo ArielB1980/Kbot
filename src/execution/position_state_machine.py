@@ -606,6 +606,33 @@ class ManagedPosition:
             self._snapshot_targets_on_entry_fill(event)
             self._update_state_after_entry_fill()
         elif is_exit:
+            # Guard: skip exit fills on terminal positions or when already fully exited
+            remaining_before = self.filled_entry_qty - sum(f.qty for f in self.exit_fills)
+            if self.is_terminal or remaining_before <= 0:
+                logger.warning(
+                    "Ignoring exit fill on closed/terminal position",
+                    symbol=self.symbol,
+                    order_id=event.order_id,
+                    state=str(self.state),
+                )
+                return False
+            # Guard: cap exit fill qty at remaining to prevent INVARIANT B violation
+            if fill.qty > remaining_before:
+                logger.critical(
+                    "Exit fill exceeds remaining qty — capping to prevent INVARIANT B violation",
+                    symbol=self.symbol,
+                    fill_qty=str(fill.qty),
+                    remaining=str(remaining_before),
+                )
+                fill = FillRecord(
+                    fill_id=fill.fill_id,
+                    order_id=fill.order_id,
+                    side=fill.side,
+                    qty=remaining_before,
+                    price=fill.price,
+                    timestamp=fill.timestamp,
+                    is_entry=fill.is_entry,
+                )
             self.exit_fills.append(fill)
             if is_tp1:
                 self.tp1_filled = True
