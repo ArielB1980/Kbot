@@ -72,8 +72,8 @@ risk:
   auction_max_per_cluster: 8  # Maximum positions per cluster (balanced for 25 positions)
   auction_max_per_symbol: 1  # Maximum positions per symbol
   auction_swap_threshold: 18.0  # R4: Tighter swap gate to reduce marginal rotation churn — was 14.0
-  auction_min_hold_minutes: 90  # R3: Let 4H theses develop — was 45, still timing out before TP
-  auction_min_hold_high_conviction_minutes: 90  # KBO-55: halve lock window, double rotation speed (was 180)  # R3: Extended hold for high-conviction — was 120
+  auction_min_hold_minutes: 240  # R5: Match 4H decision authority (was 90)
+  auction_min_hold_high_conviction_minutes: 480  # R5: 8h hold for high-conviction (was 180)
   auction_min_hold_high_conviction_threshold: 50.0  # Apply extended hold when conviction >= this level
   auction_pnl_positive_lock_enabled: true  # R4: Protect profitable positions from auction rotation
   auction_pnl_positive_lock_max_minutes: 60  # R4: Max extra lock time after min_hold for profitable positions

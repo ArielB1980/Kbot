@@ -176,11 +176,11 @@ class RiskConfig(BaseSettings):
     auction_max_per_cluster: int = Field(default=8, ge=1, le=50)  # Balanced for 25 positions (was 12)
     auction_max_per_symbol: int = Field(default=1, ge=1, le=5)
     auction_swap_threshold: float = Field(default=10.0, ge=0.0, le=50.0)
-    auction_min_hold_minutes: int = Field(default=15, ge=0, le=120)
+    auction_min_hold_minutes: int = Field(default=15, ge=0, le=480)
     auction_min_hold_high_conviction_minutes: int = Field(
         default=120,
         ge=0,
-        le=360,
+        le=480,
         description="Minimum hold for high-conviction positions before strategic auction closes",
     )
     auction_min_hold_high_conviction_threshold: float = Field(
