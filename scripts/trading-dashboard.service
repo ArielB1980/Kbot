@@ -1,0 +1,19 @@
+[Unit]
+Description=Trading Dashboard Health API
+After=network.target
+
+[Service]
+Type=simple
+User=trading
+WorkingDirectory=/home/trading/TradingSystem
+EnvironmentFile=/home/trading/TradingSystem/.env
+Environment=ENVIRONMENT=prod
+Environment="PATH=/home/trading/TradingSystem/venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/home/trading/TradingSystem/venv/bin/python -m src.health
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/trading/TradingSystem/logs/trading-dashboard.log
+StandardError=append:/home/trading/TradingSystem/logs/trading-dashboard-error.log
+
+[Install]
+WantedBy=multi-user.target

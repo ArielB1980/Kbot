@@ -10,7 +10,7 @@
 
 **Production = `python -m src.entrypoints.prod_live` → `LiveTrading`. Not `run.py`, `main.py`, or `main_with_health`.**
 
-Data acquisition, strategy (SMC), risk, and execution all run inside the `LiveTrading` loop. The dashboard and health service can run as separate App Platform components. If a platform requires the worker to bind an HTTP port, set `WITH_HEALTH=1` so the worker serves `/`, `/health`, `/api/metrics`, etc.
+Data acquisition, strategy (SMC), risk, and execution all run inside the `LiveTrading` loop. Health API serving can run as a dedicated service (`python -m src.health`) or from the worker via `WITH_HEALTH=1` when the platform requires a bound HTTP port.
 
 **DigitalOcean / App Platform:**
 
@@ -52,4 +52,4 @@ Replaced with a deprecation stub that exits with code 1 and prints the correct e
 |--------------|-------------------------------------|-----------------------------------|
 | Web / health | `python -m src.health`              | -                                 |
 | Worker       | `python -m src.entrypoints.prod_live` → `LiveTrading` | `run.py live`, `main.py` (main_with_health removed) |
-| Dashboard    | Streamlit app                       | -                                 |
+| Dashboard unit (`trading-dashboard.service`) | `python -m src.health` with `EnvironmentFile=.env` and `ENVIRONMENT=prod` | Streamlit entrypoint in systemd unit |

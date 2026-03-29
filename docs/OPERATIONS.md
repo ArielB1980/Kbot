@@ -24,6 +24,14 @@ make deploy          # commit, push, SSH pull, restart service
 ./scripts/deploy.sh
 ```
 
+`scripts/deploy.sh` now treats repo-managed systemd units as source of truth:
+
+- installs `scripts/trading-system.service` as `trading-bot.service`
+- installs `scripts/trading-dashboard.service` as `trading-dashboard.service` (if present)
+- runs `systemctl daemon-reload`
+- restarts both services and prints status
+- probes `127.0.0.1:8080` on `/api`, `/api/health`, `/api/ready`, `/api/metrics`
+
 ## Research -> Live Automation (Production)
 
 ### Daily apply job
