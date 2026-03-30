@@ -8,7 +8,14 @@ DEPLOY_SSH_KEY ?= $(HOME)/.ssh/trading_droplet
 DEPLOY_TRADING_USER ?= trading
 DEPLOY_TRADING_DIR ?= /home/trading/TradingSystem
 
-.PHONY: help venv install run smoke logs smoke-logs test test-server lint format integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep research-start research-status research-pause research-resume research-stop research-promote research-logs research-cleanup research-schedule-install research-schedule-status research-schedule-remove research-continuous-start research-continuous-status research-continuous-stop daily-apply-research audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
+# Telemetry / local DB tunnel (override if your SSH host differs)
+STATS_SSH_HOST ?= kbot
+STATS_LOCAL_PORT ?= 5433
+CHECK_STATS_HOURS ?= 2
+# Astral ty — full src/ is noisy; narrow with TY_PATHS="src/a.py src/b.py"
+TY_PATHS ?= scripts/check_stats.py
+
+.PHONY: help venv install run smoke logs smoke-logs test test-server lint format typecheck integration pre-deploy deploy deploy-quick deploy-live backfill backtest-quick backtest-full replay replay-episode replay-sweep research-start research-status research-pause research-resume research-stop research-promote research-logs research-cleanup research-schedule-install research-schedule-status research-schedule-remove research-continuous-start research-continuous-status research-continuous-stop daily-apply-research audit audit-cancel audit-orphaned place-missing-stops place-missing-stops-live cancel-all-place-stops cancel-all-place-stops-live list-needing-protection check-signals check-stats check-stats-remote stats-tunnel safety-reset safety-reset-soft safety-reset-hard clean clean-logs status validate
 
 help:
 	@echo "Available commands:"
@@ -51,6 +58,10 @@ help:
 	@echo "  make cancel-all-place-stops       Cancel ALL orders, dry-run place SL per position"
 	@echo "  make cancel-all-place-stops-live  Cancel ALL orders, then place SL per position (STOP_PCT=2)"
 	@echo "  make check-signals  Fetch worker logs, verify system is scanning for signals (needs DO_API_TOKEN)"
+	@echo "  make stats-tunnel     SSH port-forward kbot Postgres to localhost:$(STATS_LOCAL_PORT) (keep terminal open)"
+	@echo "  make check-stats      Run scripts/check_stats.py (needs DATABASE_URL; use after stats-tunnel or local DB)"
+	@echo "  make check-stats-remote  Run check_stats on the trading host via SSH (no tunnel; uses server .env)"
+	@echo "  make typecheck        Astral ty ($(TY_PATHS); override TY_PATHS=...)"
 	@echo "  make safety-reset  Show current safety state (dry-run)"
 	@echo "  make safety-reset-soft  Clear halt + kill switch + peak (requires --i-understand)"
 	@echo "  make test          Run unit tests"
@@ -438,6 +449,21 @@ check-signals:
 		echo "❌ .env.local not found. Add DO_API_TOKEN for remote log fetch."; \
 		exit 1; \
 	fi
+
+stats-tunnel:
+	@echo "Tunnel: localhost:$(STATS_LOCAL_PORT) -> $(STATS_SSH_HOST):5432 (leave this running; then: make check-stats)"
+	ssh -N -L $(STATS_LOCAL_PORT):127.0.0.1:5432 $(STATS_SSH_HOST)
+
+check-stats:
+	@if [ -f .env.local ]; then set -a; source .env.local; set +a; fi; \
+	uv run python scripts/check_stats.py --hours $(CHECK_STATS_HOURS)
+
+check-stats-remote:
+	@echo "Running check_stats on $(STATS_SSH_HOST) in $(DEPLOY_TRADING_DIR)..."
+	ssh $(STATS_SSH_HOST) "cd $(DEPLOY_TRADING_DIR) && sudo -u $(DEPLOY_TRADING_USER) bash -lc 'set -a && . ./.env && set +a && ./venv/bin/python scripts/check_stats.py --hours $(CHECK_STATS_HOURS)'"
+
+typecheck:
+	uv run ty check $(TY_PATHS)
 
 safety-reset:
 	@if [ -f .env.local ]; then set -a; source .env.local; set +a; fi; \

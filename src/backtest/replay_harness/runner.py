@@ -449,6 +449,10 @@ class BacktestRunner:
         # DB-backed cooldowns are calibrated for live trading and wall-clock
         # time; using them in replay contaminates research with live history.
         lt._replay_disable_db_backed_cooldowns = True
+        # Production halt_state.json must not zero out replay ticks when research
+        # runs on the same host as live (KBO-137 / invariant monitor isolation).
+        if getattr(lt, "hardening", None) is not None:
+            lt.hardening.ignore_persisted_halt = True
 
         # Pre-populate instrument spec registry with synthetic specs for replay symbols.
         # Without this, the auction runner rejects every signal with NO_SPEC because

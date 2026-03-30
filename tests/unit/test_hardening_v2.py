@@ -151,6 +151,29 @@ class TestSelfTest:
         assert not success
         assert any("PERSISTED HALT STATE EXISTS" in e for e in errors)
 
+    @pytest.mark.asyncio
+    async def test_pre_tick_ignores_persisted_halt_when_replay_flag(self, hardening_layer, temp_state_dir):
+        """Replay harness must not treat production halt_state.json as a tick-level HALT."""
+        halt_file = temp_state_dir / "halt_state.json"
+        halt_state = PersistedHaltState(
+            state="halted",
+            reason="test halt",
+            violations=["test violation"],
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            run_id="test_run",
+        )
+        halt_file.write_text(json.dumps(halt_state.to_dict()))
+        hardening_layer.ignore_persisted_halt = True
+
+        decision = await hardening_layer.pre_tick_check(
+            current_equity=Decimal("100000"),
+            open_positions=[],
+            margin_utilization=Decimal("0"),
+            available_margin=Decimal("100000"),
+        )
+        assert decision != HardeningDecision.HALT
+        hardening_layer.post_tick_cleanup()
+
 
 class TestGateEnforcement:
     """Test gate assertion."""

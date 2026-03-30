@@ -159,7 +159,10 @@ class ProductionHardeningLayer:
         # State persistence
         self._state_dir = state_dir or self.DEFAULT_STATE_DIR
         self._state_file = self._state_dir / self.STATE_FILE
-        
+        # Replay / research harness: do not block ticks on production halt_state.json
+        self.ignore_persisted_halt: bool = False
+        self._replay_halt_skip_logged: bool = False
+
         # Gate tracking
         self._gate_checked_this_tick = False
         self._gate_decision: Optional[HardeningDecision] = None
@@ -565,15 +568,26 @@ class ProductionHardeningLayer:
         
         # 0. Check for persisted HALT state (survives restarts)
         if self.is_halted():
-            halt_state = self._load_halt_state()
-            logger.critical(
-                "PERSISTED_HALT_STATE_ACTIVE",
-                state=halt_state.state if halt_state else "unknown",
-                reason=halt_state.reason if halt_state else "unknown",
-                message="Call clear_halt() to resume trading",
-            )
-            self._gate_decision = HardeningDecision.HALT
-            return HardeningDecision.HALT
+            if self.ignore_persisted_halt:
+                if not self._replay_halt_skip_logged:
+                    self._replay_halt_skip_logged = True
+                    logger.info(
+                        "REPLAY_IGNORE_PRODUCTION_PERSISTED_HALT",
+                        message=(
+                            "Replay harness ignores production halt_state.json; "
+                            "live trading still requires clear_halt()"
+                        ),
+                    )
+            else:
+                halt_state = self._load_halt_state()
+                logger.critical(
+                    "PERSISTED_HALT_STATE_ACTIVE",
+                    state=halt_state.state if halt_state else "unknown",
+                    reason=halt_state.reason if halt_state else "unknown",
+                    message="Call clear_halt() to resume trading",
+                )
+                self._gate_decision = HardeningDecision.HALT
+                return HardeningDecision.HALT
         
         # 1. Acquire cycle lock (async)
         if not self._lock_held:
