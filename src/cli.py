@@ -24,6 +24,28 @@ app = typer.Typer(
 logger = get_logger(__name__)
 
 
+def _configure_replay_state_isolation(mode: str, state_file: Path) -> dict[str, str]:
+    """Isolate replay safety state from live state files unless explicitly overridden."""
+    if mode != "replay":
+        return {}
+
+    base_dir = state_file.parent
+    base_dir.mkdir(parents=True, exist_ok=True)
+    applied: dict[str, str] = {}
+
+    if not os.environ.get("KILL_SWITCH_STATE_PATH"):
+        path = str((base_dir / "kill_switch_state.replay.json").resolve())
+        os.environ["KILL_SWITCH_STATE_PATH"] = path
+        applied["KILL_SWITCH_STATE_PATH"] = path
+
+    if not os.environ.get("SAFETY_STATE_PATH"):
+        path = str((base_dir / "safety_state.replay.json").resolve())
+        os.environ["SAFETY_STATE_PATH"] = path
+        applied["SAFETY_STATE_PATH"] = path
+
+    return applied
+
+
 def _load_config(config_path: Path):
     """
     Lazy import: keep config loading out of module import time.
@@ -679,8 +701,16 @@ def research(
     """
     Run sandbox autoresearch loop for strategy parameter optimization.
     """
+    applied_state_overrides = _configure_replay_state_isolation(mode, state_file)
+
     config = _load_config(config_path)
     _setup_logging_from_config(config)
+    if applied_state_overrides:
+        logger.info(
+            "Replay state isolation enabled",
+            mode=mode,
+            **applied_state_overrides,
+        )
     symbol_tuple = tuple(x.strip() for x in symbols.split(",") if x.strip())
     if symbols_from_config_universe:
         from src.data.fiat_currencies import has_disallowed_base
