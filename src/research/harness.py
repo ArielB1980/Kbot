@@ -14,7 +14,7 @@ from typing import Callable
 from src.config.config import Config
 from src.monitoring.logger import get_logger
 from src.monitoring.telegram_bot import send_telegram_message
-from src.research.allowlist import AllowlistPolicy
+from src.research.allowlist import PARAMETER_BOUNDS, AllowlistPolicy
 from src.research.evaluator import CandidateEvaluator, EvaluationSpec
 from src.research.kpi import score_candidate
 from src.research.models import CandidateResult
@@ -63,7 +63,7 @@ class HarnessConfig:
     mutate_params_per_candidate: int = 6
     mutate_step_pct: float = 0.25
     random_restart_every_n: int = 10
-    uninformative_surface_probe_count: int = 4
+    uninformative_surface_probe_count: int = 12
 
 
 class SandboxAutoresearchHarness:
@@ -334,6 +334,7 @@ class SandboxAutoresearchHarness:
             stagnation = 0
             uninformative_streak = 0
             iteration = 0
+            zero_trade_baseline = int(baseline.metrics.trade_count) == 0
             hard_cap = max(1, int(self.cfg.max_iterations_per_symbol if self.cfg.until_convergence else self.cfg.iterations))
             self.store.update_symbol_progress(
                 symbol=symbol,
@@ -378,7 +379,10 @@ class SandboxAutoresearchHarness:
                 await self._wait_while_paused()
                 iteration += 1
                 candidate_id = f"{safe_symbol}_c{iteration:03d}"
-                if self.cfg.random_restart_every_n > 0 and iteration % int(self.cfg.random_restart_every_n) == 0:
+                if zero_trade_baseline and iteration <= 6:
+                    # Aggressively explore when baseline produces no trades
+                    params = self._widen_for_zero_trade_baseline()
+                elif self.cfg.random_restart_every_n > 0 and iteration % int(self.cfg.random_restart_every_n) == 0:
                     params = self._random_restart_params()
                 else:
                     params = self._mutate_params(best.params)
@@ -557,6 +561,14 @@ class SandboxAutoresearchHarness:
             reasons.append("Weak risk-adjusted profile across split windows")
         return (len(reasons) == 0, reasons)
 
+    @staticmethod
+    def _clamp_param(key: str, value: float) -> float:
+        """Clamp a parameter to its allowed bounds if defined."""
+        bounds = PARAMETER_BOUNDS.get(key)
+        if bounds:
+            return max(bounds[0], min(bounds[1], value))
+        return value
+
     def _read_params_from_config(self, config: Config) -> dict[str, float]:
         out: dict[str, float] = {}
         for key in self._param_keys:
@@ -565,20 +577,46 @@ class SandboxAutoresearchHarness:
             out[key] = float(getattr(section, attr))
         return out
 
-    def _mutate_params(self, source: dict[str, float]) -> dict[str, float]:
+    def _mutate_params(
+        self,
+        source: dict[str, float],
+        step_multiplier: float = 1.0,
+    ) -> dict[str, float]:
         candidate = dict(source)
         mutate_count = max(1, int(self.cfg.mutate_params_per_candidate))
         keys_to_mutate = self.rng.sample(self._param_keys, k=min(mutate_count, len(self._param_keys)))
         for key in keys_to_mutate:
             value = candidate[key]
-            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct))
+            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct)) * step_multiplier
             delta = self.rng.uniform(-step, step)
-            candidate[key] = round(value + delta, 6)
+            candidate[key] = self._clamp_param(key, round(value + delta, 6))
         return candidate
 
     def _random_restart_params(self) -> dict[str, float]:
         """Sample a fresh candidate around baseline to escape local flats."""
         return self._mutate_params(self._baseline_params)
+
+    def _widen_for_zero_trade_baseline(self) -> dict[str, float]:
+        """Aggressively loosen gate parameters when baseline produces 0 trades.
+
+        Instead of random mutation, this deliberately lowers score thresholds
+        and ADX gates to find the region of parameter space where the strategy
+        actually fires signals.
+        """
+        from src.research.allowlist import PARAMETER_BOUNDS
+
+        candidate = dict(self._baseline_params)
+        gate_keys = [
+            k for k in self._param_keys
+            if any(tok in k for tok in ("min_score", "adx_threshold", "cooldown"))
+        ]
+        for key in gate_keys:
+            bounds = PARAMETER_BOUNDS.get(key)
+            if bounds:
+                lo, hi = bounds
+                # Bias toward the permissive (lower) end of the range
+                candidate[key] = round(self.rng.uniform(lo, lo + (hi - lo) * 0.4), 6)
+        return candidate
 
     def _is_behavior_unchanged(self, candidate: CandidateResult, baseline: CandidateResult) -> bool:
         """Detect when candidate produces no meaningful behavior change vs baseline."""

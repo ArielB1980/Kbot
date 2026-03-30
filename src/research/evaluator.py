@@ -6,6 +6,7 @@ import asyncio
 import csv
 import hashlib
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -277,6 +278,26 @@ class CandidateEvaluator:
         normalized = [metrics_from_backtest(m, self.spec.starting_equity) for m in all_metrics]
         return _average_metrics(normalized)
 
+    @staticmethod
+    @contextmanager
+    def _suppress_replay_override_env_vars():
+        """Temporarily remove REPLAY_OVERRIDE_* env vars so research mutations take effect.
+
+        The continuous daemon exports REPLAY_OVERRIDE_* env vars for promotion
+        validation.  These override the very config parameters that the research
+        harness is mutating, making all candidates behave identically to
+        baseline ("uninformative surface").  We strip them during evaluation so
+        that config_overrides from the harness actually reach the strategy.
+        """
+        saved: dict[str, str] = {}
+        for key in list(os.environ):
+            if key.startswith("REPLAY_OVERRIDE_"):
+                saved[key] = os.environ.pop(key)
+        try:
+            yield
+        finally:
+            os.environ.update(saved)
+
     async def _run_aggregate_replay_for_period(
         self,
         params: dict[str, float],
@@ -298,22 +319,23 @@ class CandidateEvaluator:
                 paused_ratios.append(1.0)
                 continue
             try:
-                runner = BacktestRunner(
-                    data_dir=Path(self.spec.replay_data_dir),
-                    symbols=[symbol],
-                    start=start_date,
-                    end=end_date,
-                    tick_interval_seconds=900,
-                    max_ticks=max(1, int(self.spec.replay_max_ticks)),
-                    timeframes=list(self.spec.replay_timeframes),
-                    config_overrides=params,
-                    disable_cycle_guard_throttle=True,
-                    disable_db_mock=bool(os.getenv("DATABASE_URL", "").strip()),
-                )
-                replay = await asyncio.wait_for(
-                    runner.run(),
-                    timeout=max(1, int(self.spec.replay_eval_timeout_seconds)),
-                )
+                with self._suppress_replay_override_env_vars():
+                    runner = BacktestRunner(
+                        data_dir=Path(self.spec.replay_data_dir),
+                        symbols=[symbol],
+                        start=start_date,
+                        end=end_date,
+                        tick_interval_seconds=900,
+                        max_ticks=max(1, int(self.spec.replay_max_ticks)),
+                        timeframes=list(self.spec.replay_timeframes),
+                        config_overrides=params,
+                        disable_cycle_guard_throttle=True,
+                        disable_db_mock=bool(os.getenv("DATABASE_URL", "").strip()),
+                    )
+                    replay = await asyncio.wait_for(
+                        runner.run(),
+                        timeout=max(1, int(self.spec.replay_eval_timeout_seconds)),
+                    )
                 summary = replay.summary()
                 paused_ratio = float((summary.get("system") or {}).get("trade_paused_ratio", 0.0))
                 paused_ratios.append(paused_ratio)

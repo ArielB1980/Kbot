@@ -34,6 +34,26 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.structure_fallback_score_premium",
 )
 
+# Min/max bounds per parameter to prevent degenerate values.
+PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
+    "strategy.adx_threshold": (8.0, 40.0),
+    "strategy.fvg_min_size_pct": (0.0001, 0.01),
+    "strategy.entry_zone_tolerance_pct": (0.5, 5.0),
+    "strategy.entry_zone_tolerance_atr_mult": (0.05, 1.5),
+    "strategy.min_score_tight_smc_aligned": (30.0, 95.0),
+    "strategy.min_score_wide_structure_aligned": (30.0, 95.0),
+    "strategy.signal_cooldown_hours": (0.0, 24.0),
+    "strategy.tight_smc_atr_stop_min": (0.05, 0.8),
+    "strategy.tight_smc_atr_stop_max": (0.1, 1.5),
+    "strategy.wide_structure_atr_stop_min": (0.1, 1.5),
+    "strategy.wide_structure_atr_stop_max": (0.2, 2.5),
+    "strategy.ema_slope_bonus": (0.0, 15.0),
+    "strategy.bos_volume_threshold_mult": (0.5, 3.0),
+    "strategy.fib_proximity_adaptive_scale": (0.0, 1.0),
+    "strategy.fib_proximity_max_bps": (10.0, 120.0),
+    "strategy.structure_fallback_score_premium": (0.0, 20.0),
+}
+
 # Hard lock these paths even if they appear in future candidate generation logic.
 DENIED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.decision_timeframes",
