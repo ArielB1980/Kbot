@@ -9,47 +9,43 @@ This ensures:
 3. No bypass paths for order placement
 4. Audit trail for all execution
 """
-from dataclasses import dataclass, field
-from decimal import Decimal
-from enum import Enum
-from typing import Callable, Optional, Dict, List, Callable, Awaitable
-from datetime import datetime, timezone
 import asyncio
 import os
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from enum import Enum
+from typing import Awaitable, Callable, Dict, List, Optional
 
-from src.execution.position_state_machine import (
-    ManagedPosition,
-    PositionRegistry,
-    PositionState,
-    OrderEvent,
-    OrderEventType,
-    ExitReason,
-    normalize_exit_reason,
-    get_position_registry
-)
-from src.execution.position_manager_v2 import (
-    PositionManagerV2,
-    ManagementAction,
-    ActionType
-)
-from src.execution.position_persistence import PositionPersistence
-from src.execution.production_safety import (
-    SafetyConfig,
-    AtomicStopReplacer,
-    WriteAheadIntentLog,
-    EventOrderingEnforcer,
-    ActionIntent,
-    ActionIntentStatus,
-)
-from src.domain.models import Side, OrderType
-from src.monitoring.logger import get_logger
+from src.domain.models import OrderType, Side
 from src.exceptions import (
-    OperationalError,
+    CircuitOpenError,
     DataError,
     InvariantError,
-    CircuitOpenError,
+    OperationalError,
 )
+from src.execution.position_manager_v2 import ActionType, ManagementAction, PositionManagerV2
+from src.execution.position_persistence import PositionPersistence
+from src.execution.position_state_machine import (
+    ExitReason,
+    ManagedPosition,
+    OrderEvent,
+    OrderEventType,
+    PositionRegistry,
+    PositionState,
+    get_position_registry,
+    normalize_exit_reason,
+)
+from src.execution.production_safety import (
+    ActionIntent,
+    ActionIntentStatus,
+    AtomicStopReplacer,
+    EventOrderingEnforcer,
+    SafetyConfig,
+    WriteAheadIntentLog,
+)
+from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -1235,7 +1231,27 @@ class ExecutionGateway:
         terminal_states = (PositionState.CLOSED, PositionState.ORPHANED)
         if position.state not in terminal_states or position.trade_recorded:
             return
-        
+
+        # Age gate: refuse to record trades for positions last updated more
+        # than 6 hours ago.  These are stale historical artifacts loaded from
+        # persistence — recording them produces phantom trades with recycled
+        # entry prices that pollute the DB without reflecting real execution.
+        _STALE_HOURS = 6
+        _age = datetime.now(timezone.utc) - position.updated_at.replace(
+            tzinfo=timezone.utc
+        ) if position.updated_at.tzinfo is None else datetime.now(timezone.utc) - position.updated_at
+        if _age > timedelta(hours=_STALE_HOURS):
+            logger.warning(
+                "TRADE_RECORD_SKIPPED_STALE: position too old to record",
+                position_id=position.position_id,
+                symbol=position.symbol,
+                updated_at=str(position.updated_at),
+                age_hours=round(_age.total_seconds() / 3600, 1),
+            )
+            position.trade_recorded = True
+            self.persistence.save_position(position)
+            return
+
         MAX_RECORD_ATTEMPTS = 10
         position.trade_record_attempts += 1
         if position.trade_record_attempts > MAX_RECORD_ATTEMPTS:
@@ -1285,7 +1301,7 @@ class ExecutionGateway:
                 missing_qty=str(missing_qty),
             )
             try:
-                from src.monitoring.alert_dispatcher import send_alert, fmt_size
+                from src.monitoring.alert_dispatcher import fmt_size, send_alert
                 await send_alert(
                     "POSITION_CLOSED_UNPRICED",
                     f"⚠️ Position reconciled closed: {position.symbol}\n"
@@ -1322,7 +1338,7 @@ class ExecutionGateway:
                 
                 # ---- Send POSITION_CLOSED notification ----
                 try:
-                    from src.monitoring.alert_dispatcher import send_alert, fmt_price, fmt_size
+                    from src.monitoring.alert_dispatcher import fmt_price, fmt_size, send_alert
                     
                     pnl_sign = "+" if trade.net_pnl >= 0 else ""
                     pnl_emoji = "\u2705" if trade.net_pnl >= 0 else "\u274c"
@@ -2254,9 +2270,15 @@ class ExecutionGateway:
         This handles the case where the bot was restarted and lost in-memory state.
         Also handles stale positions (remaining_qty=0) by replacing them.
         """
-        from src.execution.position_state_machine import ManagedPosition, PositionState, FillRecord, Side
+        from datetime import datetime, timedelta, timezone
+
         from src.data.symbol_utils import normalize_symbol_for_position_match
-        from datetime import datetime, timezone
+        from src.execution.position_state_machine import (
+            FillRecord,
+            ManagedPosition,
+            PositionState,
+            Side,
+        )
         
         try:
             positions = await self.client.get_all_futures_positions()
@@ -2294,7 +2316,49 @@ class ExecutionGateway:
             
             if existing and existing.remaining_qty > 0:
                 continue
-            
+
+            # Idempotency guard: skip if a trade for this symbol was recorded
+            # recently.  Prevents the restart-loop bug where each restart
+            # creates a fresh ManagedPosition (new ID) for the same exchange
+            # position, places an emergency stop that triggers immediately, and
+            # records yet another phantom trade to the DB.
+            try:
+                from src.storage.repository import TradeModel, _to_naive_utc, get_db
+
+                _PHANTOM_DEDUP_MINUTES = 30
+                _cutoff = _to_naive_utc(
+                    datetime.now(timezone.utc) - timedelta(minutes=_PHANTOM_DEDUP_MINUTES)
+                )
+                _base = symbol.replace("PF_", "").replace("USD", "/USD").replace("//", "/")
+                _pf = "PF_" + symbol.replace("/", "").replace("PF_", "")
+
+                _db = get_db()
+                with _db.get_session() as _sess:
+                    _recent = (
+                        _sess.query(TradeModel)
+                        .filter(
+                            (TradeModel.symbol.ilike(f"%{_base}%"))
+                            | (TradeModel.symbol.ilike(f"%{_pf}%")),
+                            TradeModel.exited_at >= _cutoff,
+                        )
+                        .count()
+                    )
+
+                if _recent > 0:
+                    logger.warning(
+                        "PHANTOM_IMPORT_SKIPPED: recent trade exists — likely restart-loop duplicate",
+                        symbol=symbol,
+                        recent_trades=_recent,
+                        dedup_window_minutes=_PHANTOM_DEDUP_MINUTES,
+                    )
+                    continue
+            except Exception as _dedup_err:
+                logger.warning(
+                    "PHANTOM_IMPORT_DEDUP_CHECK_FAILED: proceeding with import",
+                    symbol=symbol,
+                    error=str(_dedup_err),
+                )
+
             # Remove any stale positions with same normalized key
             for stale_symbol in stale_symbols_to_remove:
                 logger.warning("Removing stale position before phantom import", 
@@ -2416,8 +2480,9 @@ class ExecutionGateway:
                     error_type=type(e).__name__,
                 )
                 try:
-                    from src.monitoring.alert_dispatcher import send_alert
                     import asyncio
+
+                    from src.monitoring.alert_dispatcher import send_alert
                     await send_alert(
                         "PHANTOM_IMPORT_FAILED",
                         f"Failed to import exchange position {symbol}: {e}\n"

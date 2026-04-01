@@ -39,20 +39,28 @@ from src.monitoring.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _replay_min_size(base: str) -> Decimal:
+    """Return venue-realistic minimum order sizes for replay synthetic specs."""
+    _MINS = {"XBT": "0.0001", "BTC": "0.0001", "ETH": "0.001", "SOL": "0.01",
+             "XRP": "1", "ADA": "1", "LINK": "0.1", "DOT": "0.1", "AVAX": "0.01"}
+    return Decimal(_MINS.get(base.upper(), "0.01"))
+
+
 def _build_replay_synthetic_spec(symbol: str):
     """Create a synthetic futures spec using the exchange-native symbol alias."""
     from src.execution.instrument_specs import InstrumentSpec
 
     base = symbol.split("/")[0] if "/" in symbol else symbol
     raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
+    min_sz = _replay_min_size(raw_base)
     return InstrumentSpec(
         symbol_raw=f"PF_{raw_base}USD",
         symbol_ccxt=f"{raw_base}/USD:USD",
         base=base.upper(),
         quote="USD",
         contract_size=Decimal("1"),
-        min_size=Decimal("1"),
-        size_step=Decimal("1"),
+        min_size=min_sz,
+        size_step=min_sz,
         size_step_source="replay_synthetic",
         price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
         max_leverage=50,
@@ -355,6 +363,11 @@ class BacktestRunner:
         _replay_peak = tempfile.mktemp(suffix="_peak_equity.json", prefix="replay_")
         os.environ["PEAK_EQUITY_STATE_PATH"] = _replay_peak
 
+        # Isolate position persistence so replay sim-* orders never pollute
+        # the live bot's positions.db, preventing phantom trade generation.
+        _replay_positions = tempfile.mktemp(suffix="_positions.db", prefix="replay_")
+        os.environ["POSITION_PERSISTENCE_PATH"] = _replay_positions
+
         config = load_config()
 
         # Apply overrides
@@ -457,20 +470,7 @@ class BacktestRunner:
         # Pre-populate instrument spec registry with synthetic specs for replay symbols.
         # Without this, the auction runner rejects every signal with NO_SPEC because
         # the replay exchange doesn't implement get_instruments().
-        if hasattr(lt, "instrument_spec_registry"):
-            synthetic_specs = [_build_replay_synthetic_spec(sym) for sym in self._symbols]
-            if synthetic_specs:
-                lt.instrument_spec_registry._index(synthetic_specs)
-                lt.instrument_spec_registry._loaded_at = time.time()
-                logger.info(
-                    "REPLAY_SYNTHETIC_SPECS_LOADED",
-                    count=len(synthetic_specs),
-                    symbols=[s.symbol_ccxt for s in synthetic_specs],
-                )
-
-        # Pre-populate instrument spec registry with synthetic specs for replay symbols.
-        # Without this, the auction runner rejects every signal with NO_SPEC because
-        # the replay exchange doesn't implement get_instruments().
+        # NOTE: _index() resets the internal dict, so ALL specs must go in a single call.
         if hasattr(lt, "instrument_spec_registry"):
             import time as _time
 
@@ -478,7 +478,6 @@ class BacktestRunner:
             synthetic_specs: list[InstrumentSpec] = []
             for sym in self._symbols:
                 base = sym.split("/")[0] if "/" in sym else sym
-                # BTC -> XBT for Kraken raw format
                 raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
                 synthetic_specs.append(InstrumentSpec(
                     symbol_raw=f"PF_{raw_base}USD",
@@ -486,8 +485,8 @@ class BacktestRunner:
                     base=base.upper(),
                     quote="USD",
                     contract_size=Decimal("1"),
-                    min_size=Decimal("1") if raw_base == "XBT" else Decimal("1"),
-                    size_step=Decimal("1"),
+                    min_size=_replay_min_size(raw_base),
+                    size_step=_replay_min_size(raw_base),
                     size_step_source="replay_synthetic",
                     price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
                     max_leverage=50,
@@ -495,6 +494,8 @@ class BacktestRunner:
                     supports_reduce_only=True,
                     last_updated_ts=_time.time(),
                 ))
+            # Also add XBT-aliased specs for BTC (Kraken uses XBT internally)
+            synthetic_specs.extend(_build_replay_synthetic_spec(sym) for sym in self._symbols)
             if synthetic_specs:
                 lt.instrument_spec_registry._index(synthetic_specs)
                 lt.instrument_spec_registry._loaded_at = _time.time()

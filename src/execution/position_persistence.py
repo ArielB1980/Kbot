@@ -11,8 +11,9 @@ Recovery algorithm:
 2. Query exchange open orders + open positions
 3. Reconcile → mark inconsistent as ORPHANED
 """
-import sqlite3
 import json
+import os
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -40,7 +41,7 @@ class PositionPersistence:
     
     def __init__(self, db_path: str = "data/positions.db"):
         """Initialize persistence with database path."""
-        self.db_path = db_path
+        self.db_path = os.environ.get("POSITION_PERSISTENCE_PATH", db_path)
         self._local = threading.local()
         # Suppress repeated duplicate-fill logs for the same fill_id.
         self._logged_fill_collisions: Set[str] = set()
@@ -618,6 +619,8 @@ class PositionPersistence:
                 pos.state = PositionState.CLOSED
                 if pos.exit_reason is None:
                     pos.exit_reason = ExitReason.RECONCILIATION
+                # Prevent phantom trade recording from corrupted positions
+                pos.trade_recorded = True
                 registry._closed_positions.append(pos)
                 corrupted_symbols.append(symbol)
                 try:
@@ -638,6 +641,16 @@ class PositionPersistence:
                 pos.state = PositionState.CLOSED
                 if pos.exit_reason is None:
                     pos.exit_reason = ExitReason.RECONCILIATION
+                # Mark as recorded so retry_unrecorded_trades() and the
+                # reconciliation loop don't try to record phantom trades
+                # from this historical position on every cycle.
+                if not pos.trade_recorded:
+                    pos.trade_recorded = True
+                    logger.info(
+                        "Stale zero-qty position marked trade_recorded to prevent phantom replay",
+                        symbol=symbol,
+                        position_id=pos.position_id,
+                    )
                 registry._closed_positions.append(pos)
                 stale_zero_symbols.append(symbol)
                 logger.warning(

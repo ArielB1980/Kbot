@@ -505,7 +505,7 @@ class StrategyConfig(BaseSettings):
     min_score_wide_structure_neutral: float = Field(default=75.0, ge=0.0, le=100.0)
     
     # Fib Enforcement
-    fib_proximity_bps: float = Field(default=20.0, ge=0.0, le=100.0) # 0.2%
+    fib_proximity_bps: float = Field(default=20.0, ge=0.0, le=200.0) # 0.2%
     fib_proximity_adaptive_enabled: bool = Field(
         default=False,
         description="Scale fib proximity tolerance with ATR ratio (wider in high vol)",

@@ -228,14 +228,14 @@ strategy:
   # V2.3 Scoring & Regimes (Slightly relaxed)
   ema_neutral_zone_bps: 10.0
   min_score_tight_smc_aligned: 60.0  # KBO-44 trial: relax gate to increase valid signal throughput
-  min_score_tight_smc_neutral: 65.0  # KBO-44 trial: relax gate to increase valid signal throughput
+  min_score_tight_smc_neutral: 55.0  # Lowered from 65 — EMA 200 unavailable with 120-day lookback forces neutral bias on all signals
   min_score_wide_structure_aligned: 55.0  # KBO-44 trial: relax gate to increase valid signal throughput
-  min_score_wide_structure_neutral: 60.0  # KBO-44 trial: relax gate to increase valid signal throughput
-  fib_proximity_bps: 60.0
+  min_score_wide_structure_neutral: 50.0  # Lowered from 60 — EMA 200 unavailable with 120-day lookback forces neutral bias on all signals
+  fib_proximity_bps: 120.0  # Widened from 60 — Fib gate was rejecting all signals at 60 bps
   # Adaptive fib tolerance — Profile C (KBO-8)
   fib_proximity_adaptive_enabled: true
   fib_proximity_adaptive_scale: 0.5
-  fib_proximity_max_bps: 80.0
+  fib_proximity_max_bps: 160.0  # Widened from 80 — allow optimizer to explore wider tolerance
   # EMA slope alignment bonus — Profile C (KBO-8)
   ema_slope_bonus: 10.0
   # Higher-timeframe pyramid gate (1W -> 1D -> 4H)

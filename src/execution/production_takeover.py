@@ -199,9 +199,17 @@ class ProductionTakeover:
                 logger.warning(f"Case D: Purging local state for {symbol} (no stop in registry)")
                 if existing and existing.symbol in self.registry._positions:
                     del self.registry._positions[existing.symbol]
-        
+                # Re-classify now that the stale registry entry is gone, so
+                # any existing exchange stop order is detected rather than
+                # falling through as NAKED and placing a duplicate stop.
+                classification, stop_orders = self._classify_position(pos_data, symbol_orders)
+                logger.info(
+                    f"Re-classified {symbol} after D purge: {classification}",
+                    stop_orders_found=len(stop_orders),
+                )
+
         valid_stop: Optional[Dict] = None
-        
+
         if classification == TakeoverCase.C_CHAOS:
             logger.warning(f"Case C: Resolving order chaos for {symbol}")
             valid_stop = await self._resolve_chaos(symbol, stop_orders)
