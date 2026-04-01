@@ -800,14 +800,23 @@ class SandboxAutoresearchHarness:
         candidate = dict(self._baseline_params)
         gate_keys = [
             k for k in self._param_keys
-            if any(tok in k for tok in ("min_score", "adx_threshold", "cooldown"))
+            if any(tok in k for tok in (
+                "min_score", "adx_threshold", "cooldown",
+                "fib_proximity", "structure_fallback_score_premium",
+                "cost_cap", "min_rr",
+            ))
         ]
         for key in gate_keys:
             bounds = PARAMETER_BOUNDS.get(key)
             if bounds:
                 lo, hi = bounds
-                # Bias toward the permissive (lower) end of the range
-                candidate[key] = round(self.rng.uniform(lo, lo + (hi - lo) * 0.4), 6)
+                # Bias toward the permissive end: lower thresholds, wider
+                # tolerances, looser cost caps
+                if "fib_proximity" in key and "max" not in key:
+                    # Fib proximity: higher = more permissive
+                    candidate[key] = round(self.rng.uniform(lo + (hi - lo) * 0.5, hi), 6)
+                else:
+                    candidate[key] = round(self.rng.uniform(lo, lo + (hi - lo) * 0.4), 6)
         return candidate
 
     def _is_behavior_unchanged(self, candidate: CandidateResult, baseline: CandidateResult) -> bool:

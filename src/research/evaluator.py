@@ -315,8 +315,19 @@ class CandidateEvaluator:
         for symbol in self.spec.symbols:
             coverage = self._coverage_status.get(symbol, {})
             if not coverage.get("available_start") or not coverage.get("available_end"):
-                normalized.append(_failed_metrics("partial_data_non_comparable"))
-                paused_ratios.append(1.0)
+                # Don't produce a -999 sentinel for partial data — this causes
+                # the optimizer to skip the symbol entirely.  Instead, return
+                # 0-trade metrics so the optimizer can try loosening gates.
+                normalized.append(CandidateMetrics(
+                    net_return_pct=0.0,
+                    max_drawdown_pct=0.0,
+                    sharpe=0.0,
+                    sortino=None,
+                    win_rate_pct=0.0,
+                    trade_count=0,
+                    rejection_reasons=["partial_data_non_comparable"],
+                ))
+                paused_ratios.append(0.0)
                 continue
             try:
                 with self._suppress_replay_override_env_vars():
@@ -636,14 +647,25 @@ def _compose_window_outcome(
     windows: list[dict[str, Any]],
 ) -> EvaluationOutcome:
     if not holdout_metrics_all:
-        failed = _failed_metrics("No successful holdout evaluations across windows")
+        # Instead of returning a -999% sentinel that causes the optimizer to
+        # skip this symbol entirely, return a 0-trade penalty score.  This
+        # lets the optimizer try mutations that might produce trades.
+        zero_trade = CandidateMetrics(
+            net_return_pct=0.0,
+            max_drawdown_pct=0.0,
+            sharpe=0.0,
+            sortino=None,
+            win_rate_pct=0.0,
+            trade_count=0,
+            rejection_reasons=["No successful holdout evaluations across windows"],
+        )
         return EvaluationOutcome(
-            metrics=failed,
+            metrics=zero_trade,
             diagnostics={
                 "per_window": windows,
                 "train_score": None,
                 "holdout_score": None,
-                "composite_score": -10_000.0,
+                "composite_score": -500.0,
             },
         )
 
