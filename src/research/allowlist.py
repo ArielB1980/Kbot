@@ -16,6 +16,7 @@ IMMUTABLE_CODE_PATH_PREFIXES: tuple[str, ...] = (
 
 # Constrain autonomous changes to a curated strategy parameter subset only.
 ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
+    # ── Entry quality gates ──
     "strategy.adx_threshold",
     "strategy.fvg_min_size_pct",
     "strategy.entry_zone_tolerance_pct",
@@ -25,20 +26,36 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.min_score_wide_structure_aligned",
     "strategy.min_score_wide_structure_neutral",
     "strategy.signal_cooldown_hours",
-    "strategy.tight_smc_atr_stop_min",
-    "strategy.tight_smc_atr_stop_max",
-    "strategy.wide_structure_atr_stop_min",
-    "strategy.wide_structure_atr_stop_max",
     "strategy.ema_slope_bonus",
     "strategy.bos_volume_threshold_mult",
     "strategy.fib_proximity_bps",
     "strategy.fib_proximity_adaptive_scale",
     "strategy.fib_proximity_max_bps",
     "strategy.structure_fallback_score_premium",
+    # ── Stop loss sizing (THE critical knob — currently far too tight) ──
+    "strategy.tight_smc_atr_stop_min",
+    "strategy.tight_smc_atr_stop_max",
+    "strategy.wide_structure_atr_stop_min",
+    "strategy.wide_structure_atr_stop_max",
+    # ── Take profit / exit mechanics (previously locked, now optimizable) ──
+    "multi_tp.tp1_r_multiple",
+    "multi_tp.tp1_close_pct",
+    "multi_tp.tp2_r_multiple",
+    "multi_tp.tp2_close_pct",
+    "multi_tp.runner_pct",
+    "multi_tp.trailing_stop_atr_multiplier",
+    # ── Risk / position sizing ──
+    "risk.risk_per_trade_pct",
+    "risk.target_leverage",
+    # ── Cost / RR constraints ──
+    "strategy.tight_smc_cost_cap_bps",
+    "strategy.tight_smc_min_rr_multiple",
+    "strategy.fee_edge_multiple_k",
 )
 
 # Min/max bounds per parameter to prevent degenerate values.
 PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
+    # Entry quality gates
     "strategy.adx_threshold": (8.0, 40.0),
     "strategy.fvg_min_size_pct": (0.0001, 0.01),
     "strategy.entry_zone_tolerance_pct": (0.5, 5.0),
@@ -48,16 +65,31 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "strategy.min_score_wide_structure_aligned": (30.0, 95.0),
     "strategy.min_score_wide_structure_neutral": (30.0, 95.0),
     "strategy.signal_cooldown_hours": (0.0, 24.0),
-    "strategy.tight_smc_atr_stop_min": (0.05, 0.8),
-    "strategy.tight_smc_atr_stop_max": (0.1, 1.5),
-    "strategy.wide_structure_atr_stop_min": (0.1, 1.5),
-    "strategy.wide_structure_atr_stop_max": (0.2, 2.5),
     "strategy.ema_slope_bonus": (0.0, 15.0),
     "strategy.bos_volume_threshold_mult": (0.5, 3.0),
     "strategy.fib_proximity_bps": (20.0, 200.0),
     "strategy.fib_proximity_adaptive_scale": (0.0, 1.0),
     "strategy.fib_proximity_max_bps": (20.0, 200.0),
     "strategy.structure_fallback_score_premium": (0.0, 20.0),
+    # Stop loss — widen bounds significantly so optimizer can find the sweet spot
+    "strategy.tight_smc_atr_stop_min": (0.1, 1.5),
+    "strategy.tight_smc_atr_stop_max": (0.2, 3.0),
+    "strategy.wide_structure_atr_stop_min": (0.2, 2.5),
+    "strategy.wide_structure_atr_stop_max": (0.5, 4.0),
+    # Take profit / exit — full range exploration
+    "multi_tp.tp1_r_multiple": (0.5, 3.0),
+    "multi_tp.tp1_close_pct": (0.1, 0.6),
+    "multi_tp.tp2_r_multiple": (1.0, 6.0),
+    "multi_tp.tp2_close_pct": (0.1, 0.6),
+    "multi_tp.runner_pct": (0.05, 0.5),
+    "multi_tp.trailing_stop_atr_multiplier": (1.0, 3.0),
+    # Risk sizing
+    "risk.risk_per_trade_pct": (0.005, 0.05),
+    "risk.target_leverage": (2.0, 10.0),
+    # Cost / RR constraints
+    "strategy.tight_smc_cost_cap_bps": (10.0, 50.0),
+    "strategy.tight_smc_min_rr_multiple": (1.5, 5.0),
+    "strategy.fee_edge_multiple_k": (1.0, 10.0),
 }
 
 # Hard lock these paths even if they appear in future candidate generation logic.

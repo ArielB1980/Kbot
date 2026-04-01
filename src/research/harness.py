@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import shlex
@@ -22,6 +23,129 @@ from src.research.reporting import write_leaderboard, write_per_symbol_best, wri
 from src.research.state_store import ResearchStateStore
 
 logger = get_logger(__name__)
+
+_WARM_START_DIR = Path("data/research/warm_start")
+
+
+class ParameterMemory:
+    """Tracks per-parameter score deltas to guide future mutations.
+
+    Instead of blind random search, this records which parameters moved score
+    up or down and by how much.  Future mutations are biased toward parameters
+    that historically produced improvements, and step sizes adapt over time.
+    """
+
+    def __init__(self, param_keys: tuple[str, ...]):
+        self._keys = param_keys
+        # Cumulative score improvement attributed to each param
+        self._momentum: dict[str, float] = {k: 0.0 for k in param_keys}
+        # Last direction that improved score (+1 or -1), 0 = unknown
+        self._direction: dict[str, float] = {k: 0.0 for k in param_keys}
+        # Count of times each param was part of an improving candidate
+        self._win_count: dict[str, int] = {k: 0 for k in param_keys}
+        # Total times each param was mutated
+        self._try_count: dict[str, int] = {k: 0 for k in param_keys}
+
+    def record(
+        self,
+        source_params: dict[str, float],
+        candidate_params: dict[str, float],
+        score_delta: float,
+    ) -> None:
+        """Record the outcome of a candidate evaluation."""
+        for key in self._keys:
+            s_val = source_params.get(key, 0.0)
+            c_val = candidate_params.get(key, 0.0)
+            if abs(c_val - s_val) < 1e-9:
+                continue
+            self._try_count[key] = self._try_count.get(key, 0) + 1
+            if score_delta > 0:
+                self._momentum[key] = self._momentum.get(key, 0.0) + score_delta
+                self._win_count[key] = self._win_count.get(key, 0) + 1
+                self._direction[key] = 1.0 if c_val > s_val else -1.0
+
+    def pick_params_to_mutate(
+        self, rng: random.Random, count: int
+    ) -> list[str]:
+        """Select parameters to mutate, biased toward historically productive ones.
+
+        Uses a softmax weighting: params that have produced improvements are
+        more likely to be picked, but all params retain a base probability to
+        ensure exploration.
+        """
+        weights: list[float] = []
+        for key in self._keys:
+            tries = self._try_count.get(key, 0)
+            wins = self._win_count.get(key, 0)
+            # Base weight ensures every param gets explored
+            base = 1.0
+            # Bonus proportional to win rate (if tried enough)
+            if tries >= 3:
+                win_rate = wins / tries
+                base += win_rate * 4.0
+            # Small bonus from cumulative momentum
+            base += min(self._momentum.get(key, 0.0) * 0.1, 3.0)
+            weights.append(max(base, 0.1))
+
+        keys_list = list(self._keys)
+        count = min(count, len(keys_list))
+        selected: list[str] = []
+        remaining_keys = list(range(len(keys_list)))
+        remaining_weights = list(weights)
+        for _ in range(count):
+            if not remaining_keys:
+                break
+            chosen = rng.choices(remaining_keys, weights=remaining_weights, k=1)[0]
+            idx = remaining_keys.index(chosen)
+            selected.append(keys_list[chosen])
+            remaining_keys.pop(idx)
+            remaining_weights.pop(idx)
+        return selected
+
+    def get_direction_bias(self, key: str) -> float:
+        """Return directional bias for a parameter (-1, 0, or +1)."""
+        return self._direction.get(key, 0.0)
+
+
+def _warm_start_path(symbol: str) -> Path:
+    """Path to the warm-start JSON for a given symbol."""
+    safe = symbol.replace("/", "_").replace(":", "_")
+    return _WARM_START_DIR / f"{safe}_best.json"
+
+
+def load_warm_start(symbol: str) -> dict[str, float] | None:
+    """Load best-known params for a symbol from disk, or None."""
+    path = _warm_start_path(symbol)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        params = data.get("params")
+        if isinstance(params, dict) and params:
+            logger.info("WARM_START_LOADED", symbol=symbol, path=str(path))
+            return {k: float(v) for k, v in params.items()}
+    except Exception as exc:
+        logger.warning("WARM_START_LOAD_FAILED", symbol=symbol, error=str(exc))
+    return None
+
+
+def save_warm_start(
+    symbol: str, params: dict[str, float], score: float, candidate_id: str
+) -> None:
+    """Persist best-known params for a symbol to disk for cross-run memory."""
+    path = _warm_start_path(symbol)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "symbol": symbol,
+        "params": params,
+        "score": score,
+        "candidate_id": candidate_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    tmp.rename(path)
+    logger.info("WARM_START_SAVED", symbol=symbol, score=score, path=str(path))
 
 
 @dataclass(frozen=True)
@@ -88,6 +212,7 @@ class SandboxAutoresearchHarness:
 
         self._param_keys = tuple(self.policy.allowed_parameter_paths)
         self._baseline_params = self._read_params_from_config(base_config)
+        self._param_memory: ParameterMemory | None = None
 
     async def run(self) -> tuple[Path, Path]:
         """Run the full sandbox autoresearch loop."""
@@ -323,9 +448,22 @@ class SandboxAutoresearchHarness:
                     )
 
             safe_symbol = symbol.replace("/", "_").replace(":", "_")
+
+            # Cross-run warm start: if we found good params in a previous
+            # cycle, start from those instead of config baseline.
+            warm_params = load_warm_start(symbol)
+            starting_params = warm_params if warm_params is not None else self._baseline_params
+            # Ensure warm-start params include all current allowlist keys
+            for key in self._param_keys:
+                if key not in starting_params:
+                    starting_params[key] = self._baseline_params[key]
+
+            # Initialize per-symbol parameter memory for guided mutation
+            self._param_memory = ParameterMemory(self._param_keys)
+
             baseline = await self._evaluate_candidate(
                 candidate_id=f"{safe_symbol}_baseline",
-                params=self._baseline_params,
+                params=starting_params,
                 evaluator=evaluator,
                 symbol=symbol,
             )
@@ -383,9 +521,9 @@ class SandboxAutoresearchHarness:
                     # Aggressively explore when baseline produces no trades
                     params = self._widen_for_zero_trade_baseline()
                 elif self.cfg.random_restart_every_n > 0 and iteration % int(self.cfg.random_restart_every_n) == 0:
-                    params = self._random_restart_params()
+                    params = self._random_restart_params(iteration=iteration, hard_cap=hard_cap)
                 else:
-                    params = self._mutate_params(best.params)
+                    params = self._mutate_params(best.params, iteration=iteration, hard_cap=hard_cap)
                 result = await self._evaluate_candidate(
                     candidate_id=candidate_id,
                     params=params,
@@ -403,6 +541,11 @@ class SandboxAutoresearchHarness:
                     result.metadata["promotion_ready"] = False
                 result.metadata["window_deltas_vs_baseline"] = self._window_deltas(result, baseline)
                 symbol_results.append(result)
+
+                # Record outcome in parameter memory for guided future mutations
+                score_delta = result.score - best.score
+                if self._param_memory is not None:
+                    self._param_memory.record(best.params, params, score_delta)
 
                 if self._is_behavior_unchanged(result, baseline):
                     uninformative_streak += 1
@@ -479,6 +622,14 @@ class SandboxAutoresearchHarness:
                 best_candidate_id=best.candidate_id,
                 phase="finished",
             )
+
+            # Persist best params for cross-run warm start so the next cycle
+            # picks up where this one left off instead of starting from scratch.
+            if best.score > -500.0:
+                save_warm_start(symbol, best.params, best.score, best.candidate_id)
+
+            # Clear per-symbol memory
+            self._param_memory = None
 
         if self.store.read_state().get("phase") not in {"stopped", "failed"}:
             self.store.update(phase="finished")
@@ -573,28 +724,65 @@ class SandboxAutoresearchHarness:
         out: dict[str, float] = {}
         for key in self._param_keys:
             section_name, _, attr = key.partition(".")
-            section = getattr(config, section_name)
-            out[key] = float(getattr(section, attr))
+            section = getattr(config, section_name, None)
+            if section is None:
+                # Optional section (e.g. multi_tp) not present — use bound midpoint
+                bounds = PARAMETER_BOUNDS.get(key)
+                if bounds:
+                    out[key] = round((bounds[0] + bounds[1]) / 2, 6)
+                continue
+            val = getattr(section, attr, None)
+            if val is None:
+                bounds = PARAMETER_BOUNDS.get(key)
+                if bounds:
+                    out[key] = round((bounds[0] + bounds[1]) / 2, 6)
+                continue
+            out[key] = float(val)
         return out
 
     def _mutate_params(
         self,
         source: dict[str, float],
         step_multiplier: float = 1.0,
+        iteration: int = 0,
+        hard_cap: int = 1,
     ) -> dict[str, float]:
         candidate = dict(source)
         mutate_count = max(1, int(self.cfg.mutate_params_per_candidate))
-        keys_to_mutate = self.rng.sample(self._param_keys, k=min(mutate_count, len(self._param_keys)))
+
+        # Use parameter memory to pick params weighted by past success
+        mem = self._param_memory
+        if mem is not None and iteration > 6:
+            keys_to_mutate = mem.pick_params_to_mutate(self.rng, mutate_count)
+        else:
+            keys_to_mutate = self.rng.sample(
+                self._param_keys, k=min(mutate_count, len(self._param_keys))
+            )
+
+        # Adaptive step decay: start wide, narrow as we approach the cap.
+        # progress goes 0→1; decay goes 1.0→0.3 (never fully zero).
+        progress = min(iteration / max(hard_cap, 1), 1.0)
+        anneal = 1.0 - 0.7 * progress
+        effective_mult = step_multiplier * anneal
+
         for key in keys_to_mutate:
             value = candidate[key]
-            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct)) * step_multiplier
-            delta = self.rng.uniform(-step, step)
+            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct)) * effective_mult
+
+            # Directional bias: if memory knows a productive direction,
+            # bias the delta toward it (70% chance follow, 30% explore).
+            direction_bias = mem.get_direction_bias(key) if mem else 0.0
+            if direction_bias != 0.0 and self.rng.random() < 0.7:
+                delta = abs(self.rng.gauss(0, step)) * direction_bias
+            else:
+                delta = self.rng.uniform(-step, step)
+
             candidate[key] = self._clamp_param(key, round(value + delta, 6))
         return candidate
 
-    def _random_restart_params(self) -> dict[str, float]:
+    def _random_restart_params(self, iteration: int = 0, hard_cap: int = 1) -> dict[str, float]:
         """Sample a fresh candidate around baseline to escape local flats."""
-        return self._mutate_params(self._baseline_params)
+        return self._mutate_params(self._baseline_params, iteration=iteration, hard_cap=hard_cap)
 
     def _widen_for_zero_trade_baseline(self) -> dict[str, float]:
         """Aggressively loosen gate parameters when baseline produces 0 trades.
