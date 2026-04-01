@@ -306,10 +306,10 @@ class SandboxAutoresearchHarness:
                     )
                     if approved:
                         best = result
-                        await self._notify(self._format_milestone(best))
+                        await self._notify(self._format_milestone(best), important=True)
                 else:
                     best = result
-                    await self._notify(self._format_milestone(best))
+                    await self._notify(self._format_milestone(best), important=True)
 
             self.store.update(iteration=idx)
             self._persist_leaderboard(best.candidate_id)
@@ -330,7 +330,8 @@ class SandboxAutoresearchHarness:
                 if self.cfg.auto_queue_promotion_on_replay_pass:
                     self.store.queue_promotion(best.candidate_id)
                     await self._notify(
-                        f"📌 Auto-queued <code>{best.candidate_id}</code> for review after replay pass."
+                        f"📌 Auto-queued <code>{best.candidate_id}</code> for review after replay pass.",
+                        important=True,
                     )
             else:
                 best.accepted = False
@@ -346,7 +347,8 @@ class SandboxAutoresearchHarness:
                 f"Return: {best.metrics.net_return_pct:+.2f}% | "
                 f"MaxDD: {best.metrics.max_drawdown_pct:.2f}% | "
                 f"Sharpe: {best.metrics.sharpe:.2f}"
-            )
+            ),
+            important=True,
         )
         return leaderboard_path, summary_path
 
@@ -586,7 +588,7 @@ class SandboxAutoresearchHarness:
                 if result.score > best.score:
                     best = result
                     stagnation = 0
-                    await self._notify(self._format_milestone(best))
+                    await self._notify(self._format_milestone(best), important=True)
                 else:
                     stagnation += 1
 
@@ -600,7 +602,8 @@ class SandboxAutoresearchHarness:
                 if self.cfg.until_convergence and stagnation >= max(1, self.cfg.max_stagnant_iterations):
                     await self._notify(
                         f"✅ Converged for <code>{symbol}</code> after {iteration} candidates "
-                        f"(stagnant={stagnation})."
+                        f"(stagnant={stagnation}).",
+                        important=True,
                     )
                     break
 
@@ -642,7 +645,8 @@ class SandboxAutoresearchHarness:
                 f"Run: <code>{self.run_id}</code>\n"
                 f"Symbols done: {len(completed_symbols)}/{total_symbols}\n"
                 f"Best overall: <code>{best_overall.candidate_id}</code>"
-            )
+            ),
+            important=True,
         )
         return leaderboard_path, summary_path
 
@@ -928,8 +932,16 @@ class SandboxAutoresearchHarness:
             await asyncio.sleep(2)
         self.store.update(phase="running")
 
-    async def _notify(self, message: str) -> None:
-        if self.cfg.enable_telegram:
+    async def _notify(self, message: str, *, important: bool = False) -> None:
+        """Send a research notification.
+
+        Args:
+            message: The notification text.
+            important: If True, always send to Telegram. If False, only log
+                locally. This keeps Telegram quiet unless the optimizer finds
+                a meaningful result or hits a terminal event.
+        """
+        if self.cfg.enable_telegram and important:
             await send_telegram_message(message)
         logger.info("Research notification", message=message)
 
@@ -1089,7 +1101,8 @@ class SandboxAutoresearchHarness:
                 f"{'✅' if passed else '⛔'} Replay gate {'passed' if passed else 'failed'} for "
                 f"<code>{best.candidate_id}</code> "
                 f"(seeds={','.join(str(s) for s in self.cfg.replay_gate_seeds)})"
-            )
+            ),
+            important=True,
         )
         return {"passed": passed, "seeds": seed_results}
 
