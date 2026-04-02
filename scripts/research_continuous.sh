@@ -504,67 +504,212 @@ PY
   write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle start run_id=${RUN_ID}" | tee -a "${LOG_DIR}/daemon.log"
 
-  (
-    # Keep daemon lock in supervisor only; do not leak fd 9 to child.
-    exec 9>&-
-    "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" research \
-      --mode "${MODE}" \
-      --iterations "${ITERATIONS}" \
-      --days "${DAYS}" \
-      --symbols "${SYMBOLS}" \
-      --objective-mode "${OBJECTIVE_MODE}" \
-      ${SYMBOL_MODE_FLAG} \
-      ${SYMBOLS_LIVE_FLAG} \
-      ${SYMBOLS_CONFIG_FLAG} \
-      ${CONVERGENCE_FLAG} \
-      --max-stagnant-iterations "${MAX_STAGNANT_ITERS}" \
-      --max-iterations-per-symbol "${MAX_ITERS_PER_SYMBOL}" \
-      --window-offsets "${WINDOW_OFFSETS}" \
-      --holdout-ratio "${HOLDOUT_RATIO}" \
-      ${BACKFILL_FLAG} \
-      --replay-timeframes "${REPLAY_TIMEFRAMES}" \
-      ${TELEGRAM_FLAG} \
-      --state-file "${STATE_FILE}" \
-      --out-dir "${OUT_DIR}" \
-      > "${RUN_LOG}" 2>&1
-  ) &
-  RESEARCH_PID=$!
+  # ---------------------------------------------------------------------------
+  # Parallel worker launch: split symbols across N workers (one per available
+  # CPU minus 1 for the candle collector / OS).  Each worker gets its own
+  # state file, log, and output directory.  After all workers finish we merge
+  # state files into the canonical STATE_FILE so post-run hooks work unchanged.
+  # ---------------------------------------------------------------------------
+  NCPU="$(nproc)"
+  NWORKERS=$(( NCPU > 1 ? NCPU - 1 : 1 ))
+
+  # Split SYMBOLS (comma-separated) into NWORKERS roughly-equal groups.
+  IFS=',' read -ra ALL_SYMBOLS <<< "${SYMBOLS}"
+  NSYMS=${#ALL_SYMBOLS[@]}
+  # Cap workers to symbol count.
+  if (( NWORKERS > NSYMS )); then
+    NWORKERS=${NSYMS}
+  fi
+
+  declare -a WORKER_PIDS=()
+  declare -a WORKER_STATE_FILES=()
+  declare -a WORKER_LOGS=()
+  declare -a WORKER_OUTDIRS=()
+
+  start_idx=0
+  for (( w=0; w < NWORKERS; w++ )); do
+    # Compute this worker's symbol slice (round-robin remainder distribution).
+    base_count=$(( NSYMS / NWORKERS ))
+    remainder=$(( NSYMS % NWORKERS ))
+    if (( w < remainder )); then
+      count=$(( base_count + 1 ))
+    else
+      count=${base_count}
+    fi
+    slice=()
+    for (( s=start_idx; s < start_idx + count; s++ )); do
+      slice+=("${ALL_SYMBOLS[$s]}")
+    done
+    start_idx=$(( start_idx + count ))
+    WORKER_SYMBOLS="$(IFS=','; echo "${slice[*]}")"
+
+    W_STATE="${RUN_DIR}/state_w${w}.json"
+    W_LOG="${RUN_DIR}/research_w${w}.log"
+    W_OUT="${OUT_DIR}/w${w}"
+    mkdir -p "${W_OUT}"
+
+    WORKER_STATE_FILES+=("${W_STATE}")
+    WORKER_LOGS+=("${W_LOG}")
+    WORKER_OUTDIRS+=("${W_OUT}")
+
+    log_daemon "  worker ${w}: symbols=${WORKER_SYMBOLS} state=${W_STATE}"
+
+    (
+      exec 9>&-
+      "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" research \
+        --mode "${MODE}" \
+        --iterations "${ITERATIONS}" \
+        --days "${DAYS}" \
+        --symbols "${WORKER_SYMBOLS}" \
+        --objective-mode "${OBJECTIVE_MODE}" \
+        ${SYMBOL_MODE_FLAG} \
+        ${SYMBOLS_LIVE_FLAG} \
+        ${SYMBOLS_CONFIG_FLAG} \
+        ${CONVERGENCE_FLAG} \
+        --max-stagnant-iterations "${MAX_STAGNANT_ITERS}" \
+        --max-iterations-per-symbol "${MAX_ITERS_PER_SYMBOL}" \
+        --window-offsets "${WINDOW_OFFSETS}" \
+        --holdout-ratio "${HOLDOUT_RATIO}" \
+        ${BACKFILL_FLAG} \
+        --replay-timeframes "${REPLAY_TIMEFRAMES}" \
+        ${TELEGRAM_FLAG} \
+        --state-file "${W_STATE}" \
+        --out-dir "${W_OUT}" \
+        > "${W_LOG}" 2>&1
+    ) &
+    WORKER_PIDS+=($!)
+  done
+
+  log_daemon "  launched ${NWORKERS} parallel workers for ${NSYMS} symbols"
+
+  # Monitor loop: poll all workers, report per-worker progress, cap logs.
   LAST_DONE=-1
   LAST_SYMBOL=""
   load_notify_state "${NOTIFY_STATE_FILE}"
 
-  while kill -0 "${RESEARCH_PID}" 2>/dev/null; do
-    # Keep watchdog/reporting pointers in sync even if another process rewrites state files.
+  any_alive() {
+    for pid in "${WORKER_PIDS[@]}"; do
+      kill -0 "${pid}" 2>/dev/null && return 0
+    done
+    return 1
+  }
+
+  while any_alive; do
     write_latest_run_id "${RUN_ID}"
-    PROG="$(poll_symbol_progress "${STATE_FILE}")"
-    DONE="$(echo "${PROG}" | cut -d'|' -f1)"
-    TOTAL="$(echo "${PROG}" | cut -d'|' -f2)"
-    CURRENT_SYMBOL="$(echo "${PROG}" | cut -d'|' -f3)"
-    LAST_COMPLETED="$(echo "${PROG}" | cut -d'|' -f4)"
-    if [[ "${DONE}" =~ ^[0-9]+$ ]] && [[ "${DONE}" -gt "${LAST_DONE}" ]]; then
-      if [[ -n "${LAST_COMPLETED}" ]] && [[ "${LAST_COMPLETED}" != "${LAST_SYMBOL}" ]]; then
+
+    # Aggregate progress across all worker state files.
+    TOTAL_DONE=0
+    TOTAL_SYMS=0
+    AGG_CURRENT=""
+    AGG_LAST_COMPLETED=""
+    for wf in "${WORKER_STATE_FILES[@]}"; do
+      PROG="$(poll_symbol_progress "${wf}")"
+      D="$(echo "${PROG}" | cut -d'|' -f1)"
+      T="$(echo "${PROG}" | cut -d'|' -f2)"
+      C="$(echo "${PROG}" | cut -d'|' -f3)"
+      L="$(echo "${PROG}" | cut -d'|' -f4)"
+      if [[ "${D}" =~ ^[0-9]+$ ]]; then
+        TOTAL_DONE=$(( TOTAL_DONE + D ))
+        TOTAL_SYMS=$(( TOTAL_SYMS + T ))
+      fi
+      [[ -n "${C}" ]] && AGG_CURRENT="${C}"
+      [[ -n "${L}" ]] && AGG_LAST_COMPLETED="${L}"
+    done
+
+    if [[ "${TOTAL_DONE}" -gt "${LAST_DONE}" ]]; then
+      if [[ -n "${AGG_LAST_COMPLETED}" ]] && [[ "${AGG_LAST_COMPLETED}" != "${LAST_SYMBOL}" ]]; then
         send_tg "📈 Symbol progress
 run_id=${RUN_ID}
-done=${DONE}/${TOTAL}
-completed=${LAST_COMPLETED}
-current=${CURRENT_SYMBOL:-none}"
-        LAST_SYMBOL="${LAST_COMPLETED}"
+done=${TOTAL_DONE}/${TOTAL_SYMS}
+completed=${AGG_LAST_COMPLETED}
+current=${AGG_CURRENT:-none}"
+        LAST_SYMBOL="${AGG_LAST_COMPLETED}"
         save_notify_state "${NOTIFY_STATE_FILE}" "${LAST_DONE}" "${LAST_SYMBOL}"
       fi
-      LAST_DONE="${DONE}"
+      LAST_DONE="${TOTAL_DONE}"
       save_notify_state "${NOTIFY_STATE_FILE}" "${LAST_DONE}" "${LAST_SYMBOL}"
     fi
-    CAP_MSG="$(cap_log_file "${RUN_LOG}" "${RUN_LOG_MAX_BYTES}" "${RUN_LOG_TRIM_TO_BYTES}")"
-    if [[ -n "${CAP_MSG}" ]]; then
-      echo "[$(date -u +%FT%TZ)] ${CAP_MSG}" | tee -a "${LOG_DIR}/daemon.log"
-    fi
+
+    for wl in "${WORKER_LOGS[@]}"; do
+      CAP_MSG="$(cap_log_file "${wl}" "${RUN_LOG_MAX_BYTES}" "${RUN_LOG_TRIM_TO_BYTES}")"
+      if [[ -n "${CAP_MSG}" ]]; then
+        echo "[$(date -u +%FT%TZ)] ${CAP_MSG}" | tee -a "${LOG_DIR}/daemon.log"
+      fi
+    done
     sleep 15
   done
 
+  # Collect exit codes — worst one wins.
+  RESEARCH_RC=0
   set +e
-  wait "${RESEARCH_PID}"
-  RESEARCH_RC=$?
+  for pid in "${WORKER_PIDS[@]}"; do
+    wait "${pid}"
+    rc=$?
+    (( rc > RESEARCH_RC )) && RESEARCH_RC=${rc}
+  done
   set -e
+
+  # Merge worker state files into the canonical STATE_FILE for post-run hooks.
+  "${TRADING_DIR}/venv/bin/python3" - <<PY
+import json
+from pathlib import Path
+
+worker_states = [$(printf '"%s",' "${WORKER_STATE_FILES[@]}" | sed 's/,$//')]
+merged = {
+    "best_candidate_id": None,
+    "completed_symbols": [],
+    "control": {"paused": False, "stop_requested": False},
+    "current_symbol": None,
+    "eligible_symbols": [],
+    "iteration": 0,
+    "last_error": None,
+    "leaderboard": [],
+    "pending_prompt": None,
+    "phase": "done",
+    "promotion_queue": [],
+    "run_id": "$(echo "${RUN_ID}")",
+    "skipped_ineligible_symbols": {},
+    "symbol_best_candidates": {},
+    "symbol_progress": {},
+    "total_iterations": 0,
+    "total_symbols": 0,
+    "updated_at": None,
+}
+best_composite = None
+for wf in worker_states:
+    p = Path(wf)
+    if not p.exists():
+        continue
+    ws = json.loads(p.read_text())
+    merged["completed_symbols"].extend(ws.get("completed_symbols") or [])
+    merged["eligible_symbols"].extend(ws.get("eligible_symbols") or [])
+    merged["leaderboard"].extend(ws.get("leaderboard") or [])
+    merged["promotion_queue"].extend(ws.get("promotion_queue") or [])
+    merged["total_symbols"] += ws.get("total_symbols", 0)
+    merged["total_iterations"] += ws.get("total_iterations", 0)
+    for sym, prog in (ws.get("symbol_progress") or {}).items():
+        merged["symbol_progress"][sym] = prog
+    for sym, cand in (ws.get("symbol_best_candidates") or {}).items():
+        merged["symbol_best_candidates"][sym] = cand
+    if ws.get("skipped_ineligible_symbols"):
+        merged["skipped_ineligible_symbols"].update(ws["skipped_ineligible_symbols"])
+    if ws.get("last_error"):
+        merged["last_error"] = ws["last_error"]
+    if ws.get("updated_at"):
+        if not merged["updated_at"] or ws["updated_at"] > merged["updated_at"]:
+            merged["updated_at"] = ws["updated_at"]
+    wb = ws.get("best_candidate_id")
+    if wb:
+        merged["best_candidate_id"] = wb
+merged["phase"] = "done"
+Path("${STATE_FILE}").write_text(json.dumps(merged, indent=2, sort_keys=True))
+PY
+
+  # Concatenate worker logs into canonical RUN_LOG for post-run hooks.
+  for (( w=0; w < NWORKERS; w++ )); do
+    echo "=== WORKER ${w} ===" >> "${RUN_LOG}"
+    cat "${WORKER_LOGS[$w]}" >> "${RUN_LOG}" 2>/dev/null || true
+  done
 
   write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle end run_id=${RUN_ID} rc=${RESEARCH_RC}" | tee -a "${LOG_DIR}/daemon.log"
