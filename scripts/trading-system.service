@@ -2,6 +2,8 @@
 Description=Trading System Live Trading
 After=network.target postgresql.service
 Wants=postgresql.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,8 +18,6 @@ ExecStartPre=/home/trading/TradingSystem/venv/bin/python migrate_schema.py
 ExecStart=/home/trading/TradingSystem/venv/bin/python -m src.entrypoints.prod_live
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=5
 StandardOutput=append:/home/trading/TradingSystem/logs/trading.log
 StandardError=append:/home/trading/TradingSystem/logs/trading-error.log
 
