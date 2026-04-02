@@ -1222,12 +1222,16 @@ class Config(BaseSettings):
         import os
         import re
         
-        # Regex to find ${VAR} or $VAR
+        # Regex to find ${VAR}, ${VAR:-default}, or $VAR
         pattern = re.compile(r'\$\{([^}]+)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)')
-        
+
         def replace_match(match):
-            var_name = match.group(1) or match.group(2)
-            return os.environ.get(var_name, match.group(0))  # Return original if not found
+            expr = match.group(1) or match.group(2)
+            # Support ${VAR:-default} syntax
+            if ":-" in expr:
+                var_name, default = expr.split(":-", 1)
+                return os.environ.get(var_name, default)
+            return os.environ.get(expr, match.group(0))  # Return original if not found
             
         expanded_content = pattern.sub(replace_match, raw_content)
         config_dict = yaml.safe_load(expanded_content)

@@ -517,7 +517,7 @@ reconciliation:
 ## Monitoring
 monitoring:
   # Logging
-  log_level: "INFO"  # DEBUG/INFO/WARNING/ERROR/CRITICAL
+  log_level: "${LOG_LEVEL:-INFO}"  # DEBUG/INFO/WARNING/ERROR/CRITICAL
   log_format: "text"  # text = human-readable one line per event; json = machine-parseable
   
   # Alerts

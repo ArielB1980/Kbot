@@ -455,6 +455,10 @@ class BacktestRunner:
             # candle_manager.client for candle fetches.
             if getattr(lt.candle_manager, "ohlcv_fetcher", None) is not None:
                 lt.candle_manager.ohlcv_fetcher.client = self._exchange
+                # Disable rate limiting in replay — exchange sim is in-memory.
+                lt.candle_manager.ohlcv_fetcher._sem = asyncio.Semaphore(1000)
+                lt.candle_manager.ohlcv_fetcher.min_delay_ms = 0
+                lt.candle_manager.ohlcv_fetcher.max_retries = 1
         # Replay should not stall on live candle-health entry gate.
         lt._replay_disable_candle_health_gate = True
         # Replay research should bypass strict live gating for signal discovery.

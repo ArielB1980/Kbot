@@ -556,6 +556,7 @@ PY
 
     (
       exec 9>&-
+      export LOG_LEVEL="${RESEARCH_LOG_LEVEL:-WARNING}"
       "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" research \
         --mode "${MODE}" \
         --iterations "${ITERATIONS}" \
