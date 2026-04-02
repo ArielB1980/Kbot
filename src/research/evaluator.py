@@ -341,7 +341,11 @@ class CandidateEvaluator:
                         timeframes=list(self.spec.replay_timeframes),
                         config_overrides=params,
                         disable_cycle_guard_throttle=True,
-                        disable_db_mock=bool(os.getenv("DATABASE_URL", "").strip()),
+                        # NEVER disable the DB mock during research replay.
+                        # Replay reads candles from CSV, not DB.  Disabling the
+                        # mock causes save_trade() to write phantom trades into
+                        # the production trades table.
+                        disable_db_mock=False,
                     )
                     replay = await asyncio.wait_for(
                         runner.run(),
