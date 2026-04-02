@@ -176,7 +176,7 @@ class HarnessConfig:
     replay_timeframes: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
     replay_prefilter_enabled: bool = True
     exploration_min_signal_trades: int = 2
-    promotion_min_signal_trades: int = 10
+    promotion_min_signal_trades: int = 20
     min_probe_iterations_before_skip: int = 8
     min_partial_coverage_ratio: float = 0.05
     min_promotion_comparability: float = 0.50
