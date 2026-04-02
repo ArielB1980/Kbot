@@ -594,6 +594,9 @@ PY
     return 1
   }
 
+  # Disable errexit in the monitoring loop — poll/progress commands may return
+  # non-zero legitimately (e.g. empty string tests, python poll scripts).
+  set +e
   while any_alive; do
     write_latest_run_id "${RUN_ID}"
 
@@ -612,8 +615,8 @@ PY
         TOTAL_DONE=$(( TOTAL_DONE + D ))
         TOTAL_SYMS=$(( TOTAL_SYMS + T ))
       fi
-      [[ -n "${C}" ]] && AGG_CURRENT="${C}"
-      [[ -n "${L}" ]] && AGG_LAST_COMPLETED="${L}"
+      if [[ -n "${C}" ]]; then AGG_CURRENT="${C}"; fi
+      if [[ -n "${L}" ]]; then AGG_LAST_COMPLETED="${L}"; fi
     done
 
     if [[ "${TOTAL_DONE}" -gt "${LAST_DONE}" ]]; then
@@ -638,6 +641,7 @@ current=${AGG_CURRENT:-none}"
     done
     sleep 15
   done
+  set -e
 
   # Collect exit codes — worst one wins.
   RESEARCH_RC=0
@@ -650,7 +654,7 @@ current=${AGG_CURRENT:-none}"
   set -e
 
   # Merge worker state files into the canonical STATE_FILE for post-run hooks.
-  "${TRADING_DIR}/venv/bin/python3" - <<PY
+  "${TRADING_DIR}/venv/bin/python3" - <<PY || log_daemon "WARNING: state merge failed, continuing"
 import json
 from pathlib import Path
 
