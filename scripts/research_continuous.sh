@@ -846,6 +846,49 @@ ${CF_SUMMARY}
 single=${OUT_DIR}/counterfactual_single.json
 batch=${OUT_DIR}/counterfactual_batch.json"
 
+  # --- Strategy falsification diagnostics (best-effort) ---
+  {
+    log_daemon "falsification_signal_accuracy_start run_id=${RUN_ID}"
+    timeout 600 "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" falsification-signal-accuracy \
+      --symbols "${SYMBOLS}" --days "${DAYS}" \
+      --data-dir "data/replay" \
+      --timeframes "${REPLAY_TIMEFRAMES}" \
+      --out-file "${OUT_DIR}/falsification_signal_accuracy.json" \
+      || log_daemon "falsification_signal_accuracy failed rc=$?"
+
+    log_daemon "falsification_random_entry_start run_id=${RUN_ID}"
+    timeout 900 "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" falsification-random-entry \
+      --symbols "${SYMBOLS}" --days "${DAYS}" \
+      --data-dir "data/replay" \
+      --timeframes "${REPLAY_TIMEFRAMES}" \
+      --trials 3 \
+      --out-file "${OUT_DIR}/falsification_random_entry.json" \
+      || log_daemon "falsification_random_entry failed rc=$?"
+  } >> "${POST_LOG}" 2>&1 || true
+
+  FALSIFICATION_SUMMARY="$("${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
+import json
+from pathlib import Path
+sa = Path("${OUT_DIR}/falsification_signal_accuracy.json")
+if sa.exists():
+    d = json.loads(sa.read_text())
+    e = d.get("edge_assessment", {})
+    print(f"signal_accuracy: signals={d.get('total_signals',0)} best_hr={e.get('best_hit_rate','?')} p={e.get('best_p_value','?')} edge={e.get('has_directional_edge')}")
+else:
+    print("signal_accuracy: missing")
+re = Path("${OUT_DIR}/falsification_random_entry.json")
+if re.exists():
+    d = json.loads(re.read_text())
+    avg = d.get("random_mean", {})
+    print(f"random_entry: trials={d.get('num_successful',0)} avg_return={avg.get('net_return_pct',0):.2f}% avg_wr={avg.get('win_rate_pct',0):.1f}%")
+else:
+    print("random_entry: missing")
+PY
+)"
+  send_tg "🔬 Strategy falsification diagnostics
+run_id=${RUN_ID}
+${FALSIFICATION_SUMMARY}"
+
   "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/scripts/research_campaign_gate.py" \
     --run-id "${RUN_ID}" \
     --state-file "${STATE_FILE}" \

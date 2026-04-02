@@ -942,6 +942,90 @@ def counterfactual_twin_batch(
 
 
 
+@app.command("falsification-random-entry")
+def falsification_random_entry(
+    symbols: str = typer.Option(..., "--symbols", help="Comma-separated symbols"),
+    days: int = typer.Option(120, "--days", help="Lookback days"),
+    data_dir: Path = typer.Option(Path("data/replay"), "--data-dir", help="Replay data directory"),
+    out_file: Path = typer.Option(
+        Path("data/research/falsification_random_entry.json"), "--out-file",
+    ),
+    trials: int = typer.Option(5, "--trials", help="Number of random trials"),
+    signal_prob: float = typer.Option(0.01, "--signal-prob", help="Signal probability per tick"),
+    timeframes: str = typer.Option("15m,1h,4h,1d", "--timeframes"),
+    config_path: Path = typer.Option("src/config/config.yaml", "--config"),
+):
+    """Run random-entry baseline falsification test."""
+    import asyncio
+    config = _load_config(config_path)
+    _setup_logging_from_config(config)
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    tf_list = [t.strip() for t in timeframes.split(",") if t.strip()]
+
+    from src.research.falsification_random_entry import run_falsification
+
+    result = asyncio.get_event_loop().run_until_complete(
+        run_falsification(
+            data_dir=data_dir,
+            symbols=sym_list,
+            days=days,
+            num_trials=trials,
+            signal_probability=signal_prob,
+            timeframes=tf_list,
+        )
+    )
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    typer.echo(f"Random entry baseline: {out_file}")
+    avg = result.get("random_mean") or {}
+    typer.echo(
+        f"  Random mean: return={avg.get('net_return_pct', 0):.2f}% "
+        f"wr={avg.get('win_rate_pct', 0):.1f}% "
+        f"trades={avg.get('trade_count', 0):.0f}"
+    )
+
+
+@app.command("falsification-signal-accuracy")
+def falsification_signal_accuracy(
+    symbols: str = typer.Option(..., "--symbols", help="Comma-separated symbols"),
+    days: int = typer.Option(120, "--days", help="Lookback days"),
+    data_dir: Path = typer.Option(Path("data/replay"), "--data-dir", help="Replay data directory"),
+    out_file: Path = typer.Option(
+        Path("data/research/falsification_signal_accuracy.json"), "--out-file",
+    ),
+    timeframes: str = typer.Option("15m,1h,4h,1d", "--timeframes"),
+    config_path: Path = typer.Option("src/config/config.yaml", "--config"),
+):
+    """Run signal directional accuracy falsification test."""
+    import asyncio
+    config = _load_config(config_path)
+    _setup_logging_from_config(config)
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    tf_list = [t.strip() for t in timeframes.split(",") if t.strip()]
+
+    from src.research.falsification_signal_accuracy import run_falsification
+
+    result = asyncio.get_event_loop().run_until_complete(
+        run_falsification(
+            data_dir=data_dir,
+            symbols=sym_list,
+            days=days,
+            timeframes=tf_list,
+        )
+    )
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    typer.echo(f"Signal accuracy report: {out_file}")
+    edge = result.get("edge_assessment", {})
+    typer.echo(
+        f"  Signals: {result.get('total_signals', 0)} | "
+        f"Best horizon: {edge.get('best_horizon')} "
+        f"hit_rate={edge.get('best_hit_rate', 0):.1%} "
+        f"p={edge.get('best_p_value', 1):.4f} | "
+        f"Has edge: {edge.get('has_directional_edge')}"
+    )
+
+
 @app.callback()
 def main(
     version: bool = typer.Option(False, "--version", help="Show version and exit"),
