@@ -1,5 +1,4 @@
-"""
-Position evaluation logic for PositionManagerV2.
+"""Position evaluation logic for PositionManagerV2.
 
 Extracted from position_manager_v2.py to keep module sizes manageable.
 Contains the evaluate_position rule engine and trailing stop calculation.
