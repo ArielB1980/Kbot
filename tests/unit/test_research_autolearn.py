@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import importlib.util
 import sys
+import json
 
 
 def _load_module():
@@ -82,3 +83,15 @@ def test_write_overrides_preserves_pinned_scope_keys(tmp_path: Path) -> None:
     assert "AUTO_BACKFILL_DATA=1" in body
     assert "REPLAY_OVERRIDE_CONVICTION_MIN_FOR_ENTRY=20" in body
     assert "UNRELATED_KEY=drop-me" not in body
+
+
+def test_best_by_symbol_file_falls_back_to_nested_worker_artifacts(tmp_path: Path) -> None:
+    mod = _load_module()
+    nested = tmp_path / "w0_1_BTC_USD"
+    nested.mkdir(parents=True)
+    target = nested / "run_nested_best_by_symbol.json"
+    target.write_text(json.dumps({"best_by_symbol": {"BTC/USD": {"candidate_id": "BTC_USD_c001"}}}), encoding="utf-8")
+
+    found = mod._best_by_symbol_file(tmp_path)
+
+    assert found == target

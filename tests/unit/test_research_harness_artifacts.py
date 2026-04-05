@@ -1,6 +1,9 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
+import src.research.harness as harness_module
 from src.research.harness import HarnessConfig, SandboxAutoresearchHarness
 from src.research.models import CandidateMetrics, CandidateResult
 from src.research.state_store import ResearchStateStore
@@ -94,3 +97,39 @@ def test_persist_leaderboard_writes_incremental_artifacts(tmp_path):
     state = store.read_state()
     assert state["best_candidate_id"] == "c001"
     assert [row["candidate_id"] for row in state["leaderboard"]] == ["c001", "baseline"]
+
+
+def test_save_warm_start_persists_symbol_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_module, "_WARM_START_DIR", tmp_path / "warm_start")
+
+    harness_module.save_warm_start(
+        "BTC/USD",
+        {"strategy.adx_threshold": 18.0},
+        1.25,
+        "BTC_USD_c001",
+    )
+
+    payload = json.loads((tmp_path / "warm_start" / "BTC_USD_best.json").read_text())
+    assert payload["symbol"] == "BTC/USD"
+    assert payload["candidate_id"] == "BTC_USD_c001"
+    assert payload["score"] == 1.25
+    assert payload["params"]["strategy.adx_threshold"] == 18.0
+
+
+def test_save_warm_start_logs_and_does_not_raise_on_permission_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(harness_module, "_WARM_START_DIR", tmp_path / "warm_start")
+
+    def _raise_permission_error(self, data, *args, **kwargs):  # noqa: ANN001
+        raise PermissionError("blocked")
+
+    monkeypatch.setattr("pathlib.Path.write_text", _raise_permission_error)
+
+    harness_module.save_warm_start(
+        "ETH/USD",
+        {"strategy.adx_threshold": 22.0},
+        0.75,
+        "ETH_USD_c002",
+    )
+
+    captured = capsys.readouterr()
+    assert "WARM_START_SAVE_FAILED" in captured.out

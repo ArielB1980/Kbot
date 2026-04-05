@@ -159,6 +159,41 @@ class TestInvariants:
         assert pos.remaining_qty == Decimal("0")
         assert len(pos.exit_fills) == 1
 
+    def test_invariant_b_tiny_residual_is_clamped_and_position_closes(self):
+        """Floating-point dust after a full exit should not keep the position open."""
+        pos = self._create_position()
+        pos.entry_order_id = "entry-1"
+        pos.pending_exit_order_id = "stop-1"
+
+        assert pos.apply_order_event(
+            OrderEvent(
+                order_id="entry-1",
+                client_order_id="client-entry-1",
+                event_type=OrderEventType.FILLED,
+                event_seq=1,
+                timestamp=datetime.now(timezone.utc),
+                fill_qty=Decimal("2.038656816394684"),
+                fill_price=Decimal("50000"),
+                fill_id="fill-entry-1",
+            )
+        ) is True
+
+        assert pos.apply_order_event(
+            OrderEvent(
+                order_id="stop-1",
+                client_order_id="client-stop-1",
+                event_type=OrderEventType.FILLED,
+                event_seq=2,
+                timestamp=datetime.now(timezone.utc),
+                fill_qty=Decimal("2.0386568163946839"),
+                fill_price=Decimal("49900"),
+                fill_id="fill-stop-1",
+            )
+        ) is True
+
+        assert pos.remaining_qty == Decimal("0")
+        assert pos.state == PositionState.CLOSED
+
     def test_invariant_b_overflow_exit_fill_is_capped(self):
         """Exit fill qty larger than remaining must be capped."""
         pos = self._create_position()
@@ -194,6 +229,42 @@ class TestInvariants:
         assert pos.is_terminal is True
         assert len(pos.exit_fills) == 1
         assert pos.exit_fills[0].qty == Decimal("0.1")
+
+    def test_invariant_b_tiny_overflow_exit_fill_is_clamped_without_breaking_close(self):
+        """Replay-style float dust above remaining qty should still close cleanly."""
+        pos = self._create_position()
+        pos.entry_order_id = "entry-1"
+        pos.stop_order_id = "stop-1"
+
+        assert pos.apply_order_event(
+            OrderEvent(
+                order_id="entry-1",
+                client_order_id="client-entry-1",
+                event_type=OrderEventType.FILLED,
+                event_seq=1,
+                timestamp=datetime.now(timezone.utc),
+                fill_qty=Decimal("27.816411682892908"),
+                fill_price=Decimal("150"),
+                fill_id="fill-entry-1",
+            )
+        ) is True
+
+        assert pos.apply_order_event(
+            OrderEvent(
+                order_id="stop-1",
+                client_order_id="client-stop-1",
+                event_type=OrderEventType.FILLED,
+                event_seq=2,
+                timestamp=datetime.now(timezone.utc),
+                fill_qty=Decimal("27.81641168289291"),
+                fill_price=Decimal("149"),
+                fill_id="fill-stop-1",
+            )
+        ) is True
+
+        assert pos.remaining_qty == Decimal("0")
+        assert pos.state == PositionState.CLOSED
+        assert pos.exit_fills[0].qty == Decimal("27.816411682892908")
     
     def test_invariant_c_immutables_locked_after_ack(self):
         """Invariant C: Immutable fields locked after entry acknowledgement."""
@@ -1040,6 +1111,48 @@ class TestReconciliation:
             [],
         )
         assert issues_again == []
+
+    def test_qty_mismatch_is_deferred_while_pending_exit_orders_are_in_flight(self):
+        """Pending exit orders should own the next qty reduction, not synthetic sync."""
+        registry = get_position_registry()
+        registry._positions.clear()
+        registry._closed_positions.clear()
+
+        pos = ManagedPosition(
+            symbol="XRP/USD",
+            side=Side.SHORT,
+            position_id="test-xrp-defer-exit-sync",
+            initial_size=Decimal("1306.8668593085222"),
+            initial_entry_price=Decimal("1.4166"),
+            initial_stop_price=Decimal("1.45"),
+            initial_tp1_price=Decimal("1.40"),
+            initial_tp2_price=Decimal("1.39"),
+            initial_final_target=None,
+        )
+        pos.state = PositionState.OPEN
+        pos.entry_fills.append(FillRecord(
+            fill_id="entry-1",
+            order_id="entry-order-1",
+            side=Side.SHORT,
+            qty=Decimal("1306.8668593085222"),
+            price=Decimal("1.4166"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        ))
+        registry.register_position(pos)
+
+        issues = registry.reconcile_with_exchange(
+            {"PF_XRPUSD": {"side": "short", "qty": "129.7728348944515", "entry_price": "1.3865"}},
+            [],
+            pending_exit_symbols={"XRP/USD"},
+        )
+
+        assert len(issues) == 1
+        assert "QTY_SYNC_DEFERRED_PENDING_EXIT" in issues[0][1]
+        updated = registry.get_position("XRP/USD")
+        assert updated is not None
+        assert updated.remaining_qty == Decimal("1306.8668593085222")
+        assert len(updated.exit_fills) == 0
 
     def test_reconcile_with_exchange_dedupes_active_symbol_variants(self):
         """Duplicate active entries for one market should collapse to a single canonical position."""

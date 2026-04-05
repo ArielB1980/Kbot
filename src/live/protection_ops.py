@@ -39,6 +39,12 @@ async def reconcile_protective_orders(
     """
     if not lt.config.execution.tp_backfill_enabled:
         return
+    if lt.use_state_machine_v2 and getattr(lt, "_replay_relaxed_signal_gates", False):
+        logger.info(
+            "Skipping legacy protective-order reconciliation in replay V2 mode",
+            positions=len(raw_positions),
+        )
+        return
 
     from src.storage.repository import async_record_event
 

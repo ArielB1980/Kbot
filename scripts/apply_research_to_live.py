@@ -138,6 +138,8 @@ def load_best_from_run_dir(run_dir: Path) -> dict:
         return {}
     best_files = sorted(artifacts.glob("*_best_by_symbol.json"))
     if not best_files:
+        best_files = sorted(p for p in artifacts.rglob("*_best_by_symbol.json") if p.is_file())
+    if not best_files:
         return {}
     return load_best_by_symbol(best_files[-1])
 

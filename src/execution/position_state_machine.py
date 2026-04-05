@@ -30,6 +30,8 @@ from src.data.symbol_utils import normalize_symbol_for_position_match
 
 logger = get_logger(__name__)
 
+QTY_DUST_EPSILON = Decimal("1E-12")
+
 
 def _normalize_symbol(symbol: str) -> str:
     """Normalize symbol for consistent position lookup across formats.
@@ -377,6 +379,8 @@ class ManagedPosition:
         and must never go negative.
         """
         remaining = self.filled_entry_qty - self.filled_exit_qty
+        if abs(remaining) <= QTY_DUST_EPSILON:
+            return Decimal("0")
         check_invariant(
             remaining >= 0,
             f"INVARIANT B VIOLATION: remaining_qty negative: {remaining}"
@@ -580,15 +584,17 @@ class ManagedPosition:
                 )
                 return False
 
-            if fill_qty > remaining_before:
-                logger.critical(
-                    "Capping overflow exit fill to preserve INVARIANT B",
-                    symbol=self.symbol,
-                    order_id=event.order_id,
-                    fill_id=event.fill_id,
-                    fill_qty=str(fill_qty),
-                    remaining_before=str(remaining_before),
-                )
+            overflow = fill_qty - remaining_before
+            if overflow > 0:
+                if overflow > QTY_DUST_EPSILON:
+                    logger.critical(
+                        "Capping overflow exit fill to preserve INVARIANT B",
+                        symbol=self.symbol,
+                        order_id=event.order_id,
+                        fill_id=event.fill_id,
+                        fill_qty=str(fill_qty),
+                        remaining_before=str(remaining_before),
+                    )
                 fill_qty = remaining_before
         
         fill = FillRecord(
@@ -617,13 +623,15 @@ class ManagedPosition:
                 )
                 return False
             # Guard: cap exit fill qty at remaining to prevent INVARIANT B violation
-            if fill.qty > remaining_before:
-                logger.critical(
-                    "Exit fill exceeds remaining qty — capping to prevent INVARIANT B violation",
-                    symbol=self.symbol,
-                    fill_qty=str(fill.qty),
-                    remaining=str(remaining_before),
-                )
+            overflow = fill.qty - remaining_before
+            if overflow > 0:
+                if overflow > QTY_DUST_EPSILON:
+                    logger.critical(
+                        "Exit fill exceeds remaining qty — capping to prevent INVARIANT B violation",
+                        symbol=self.symbol,
+                        fill_qty=str(fill.qty),
+                        remaining=str(remaining_before),
+                    )
                 fill = FillRecord(
                     fill_id=fill.fill_id,
                     order_id=fill.order_id,
@@ -1494,7 +1502,8 @@ class PositionRegistry:
     def reconcile_with_exchange(
         self,
         exchange_positions: Dict[str, Dict],  # symbol -> {side, qty, entry_price}
-        exchange_orders: List[Dict]  # [{order_id, symbol, side, status, ...}]
+        exchange_orders: List[Dict],  # [{order_id, symbol, side, status, ...}]
+        pending_exit_symbols: Optional[Set[str]] = None,
     ) -> List[Tuple[str, str]]:
         """
         Reconcile registry with exchange state.
@@ -1510,6 +1519,11 @@ class PositionRegistry:
         
         issues = []
         qty_epsilon = Decimal("0.0001")
+        pending_exit_normalized = {
+            normalize_symbol_for_position_match(symbol)
+            for symbol in (pending_exit_symbols or set())
+            if symbol
+        }
         
         orphaned_symbols: list[str] = []
         
@@ -1754,6 +1768,24 @@ class PositionRegistry:
                                 exchange_qty=str(exchange_qty),
                             )
                     elif abs(exchange_qty - pos.remaining_qty) > qty_epsilon:
+                        if (
+                            exchange_qty < pos.remaining_qty
+                            and symbol_norm in pending_exit_normalized
+                        ):
+                            issues.append(
+                                (
+                                    symbol,
+                                    "QTY_SYNC_DEFERRED_PENDING_EXIT: "
+                                    f"Registry {pos.remaining_qty} vs Exchange {exchange_qty}",
+                                )
+                            )
+                            logger.info(
+                                "Deferred qty sync while pending exit orders are still in flight",
+                                symbol=symbol,
+                                registry_qty=str(pos.remaining_qty),
+                                exchange_qty=str(exchange_qty),
+                            )
+                            continue
                         exchange_entry_price_raw = exchange_pos.get("entry_price")
                         exchange_entry_price: Optional[Decimal] = None
                         if exchange_entry_price_raw is not None:

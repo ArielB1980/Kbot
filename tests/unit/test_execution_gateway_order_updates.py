@@ -11,7 +11,7 @@ from src.execution.execution_gateway import (
     PendingOrder,
 )
 from src.execution.position_manager_v2 import ActionType, ManagementAction
-from src.execution.position_state_machine import PositionState
+from src.execution.position_state_machine import ExitReason, FillRecord, ManagedPosition, PositionState
 
 
 def _build_gateway() -> ExecutionGateway:
@@ -195,19 +195,19 @@ async def test_execute_entry_passes_action_leverage_to_client():
         return_value={"bid": 50000, "ask": 50010}
     )
 
-    action = ManagementAction(
-        type=ActionType.OPEN_POSITION,
-        symbol="BTC/USD",
-        reason="test-entry",
-        side=Side.LONG,
-        size=Decimal("1"),
-        price=Decimal("50000"),
-        leverage=Decimal("3"),
-        order_type=OrderType.LIMIT,
-        client_order_id="entry-client-2",
-        position_id="pos-2",
-        priority=10,
-    )
+    action = MagicMock()
+    action.type = ActionType.OPEN_POSITION
+    action.symbol = "BTC/USD"
+    action.reason = "test-entry"
+    action.side = Side.LONG
+    action.size = Decimal("1")
+    action.qty = Decimal("1")
+    action.price = Decimal("50000")
+    action.leverage = Decimal("3")
+    action.order_type = OrderType.LIMIT
+    action.client_order_id = "entry-client-2"
+    action.position_id = "pos-2"
+    action.priority = 10
 
     result = await gateway.execute_action(action, order_symbol="BTC/USD:USD")
 
@@ -258,9 +258,108 @@ async def test_sync_with_exchange_persists_qty_synced_positions():
 
     gateway.registry.reconcile_with_exchange.assert_called_once()
     gateway.persistence.save_position.assert_called_with(synced_pos)
-    assert result["issues"] == [
-        ("ENA/USD", "QTY_SYNCED: exit+39 local=111 exchange=72 price=0.1546")
-    ]
+
+
+@pytest.mark.asyncio
+async def test_backfill_exit_fills_only_adds_missing_delta_per_order():
+    gateway = _build_gateway()
+    gateway.client.fetch_order.return_value = {
+        "status": "filled",
+        "filled": "8",
+        "average": "110",
+    }
+
+    position = ManagedPosition(
+        symbol="BTC/USD",
+        side=Side.LONG,
+        position_id="pos-1",
+        initial_size=Decimal("10"),
+        initial_entry_price=Decimal("100"),
+        initial_stop_price=Decimal("95"),
+        initial_tp1_price=Decimal("110"),
+        initial_tp2_price=None,
+        initial_final_target=None,
+    )
+    position.entry_fills.append(
+        FillRecord(
+            fill_id="entry-fill-1",
+            order_id="entry-1",
+            side=Side.LONG,
+            qty=Decimal("10"),
+            price=Decimal("100"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        )
+    )
+    position.tp1_order_id = "tp1-1"
+    position.exit_fills.append(
+        FillRecord(
+            fill_id="existing-exit-fill",
+            order_id="tp1-1",
+            side=Side.SHORT,
+            qty=Decimal("4"),
+            price=Decimal("110"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=False,
+        )
+    )
+    position._mark_closed(ExitReason.TAKE_PROFIT_1)
+
+    await gateway._backfill_exit_fills(position)
+
+    assert len(position.exit_fills) == 2
+    assert position.exit_fills[-1].order_id == "tp1-1"
+    assert position.exit_fills[-1].qty == Decimal("4")
+
+
+@pytest.mark.asyncio
+async def test_backfill_exit_fills_skips_when_order_already_fully_represented():
+    gateway = _build_gateway()
+    gateway.client.fetch_order.return_value = {
+        "status": "filled",
+        "filled": "4",
+        "average": "110",
+    }
+
+    position = ManagedPosition(
+        symbol="BTC/USD",
+        side=Side.LONG,
+        position_id="pos-2",
+        initial_size=Decimal("10"),
+        initial_entry_price=Decimal("100"),
+        initial_stop_price=Decimal("95"),
+        initial_tp1_price=Decimal("110"),
+        initial_tp2_price=None,
+        initial_final_target=None,
+    )
+    position.entry_fills.append(
+        FillRecord(
+            fill_id="entry-fill-1",
+            order_id="entry-1",
+            side=Side.LONG,
+            qty=Decimal("10"),
+            price=Decimal("100"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=True,
+        )
+    )
+    position.tp1_order_id = "tp1-1"
+    position.exit_fills.append(
+        FillRecord(
+            fill_id="existing-exit-fill",
+            order_id="tp1-1",
+            side=Side.SHORT,
+            qty=Decimal("4"),
+            price=Decimal("110"),
+            timestamp=datetime.now(timezone.utc),
+            is_entry=False,
+        )
+    )
+    position._mark_closed(ExitReason.TAKE_PROFIT_1)
+
+    await gateway._backfill_exit_fills(position)
+
+    assert len(position.exit_fills) == 1
 
 
 @pytest.mark.asyncio

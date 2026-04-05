@@ -243,25 +243,27 @@ class SignalScorer:
     
     def _score_htf_alignment(self, signal: Signal, bias: str) -> float:
         """
-        Score HTF alignment (0-20 points).
+        Score HTF alignment (-penalty to +20 points).
 
         Logic:
         - Direction aligned with Bias: +20
         - Bias Neutral: +10
-        - Counter-trend: 0
+        - Counter-trend: -counter_trend_score_penalty (default -5)
         """
         from src.domain.models import SignalType
-        
+
         if bias == "neutral":
             return 10.0
-            
+
         is_bullish = bias == "bullish"
         is_long = signal.signal_type == SignalType.LONG
-        
+
         if (is_bullish and is_long) or (not is_bullish and not is_long):
             return 20.0
-            
-        return 0.0
+
+        # Counter-trend: apply negative penalty so signal must score higher elsewhere
+        penalty = getattr(self.config, "counter_trend_score_penalty", 5.0)
+        return -penalty
     
     def _score_adx_strength(self, adx: float) -> float:
         """

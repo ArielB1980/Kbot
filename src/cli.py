@@ -43,6 +43,19 @@ def _configure_replay_state_isolation(mode: str, state_file: Path) -> dict[str, 
         os.environ["SAFETY_STATE_PATH"] = path
         applied["SAFETY_STATE_PATH"] = path
 
+    # Replay research must never inherit production/live startup semantics
+    # from the host environment. The replay runner will later set DRY_RUN=0
+    # inside its own isolated runtime so the exchange sim can accept orders.
+    for key, value in (
+        ("ENV", "dev"),
+        ("ENVIRONMENT", "dev"),
+        ("DRY_RUN", "1"),
+        ("SYSTEM_DRY_RUN", "1"),
+    ):
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+            applied[key] = value
+
     return applied
 
 
@@ -83,7 +96,8 @@ def backtest(
     """
     # Load configuration
     config = _load_config(config_path)
-    _setup_logging_from_config(config)
+    research_log_file = state_file.with_name(f"{state_file.stem}.app.log")
+    _setup_logging_from_config(config, log_file=research_log_file)
     
     logger.info("Starting backtest", start=start, end=end, symbol=symbol)
     
@@ -951,7 +965,16 @@ def falsification_random_entry(
         Path("data/research/falsification_random_entry.json"), "--out-file",
     ),
     trials: int = typer.Option(5, "--trials", help="Number of random trials"),
-    signal_prob: float = typer.Option(0.01, "--signal-prob", help="Signal probability per tick"),
+    signal_prob: Optional[float] = typer.Option(
+        None,
+        "--signal-prob",
+        help="Optional Bernoulli signal probability override. Defaults to using the strategy signal schedule.",
+    ),
+    strategy_signal_file: Optional[Path] = typer.Option(
+        None,
+        "--strategy-signal-file",
+        help="Optional falsification-signal-accuracy artifact to match signal timing/frequency.",
+    ),
     timeframes: str = typer.Option("15m,1h,4h,1d", "--timeframes"),
     config_path: Path = typer.Option("src/config/config.yaml", "--config"),
 ):
@@ -972,6 +995,7 @@ def falsification_random_entry(
             num_trials=trials,
             signal_probability=signal_prob,
             timeframes=tf_list,
+            strategy_signal_file=strategy_signal_file or out_file.with_name("falsification_signal_accuracy.json"),
         )
     )
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1011,6 +1035,7 @@ def falsification_signal_accuracy(
             symbols=sym_list,
             days=days,
             timeframes=tf_list,
+            strategy_config=config.strategy,
         )
     )
     out_file.parent.mkdir(parents=True, exist_ok=True)

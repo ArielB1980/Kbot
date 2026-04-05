@@ -162,6 +162,9 @@ class ProductionHardeningLayer:
         # Replay / research harness: do not block ticks on production halt_state.json
         self.ignore_persisted_halt: bool = False
         self._replay_halt_skip_logged: bool = False
+        # Replay / research harness: bypass invariant monitor checks entirely.
+        # Simulated equity/concentration levels should not block research entries.
+        self.disable_invariant_checks: bool = False
 
         # Gate tracking
         self._gate_checked_this_tick = False
@@ -670,10 +673,14 @@ class ProductionHardeningLayer:
     
     def is_trading_allowed(self) -> bool:
         """Check if new entries are allowed."""
+        if self.disable_invariant_checks:
+            return True
         return self.invariant_monitor.is_trading_allowed() and self._gate_decision == HardeningDecision.ALLOW
-    
+
     def is_management_allowed(self) -> bool:
         """Check if position management is allowed."""
+        if self.disable_invariant_checks:
+            return True
         return self.invariant_monitor.is_management_allowed()
     
     # ===== IDEMPOTENCY =====

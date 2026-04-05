@@ -101,6 +101,8 @@ def _count_log_regex(path: Path, pattern: str) -> int:
 
 def _best_by_symbol_file(artifacts_dir: Path) -> Path | None:
     files = sorted(artifacts_dir.glob("*_best_by_symbol.json"))
+    if not files:
+        files = sorted(p for p in artifacts_dir.rglob("*_best_by_symbol.json") if p.is_file())
     return files[-1] if files else None
 
 

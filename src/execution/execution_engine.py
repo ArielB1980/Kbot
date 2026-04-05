@@ -241,7 +241,24 @@ class ExecutionEngine:
         size_qty = size_notional / fut_entry
         qty_step = step_size if step_size is not None and step_size > 0 else self.qty_precision
         tp_quantities = self._split_quantities(size_qty, len(tps), effective_tp_splits, step_size=qty_step)
-        
+
+        # Guard: if minimum-step promotion caused TP qtys to exceed total_qty, scale down
+        # proportionally so the sum never exceeds the position size.
+        tp_qty_sum = sum(tp_quantities)
+        if tp_qty_sum > size_qty and tp_quantities:
+            scale = size_qty / tp_qty_sum
+            scaled = [(q * scale).quantize(qty_step, rounding=ROUND_DOWN) for q in tp_quantities]
+            # Ensure every TP still has at least one step after scaling; if not, keep original
+            # (caller will need to handle the over-allocation, but at least we tried).
+            if all(q >= qty_step for q in scaled):
+                logger.warning(
+                    "TP qty sum exceeded total_qty after minimum-step promotion; scaled down",
+                    tp_qty_sum_before=str(tp_qty_sum),
+                    total_qty=str(size_qty),
+                    scale=str(scale),
+                )
+                tp_quantities = scaled
+
         # 4. Construct Orders (Intents only, ID generation happens at placement)
         # Entry
         entry_side = Side.LONG if signal.signal_type == SignalType.LONG else Side.SHORT
@@ -506,12 +523,13 @@ class ExecutionEngine:
                 split_pct = Decimal(str(splits[i]))
                 qty = (total_qty * split_pct).quantize(step, rounding=ROUND_DOWN)
                 if qty <= 0:
+                    qty = step
                     logger.warning(
-                        "TP qty rounded to zero, skipping",
+                        "TP qty rounded to minimum step",
                         tp_index=i + 1,
                         split_pct=str(split_pct),
+                        min_qty=str(step),
                     )
-                    continue
                 qtys.append(qty)
         else:
             remaining = total_qty

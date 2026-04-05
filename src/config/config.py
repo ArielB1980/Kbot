@@ -497,6 +497,14 @@ class StrategyConfig(BaseSettings):
 
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
+    allow_counter_trend: bool = Field(
+        default=True,
+        description="Allow signals counter to HTF EMA200 bias",
+    )
+    counter_trend_score_penalty: float = Field(
+        default=5.0, ge=0.0, le=30.0,
+        description="Score penalty for counter-trend signals",
+    )
     
     # Scoring Gates
     min_score_tight_smc_aligned: float = Field(default=75.0, ge=0.0, le=100.0)

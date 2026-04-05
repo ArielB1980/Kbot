@@ -3,6 +3,7 @@ import pytest
 from types import SimpleNamespace
 
 from src.live.auction_runner import (
+    _collect_open_position_symbols,
     _compute_symbol_churn_cooldowns,
     _db_backed_cooldowns_enabled,
     _split_reconcile_issues,
@@ -84,6 +85,24 @@ def test_split_reconcile_issues_missing_exchange_exit_grace_non_blocking():
     )
     assert blocking == []
     assert len(non_blocking) == 1
+
+
+def test_collect_open_position_symbols_includes_registry_active_positions():
+    open_symbols = _collect_open_position_symbols(
+        [],
+        SimpleNamespace(
+            get_all_active=lambda: [SimpleNamespace(symbol="PF_XRPUSD"), SimpleNamespace(symbol="SOL/USD")]
+        ),
+    )
+    assert open_symbols == {"XRPUSD", "SOLUSD"}
+
+
+def test_collect_open_position_symbols_merges_exchange_and_registry_symbols():
+    open_symbols = _collect_open_position_symbols(
+        [SimpleNamespace(spot_symbol="BTC/USD"), SimpleNamespace(spot_symbol=None)],
+        SimpleNamespace(get_all_active=lambda: [SimpleNamespace(symbol="PF_ETHUSD")]),
+    )
+    assert open_symbols == {"BTCUSD", "ETHUSD"}
 
 
 def test_filter_strategic_closes_allows_when_trading_allowed():

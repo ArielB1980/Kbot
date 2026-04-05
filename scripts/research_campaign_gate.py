@@ -56,6 +56,8 @@ def _cycle_stats(run_id: str, state_file: Path, artifacts_dir: Path, run_log: Pa
     returns: list[float] = []
     trades: list[int] = []
     best_file_candidates = sorted(artifacts_dir.glob("*_best_by_symbol.json"))
+    if not best_file_candidates:
+        best_file_candidates = sorted(p for p in artifacts_dir.rglob("*_best_by_symbol.json") if p.is_file())
     if best_file_candidates:
         best_payload = _read_json(best_file_candidates[-1]).get("best_by_symbol") or {}
         for symbol, payload in best_payload.items():
@@ -220,4 +222,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

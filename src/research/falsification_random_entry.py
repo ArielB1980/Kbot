@@ -8,7 +8,9 @@ have no edge — it's the risk management doing all the work.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
+from collections import deque
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +23,58 @@ from src.monitoring.logger import get_logger
 from src.research.evaluator import _metrics_from_replay
 
 logger = get_logger(__name__)
+
+
+def _parse_setup_type(raw: Any) -> SetupType:
+    """Best-effort SetupType normalization from a serialized signal record."""
+    if isinstance(raw, SetupType):
+        return raw
+    raw_value = str(raw or "").strip().lower()
+    for setup in SetupType:
+        if setup.value == raw_value:
+            return setup
+    return SetupType.OB
+
+
+def _load_strategy_signal_schedule(strategy_signal_file: Path | None) -> dict[str, deque[dict[str, Any]]]:
+    """Load per-symbol signal timestamps from a falsification signal-accuracy artifact."""
+    if strategy_signal_file is None or not strategy_signal_file.exists():
+        return {}
+    try:
+        payload = json.loads(strategy_signal_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        logger.warning("random_entry_schedule_load_failed", path=str(strategy_signal_file))
+        return {}
+
+    detail_rows = payload.get("signal_details", []) or []
+    expected_total = int(payload.get("total_signals") or 0)
+    if expected_total and len(detail_rows) != expected_total:
+        raise ValueError(
+            f"strategy signal schedule is truncated: detail_rows={len(detail_rows)} total_signals={expected_total}"
+        )
+
+    schedule: dict[str, deque[dict[str, Any]]] = {}
+    for row in detail_rows:
+        symbol = str(row.get("symbol") or "").strip()
+        timestamp_raw = str(row.get("timestamp") or "").strip()
+        if not symbol or not timestamp_raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        schedule.setdefault(symbol, deque()).append({
+            "timestamp": ts,
+            "setup_type": _parse_setup_type(row.get("setup_type")),
+            "score": float(row.get("score", 50.0) or 50.0),
+        })
+    return schedule
+
+
+def _count_scheduled_signals(schedule: dict[str, deque[dict[str, Any]]]) -> int:
+    return sum(len(queue) for queue in schedule.values())
 
 
 def _compute_atr(candles: list[Candle], period: int = 14) -> Decimal:
@@ -40,9 +94,19 @@ def _compute_atr(candles: list[Candle], period: int = 14) -> Decimal:
 class RandomSignalGenerator:
     """Replaces SMCEngine.generate_signal with random entries."""
 
-    def __init__(self, signal_probability: float, seed: int):
+    def __init__(
+        self,
+        signal_probability: float | None,
+        seed: int,
+        *,
+        scheduled_signals: dict[str, deque[dict[str, Any]]] | None = None,
+    ):
         self._rng = random.Random(seed)
         self._signal_probability = signal_probability
+        self._scheduled_signals = {
+            symbol: deque(events)
+            for symbol, events in (scheduled_signals or {}).items()
+        }
 
     def _no_signal(self, symbol: str, candles: list[Candle]) -> Signal:
         ts = candles[-1].timestamp if candles else datetime.now(UTC)
@@ -76,8 +140,18 @@ class RandomSignalGenerator:
         if not candles:
             return self._no_signal(symbol, [])
 
-        if self._rng.random() > self._signal_probability:
-            return self._no_signal(symbol, candles)
+        scheduled = None
+        current_ts = candles[-1].timestamp
+        queue = self._scheduled_signals.get(symbol)
+        if queue:
+            while queue and queue[0]["timestamp"] < current_ts:
+                queue.popleft()
+            if queue and queue[0]["timestamp"] == current_ts:
+                scheduled = queue.popleft()
+
+        if scheduled is None:
+            if self._signal_probability is None or self._rng.random() > self._signal_probability:
+                return self._no_signal(symbol, candles)
 
         price = candles[-1].close
         atr = _compute_atr(refine_candles_1h or candles)
@@ -100,13 +174,13 @@ class RandomSignalGenerator:
             stop_loss=stop_loss,
             take_profit=take_profit,
             reasoning="random_entry_baseline",
-            setup_type=self._rng.choice(list(SetupType)),
+            setup_type=scheduled["setup_type"] if scheduled is not None else self._rng.choice(list(SetupType)),
             regime="tight_smc",
             higher_tf_bias="neutral",
             adx=Decimal("25"),
             atr=atr,
             ema200_slope="flat",
-            score=50.0,
+            score=float(scheduled["score"]) if scheduled is not None else 50.0,
         )
 
 
@@ -115,20 +189,26 @@ class RandomEntryRunner(BacktestRunner):
 
     def __init__(
         self,
-        signal_probability: float,
+        signal_probability: float | None,
         seed: int,
+        scheduled_signals: dict[str, deque[dict[str, Any]]] | None = None,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self._signal_probability = signal_probability
         self._seed = seed
+        self._scheduled_signals = scheduled_signals or {}
 
     async def _run_with_db_mock(self) -> Any:
         """Override to inject random signal generator after init."""
         await self._initialize()
 
         # Patch the signal engine
-        gen = RandomSignalGenerator(self._signal_probability, self._seed)
+        gen = RandomSignalGenerator(
+            self._signal_probability,
+            self._seed,
+            scheduled_signals=self._scheduled_signals,
+        )
         if self._live_trading is not None:
             self._live_trading.smc_engine.generate_signal = gen.generate_signal
 
@@ -173,15 +253,17 @@ async def run_single_trial(
     symbols: list[str],
     start: datetime,
     end: datetime,
-    signal_probability: float,
+    signal_probability: float | None,
     seed: int,
     timeframes: list[str],
     starting_equity: Decimal,
+    scheduled_signals: dict[str, deque[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Run one random-entry replay trial and return metrics."""
     runner = RandomEntryRunner(
         signal_probability=signal_probability,
         seed=seed,
+        scheduled_signals=scheduled_signals,
         data_dir=data_dir,
         symbols=symbols,
         start=start,
@@ -203,13 +285,29 @@ async def run_falsification(
     symbols: list[str],
     days: int,
     num_trials: int,
-    signal_probability: float,
+    signal_probability: float | None,
     timeframes: list[str],
     starting_equity: Decimal = Decimal("10000"),
+    strategy_signal_file: Path | None = None,
 ) -> dict[str, Any]:
     """Run N random-entry trials and return comparison report."""
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
+    strategy_schedule = _load_strategy_signal_schedule(strategy_signal_file)
+    scheduled_signal_count = _count_scheduled_signals(strategy_schedule)
+    if strategy_schedule:
+        logger.info(
+            "random_entry_schedule_loaded",
+            path=str(strategy_signal_file),
+            scheduled_signals=scheduled_signal_count,
+            symbols=len(strategy_schedule),
+        )
+    else:
+        logger.info(
+            "random_entry_schedule_missing",
+            path=str(strategy_signal_file) if strategy_signal_file is not None else None,
+            fallback_signal_probability=signal_probability,
+        )
 
     trial_results: list[dict[str, Any]] = []
     for i in range(num_trials):
@@ -225,6 +323,7 @@ async def run_falsification(
                     seed=i + 42,
                     timeframes=timeframes,
                     starting_equity=starting_equity,
+                    scheduled_signals=strategy_schedule,
                 ),
                 timeout=1800,
             )
@@ -253,6 +352,9 @@ async def run_falsification(
         "num_successful": len(successful),
         "random_mean": avg,
         "signal_probability": signal_probability,
+        "strategy_signal_file": str(strategy_signal_file) if strategy_signal_file else None,
+        "strategy_signal_count": scheduled_signal_count,
+        "signal_schedule_mode": "strategy_schedule" if strategy_schedule else "probability",
         "num_trials": num_trials,
         "symbols": symbols,
         "days": days,

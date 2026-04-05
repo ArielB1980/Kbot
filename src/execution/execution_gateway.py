@@ -34,6 +34,7 @@ from src.execution.position_state_machine import (
     OrderEventType,
     PositionRegistry,
     PositionState,
+    QTY_DUST_EPSILON,
     get_position_registry,
     normalize_exit_reason,
 )
@@ -1278,27 +1279,28 @@ class ExecutionGateway:
         # If exit fills are missing or incomplete, try to backfill from exchange
         # before recording. This is common for orphaned positions where the
         # exchange closed exposure but local fill events were partially missed.
+        missing_exit_qty = position.filled_entry_qty - position.filled_exit_qty
         if position.filled_entry_qty > 0 and (
-            not position.exit_fills or position.filled_exit_qty < position.filled_entry_qty
+            not position.exit_fills or missing_exit_qty > QTY_DUST_EPSILON
         ):
             await self._backfill_exit_fills(position)
 
         # Do not fabricate precise trade stats for orphaned positions when we
         # still lack complete exit fills after backfill. Emit a clear alert
         # without P&L instead of a misleading "entry == exit" summary.
+        missing_exit_qty = position.filled_entry_qty - position.filled_exit_qty
         if (
             position.state == PositionState.ORPHANED
             and position.filled_entry_qty > 0
-            and position.filled_exit_qty < position.filled_entry_qty
+            and missing_exit_qty > QTY_DUST_EPSILON
         ):
-            missing_qty = position.filled_entry_qty - position.filled_exit_qty
             logger.warning(
                 "ORPHANED_CLOSE_UNPRICED: skipping precise trade record",
                 position_id=position.position_id,
                 symbol=position.symbol,
                 entry_qty=str(position.filled_entry_qty),
                 exit_qty=str(position.filled_exit_qty),
-                missing_qty=str(missing_qty),
+                missing_qty=str(missing_exit_qty),
             )
             try:
                 from src.monitoring.alert_dispatcher import fmt_size, send_alert
@@ -1308,7 +1310,7 @@ class ExecutionGateway:
                     f"Side: {position.side.value.upper()}\n"
                     f"Entry size: {fmt_size(position.filled_entry_qty)}\n"
                     f"Known exited: {fmt_size(position.filled_exit_qty)}\n"
-                    f"Unpriced remainder: {fmt_size(missing_qty)}\n"
+                    f"Unpriced remainder: {fmt_size(missing_exit_qty)}\n"
                     "Reason: orphaned_exchange_reconcile (exact exit fills unavailable)",
                     urgent=True,
                 )
@@ -1447,13 +1449,54 @@ class ExecutionGateway:
                 status = order_data.get("status", "")
                 filled = Decimal(str(order_data.get("filled", 0)))
                 avg_price = order_data.get("average", 0)
+                existing_for_order = sum(
+                    fill.qty for fill in position.exit_fills if fill.order_id == order_id
+                )
+                missing_for_order = filled - existing_for_order
+                remaining_entry_qty = max(
+                    Decimal("0"),
+                    position.filled_entry_qty - position.filled_exit_qty,
+                )
                 
                 if status in ("closed", "filled") and filled > 0 and avg_price:
+                    if missing_for_order <= 0:
+                        logger.info(
+                            "Skipping order backfill already represented locally",
+                            symbol=symbol,
+                            label=label,
+                            order_id=order_id,
+                            exchange_filled=str(filled),
+                            existing_local_qty=str(existing_for_order),
+                        )
+                        continue
+                    if remaining_entry_qty <= 0:
+                        logger.info(
+                            "Skipping order backfill on already-flat position",
+                            symbol=symbol,
+                            label=label,
+                            order_id=order_id,
+                        )
+                        continue
+                    fill_qty = min(missing_for_order, remaining_entry_qty)
+                    if fill_qty <= 0:
+                        continue
+                    if fill_qty < missing_for_order:
+                        logger.warning(
+                            "Capping order backfill to preserve entry/exit invariant",
+                            symbol=symbol,
+                            label=label,
+                            order_id=order_id,
+                            exchange_filled=str(filled),
+                            existing_local_qty=str(existing_for_order),
+                            missing_for_order=str(missing_for_order),
+                            remaining_entry_qty=str(remaining_entry_qty),
+                            capped_qty=str(fill_qty),
+                        )
                     fill = FillRecord(
                         fill_id=f"backfill-{label}-{order_id[:12]}",
                         order_id=order_id,
                         side=exit_side,
-                        qty=filled,
+                        qty=fill_qty,
                         price=Decimal(str(avg_price)),
                         timestamp=datetime.now(timezone.utc),
                         is_entry=False,
@@ -1465,7 +1508,7 @@ class ExecutionGateway:
                         symbol=symbol,
                         label=label,
                         order_id=order_id,
-                        filled=str(filled),
+                        filled=str(fill_qty),
                         price=str(avg_price),
                     )
             except Exception as e:
@@ -1961,6 +2004,8 @@ class ExecutionGateway:
         
         Returns dict of issues found.
         """
+        from src.data.symbol_utils import normalize_symbol_for_position_match
+
         # Get exchange state
         positions = await self.client.get_all_futures_positions()
         orders = await self.client.get_futures_open_orders()
@@ -1975,9 +2020,26 @@ class ExecutionGateway:
             for p in positions
             if float(p.get('contracts', p.get('size', 0))) != 0
         }
+        pending_exit_symbols = {
+            normalize_symbol_for_position_match(pending.exchange_symbol or pending.symbol)
+            for pending in self._pending_orders.values()
+            if pending.status in ("pending", "submitted")
+            and pending.purpose in {
+                OrderPurpose.STOP_INITIAL,
+                OrderPurpose.STOP_UPDATE,
+                OrderPurpose.EXIT_STOP,
+                OrderPurpose.EXIT_MARKET,
+                OrderPurpose.EXIT_TP,
+                OrderPurpose.EXIT_REVERSAL,
+            }
+        }
         
         # Reconcile (this marks orphaned positions and moves them to closed)
-        issues = self.registry.reconcile_with_exchange(exchange_positions, orders)
+        issues = self.registry.reconcile_with_exchange(
+            exchange_positions,
+            orders,
+            pending_exit_symbols=pending_exit_symbols,
+        )
         
         # Persist any orphaned positions (now in closed history)
         # This ensures they're saved as ORPHANED and won't be reloaded as ACTIVE

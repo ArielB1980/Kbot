@@ -45,6 +45,8 @@ class PositionPersistence:
         self._local = threading.local()
         # Suppress repeated duplicate-fill logs for the same fill_id.
         self._logged_fill_collisions: Set[str] = set()
+        # Suppress repeated missing-stop warnings for the same active position.
+        self._logged_missing_stop_positions: Set[str] = set()
         
         # Ensure directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -261,9 +263,17 @@ class PositionPersistence:
         missing-stop conditions early and consistently in persistence flow.
         """
         if position.is_terminal:
+            self._logged_missing_stop_positions.discard(position.position_id)
+            return True
+        if position.state in (PositionState.PENDING, PositionState.CANCEL_PENDING):
+            self._logged_missing_stop_positions.discard(position.position_id)
             return True
         if position.stop_order_id:
+            self._logged_missing_stop_positions.discard(position.position_id)
             return True
+        if position.position_id in self._logged_missing_stop_positions:
+            return False
+        self._logged_missing_stop_positions.add(position.position_id)
         logger.warning(
             "stop_missing_after_reconcile",
             position_id=position.position_id,

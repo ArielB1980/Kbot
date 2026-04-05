@@ -152,6 +152,35 @@ def _filter_strategic_closes_for_gate(
     return []
 
 
+def _collect_open_position_symbols(
+    open_positions_meta: List,
+    position_registry=None,
+) -> set[str]:
+    """
+    Build the open-symbol blocklist for the auction pre-filter.
+
+    Exchange-backed open positions are the primary source of truth, but the
+    registry can temporarily retain active positions while replay reconciliation
+    converges. Including both prevents repeated same-symbol reopen attempts
+    against stale-but-still-active registry state.
+    """
+    from src.data.symbol_utils import normalize_symbol_for_position_match
+
+    open_symbols: set[str] = set()
+    for meta in open_positions_meta or []:
+        spot = getattr(meta, "spot_symbol", None)
+        if spot:
+            open_symbols.add(normalize_symbol_for_position_match(spot))
+
+    if position_registry is not None and hasattr(position_registry, "get_all_active"):
+        for position in position_registry.get_all_active() or []:
+            symbol = getattr(position, "symbol", None)
+            if symbol:
+                open_symbols.add(normalize_symbol_for_position_match(symbol))
+
+    return open_symbols
+
+
 def _normalize_symbol_key(symbol: str) -> str:
     key = (symbol or "").strip().upper()
     key = key.split(":")[0]
@@ -533,14 +562,15 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
                     error_type=type(e).__name__,
                 )
 
-        # Pre-filter: exclude signals for symbols that already have open positions
+        # Pre-filter: exclude signals for symbols that already have open positions.
+        # Include registry-held active positions so replay does not churn on the
+        # same symbol while orphan hysteresis or exit convergence is still in flight.
         from src.data.symbol_utils import normalize_symbol_for_position_match
 
-        open_position_symbols: set = set()
-        for meta in open_positions_meta:
-            spot = getattr(meta, "spot_symbol", None)
-            if spot:
-                open_position_symbols.add(normalize_symbol_for_position_match(spot))
+        open_position_symbols = _collect_open_position_symbols(
+            open_positions_meta,
+            getattr(lt, "position_registry", None),
+        )
 
         pre_filter_count = len(lt.auction_signals_this_tick)
         lt.auction_signals_this_tick = [
@@ -1211,11 +1241,12 @@ async def run_auction_allocation(lt: "LiveTrading", raw_positions: List[Dict]) -
         elif reconcile_blocking_issues:
             open_gate_reason = "RECONCILE_BLOCKING_ISSUES"
         if open_gate_reason and getattr(lt, "_replay_relaxed_signal_gates", False):
-            logger.warning(
-                "Replay relaxed gate: bypassing pre-open gate",
-                blocked_reason=open_gate_reason,
-                planned_opens=len(plan.opens),
-            )
+            if plan.opens:
+                logger.warning(
+                    "Replay relaxed gate: bypassing pre-open gate",
+                    blocked_reason=open_gate_reason,
+                    planned_opens=len(plan.opens),
+                )
             open_gate_reason = None
         if open_gate_reason:
             logger.warning(

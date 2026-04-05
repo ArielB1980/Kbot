@@ -134,7 +134,6 @@ def save_warm_start(
 ) -> None:
     """Persist best-known params for a symbol to disk for cross-run memory."""
     path = _warm_start_path(symbol)
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "symbol": symbol,
         "params": params,
@@ -142,10 +141,20 @@ def save_warm_start(
         "candidate_id": candidate_id,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-    tmp.rename(path)
-    logger.info("WARM_START_SAVED", symbol=symbol, score=score, path=str(path))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+        tmp.replace(path)
+        logger.info("WARM_START_SAVED", symbol=symbol, score=score, path=str(path))
+    except Exception as exc:
+        logger.warning(
+            "WARM_START_SAVE_FAILED",
+            symbol=symbol,
+            path=str(path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True)

@@ -1,25 +1,37 @@
 """Signal directional accuracy: measures if SMC signals predict direction.
 
-For every signal the strategy generates, measures whether price moved in the
-predicted direction over 1h, 4h, and 24h horizons. If directional accuracy
-is ~50%, the signals are noise regardless of parameter calibration.
+For every signal the strategy generates, measure whether price moved in the
+predicted direction over 1h, 4h, and 24h horizons. This intentionally avoids
+the full replay execution stack because the diagnostic only needs candle
+windows plus ``SMCEngine.generate_signal()``, not auction/reconciliation work.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from contextlib import contextmanager
+import logging
 import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from src.backtest.replay_harness.data_store import CandleBar, ReplayDataStore
 from src.backtest.replay_harness.runner import BacktestRunner
+from src.config.config import StrategyConfig
 from src.domain.models import Candle, Signal, SignalType
+from src.strategy.smc_engine import SMCEngine
 from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
 
 HORIZONS = {"1h": 4, "4h": 16, "24h": 96}  # Number of 15m ticks per horizon
+_NOISY_LOGGERS = (
+    "src.strategy.smc_engine",
+    "src.memory.institutional_memory",
+    "src.strategy.ev_engine",
+)
 
 
 @dataclass
@@ -47,106 +59,117 @@ class HorizonResult:
     p_value: float = 1.0  # Binomial test vs 50%
 
 
-class SignalInterceptor:
-    """Wraps SMCEngine.generate_signal to capture signals while passing through."""
+def _bar_to_candle(symbol: str, timeframe: str, bar: CandleBar) -> Candle:
+    """Convert a replay candle bar into the domain Candle model."""
+    return Candle(
+        timestamp=bar.timestamp,
+        symbol=symbol,
+        timeframe=timeframe,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+    )
 
-    def __init__(self, original_fn: Any):
-        self._original = original_fn
-        self.captured: list[SignalCapture] = []
 
-    def generate_signal(
-        self,
-        symbol: str,
-        regime_candles_1d: list[Candle],
-        decision_candles_4h: list[Candle],
-        refine_candles_1h: list[Candle],
-        refine_candles_15m: list[Candle],
-    ) -> Signal:
-        """Call original engine, capture non-NO_SIGNAL results."""
-        signal = self._original(
+def _slice_candles(
+    candles: list[Candle],
+    timestamps: list[datetime],
+    current: datetime,
+    *,
+    limit: int = 500,
+) -> list[Candle]:
+    """Return the most recent candles up to ``current`` inclusive."""
+    end_idx = bisect_right(timestamps, current)
+    if end_idx <= 0:
+        return []
+    start_idx = max(0, end_idx - limit)
+    return candles[start_idx:end_idx]
+
+
+def _capture_signal(signals: list[SignalCapture], signal: Signal) -> None:
+    """Append a directional signal to the capture list."""
+    if signal.signal_type not in (SignalType.LONG, SignalType.SHORT):
+        return
+    signals.append(SignalCapture(
+        timestamp=signal.timestamp.isoformat(),
+        symbol=signal.symbol,
+        direction=signal.signal_type.value,
+        entry_price=float(signal.entry_price),
+        setup_type=signal.setup_type.value if signal.setup_type else "unknown",
+        score=signal.score,
+    ))
+
+
+@contextmanager
+def _quiet_signal_scan_logs():
+    """Suppress per-candle strategy chatter during bulk signal scans."""
+    prior_levels: dict[str, int] = {}
+    try:
+        for name in _NOISY_LOGGERS:
+            logger_obj = logging.getLogger(name)
+            prior_levels[name] = logger_obj.level
+            logger_obj.setLevel(logging.WARNING)
+        yield
+    finally:
+        for name, level in prior_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def _scan_symbol_signals(
+    engine: SMCEngine,
+    symbol: str,
+    store: ReplayDataStore,
+    *,
+    start: datetime,
+    end: datetime,
+) -> tuple[list[SignalCapture], list[tuple[datetime, float]]]:
+    """Scan replay candles directly for one symbol and capture raw SMC signals."""
+    required_tfs = ("15m", "1h", "4h", "1d")
+    candles_by_tf: dict[str, list[Candle]] = {}
+    timestamps_by_tf: dict[str, list[datetime]] = {}
+
+    for timeframe in required_tfs:
+        bars = list(store._candles.get(symbol, {}).get(timeframe, []))
+        candles = [_bar_to_candle(symbol, timeframe, bar) for bar in bars]
+        candles_by_tf[timeframe] = candles
+        timestamps_by_tf[timeframe] = [c.timestamp for c in candles]
+
+    candles_15m = candles_by_tf["15m"]
+    if not candles_15m:
+        return [], []
+
+    captures: list[SignalCapture] = []
+    price_history = [
+        (c.timestamp, float(c.close))
+        for c in candles_15m
+        if start <= c.timestamp <= end
+    ]
+
+    for candle_15m in candles_15m:
+        current = candle_15m.timestamp
+        if current < start or current > end:
+            continue
+
+        signal = engine.generate_signal(
             symbol=symbol,
-            regime_candles_1d=regime_candles_1d,
-            decision_candles_4h=decision_candles_4h,
-            refine_candles_1h=refine_candles_1h,
-            refine_candles_15m=refine_candles_15m,
+            regime_candles_1d=_slice_candles(
+                candles_by_tf["1d"], timestamps_by_tf["1d"], current,
+            ),
+            decision_candles_4h=_slice_candles(
+                candles_by_tf["4h"], timestamps_by_tf["4h"], current,
+            ),
+            refine_candles_1h=_slice_candles(
+                candles_by_tf["1h"], timestamps_by_tf["1h"], current,
+            ),
+            refine_candles_15m=_slice_candles(
+                candles_by_tf["15m"], timestamps_by_tf["15m"], current,
+            ),
         )
-        if signal.signal_type in (SignalType.LONG, SignalType.SHORT):
-            self.captured.append(SignalCapture(
-                timestamp=signal.timestamp.isoformat(),
-                symbol=symbol,
-                direction=signal.signal_type.value,
-                entry_price=float(signal.entry_price),
-                setup_type=signal.setup_type.value if signal.setup_type else "unknown",
-                score=signal.score,
-            ))
-        return signal
+        _capture_signal(captures, signal)
 
-
-class SignalCaptureRunner(BacktestRunner):
-    """BacktestRunner that intercepts signals during replay."""
-
-    def __init__(self, **kwargs: Any):
-        super().__init__(**kwargs)
-        self.interceptor: SignalInterceptor | None = None
-
-    async def _run_with_db_mock(self) -> Any:
-        """Override to install signal interceptor after init."""
-        await self._initialize()
-
-        # Install the interceptor
-        if self._live_trading is not None:
-            original = self._live_trading.smc_engine.generate_signal
-            self.interceptor = SignalInterceptor(original)
-            self._live_trading.smc_engine.generate_signal = self.interceptor.generate_signal
-
-        # Disable cycle guard throttle
-        if (
-            self._disable_cycle_guard_throttle
-            and self._live_trading is not None
-            and getattr(self._live_trading, "hardening", None) is not None
-            and getattr(self._live_trading.hardening, "cycle_guard", None) is not None
-        ):
-            self._live_trading.hardening.cycle_guard.min_interval = timedelta(seconds=0)
-
-        # Run tick loop
-        tick_count = 0
-        current = self._start
-
-        # Store price history for forward-looking accuracy check
-        self._price_history: dict[str, list[tuple[datetime, float]]] = {}
-
-        while current <= self._end:
-            if self._max_ticks and tick_count >= self._max_ticks:
-                break
-            self._clock.set(current)
-            self._exchange.step(current)
-
-            # Record prices for all symbols at this tick
-            if self._live_trading is not None:
-                for sym in self._symbols:
-                    candles = self._live_trading.candle_manager.get_candles(sym, "15m")
-                    if candles:
-                        if sym not in self._price_history:
-                            self._price_history[sym] = []
-                        self._price_history[sym].append(
-                            (current, float(candles[-1].close))
-                        )
-
-            try:
-                await self._run_tick()
-                if (
-                    self._live_trading is not None
-                    and getattr(self._live_trading, "execution_gateway", None) is not None
-                ):
-                    await self._live_trading.execution_gateway.poll_and_process_order_updates()
-                self._metrics.total_ticks += 1
-            except Exception:
-                self._metrics.failed_ticks += 1
-
-            tick_count += 1
-            current += timedelta(seconds=self._tick_interval)
-
-        return self._metrics
+    return captures, price_history
 
 
 def _binomial_p_value(n: int, k: int, p: float = 0.5) -> float:
@@ -289,7 +312,7 @@ def evaluate_accuracy(
         "horizons": horizons_out,
         "by_setup_type": setup_out,
         "by_direction": direction_out,
-        "signal_details": signal_details[:100],  # Cap to avoid huge output
+        "signal_details": signal_details,
         "edge_assessment": {
             "best_horizon": best_horizon.horizon if best_horizon else None,
             "best_hit_rate": round(best_horizon.hit_rate, 4) if best_horizon else None,
@@ -304,12 +327,12 @@ async def run_falsification(
     symbols: list[str],
     days: int,
     timeframes: list[str],
+    strategy_config: StrategyConfig,
 ) -> dict[str, Any]:
     """Run signal accuracy falsification test."""
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
-
-    runner = SignalCaptureRunner(
+    harness = BacktestRunner(
         data_dir=data_dir,
         symbols=symbols,
         start=start,
@@ -322,22 +345,55 @@ async def run_falsification(
         disable_db_mock=False,
     )
 
-    logger.info("signal_accuracy_replay_start", symbols=symbols, days=days)
-    await runner.run()
-    logger.info(
-        "signal_accuracy_replay_end",
-        signals_captured=len(runner.interceptor.captured) if runner.interceptor else 0,
-    )
+    logger.info("signal_accuracy_scan_start", symbols=symbols, days=days)
+    harness._install_runtime_isolation()
+    harness._setup_db_mock()
+    try:
+        store = ReplayDataStore(data_dir=data_dir, symbols=symbols, timeframes=timeframes)
+        store.load()
+        with _quiet_signal_scan_logs():
+            engine = SMCEngine(strategy_config)
 
-    if not runner.interceptor or not runner.interceptor.captured:
+            captured: list[SignalCapture] = []
+            price_history: dict[str, list[tuple[datetime, float]]] = {}
+            for symbol in symbols:
+                symbol_captured, symbol_prices = _scan_symbol_signals(
+                    engine,
+                    symbol,
+                    store,
+                    start=start,
+                    end=end,
+                )
+                captured.extend(symbol_captured)
+                if symbol_prices:
+                    price_history[symbol] = symbol_prices
+                logger.info(
+                    "signal_accuracy_symbol_scan",
+                    symbol=symbol,
+                    signals_captured=len(symbol_captured),
+                    price_points=len(symbol_prices),
+                )
+    finally:
+        harness._teardown_db_mock()
+        harness._restore_runtime_isolation()
+
+    logger.info("signal_accuracy_scan_end", signals_captured=len(captured))
+
+    if not captured:
         return {
             "generated_at": datetime.now(UTC).isoformat() + "Z",
             "total_signals": 0,
             "edge_assessment": {"has_directional_edge": None, "reason": "no_signals_generated"},
         }
 
-    result = evaluate_accuracy(runner.interceptor.captured, runner._price_history)
+    result = evaluate_accuracy(captured, price_history)
     result["generated_at"] = datetime.now(UTC).isoformat() + "Z"
     result["symbols"] = symbols
     result["days"] = days
+    result["signal_detail_count"] = len(result.get("signal_details", []))
+    result["signal_detail_symbol_count"] = len({
+        row.get("symbol")
+        for row in result.get("signal_details", [])
+        if isinstance(row, dict) and row.get("symbol")
+    })
     return result
