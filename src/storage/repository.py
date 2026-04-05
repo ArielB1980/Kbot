@@ -252,6 +252,7 @@ def save_candle(candle: Candle) -> None:
                 volume=candle.volume,
             )
             session.add(candle_model)
+        _query_cache.clear()
     except (OperationalError, DataError, OSError) as e:
         logger.error("Failed to save candle", symbol=candle.symbol, timeframe=candle.timeframe, error=str(e))
         raise  # Re-raise to allow caller to handle
@@ -333,7 +334,7 @@ def save_candles_bulk(candles: List[Candle]) -> int:
                         # Insert
                         candle_model = CandleModel(**value)
                         session.add(candle_model)
-        
+        _query_cache.clear()
         return len(candles)
     except (OperationalError, DataError, OSError) as e:
         logger.error("Failed to save candles bulk", error=str(e), count=len(candles) if candles else 0)
@@ -1409,4 +1410,3 @@ def load_recent_intent_hashes(lookback_hours: int = 24) -> Set[str]:
             except (json.JSONDecodeError, KeyError):
                 continue
     return hashes
-

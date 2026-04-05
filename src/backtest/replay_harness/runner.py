@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -33,10 +35,18 @@ from src.backtest.replay_harness.data_store import ReplayDataStore
 from src.backtest.replay_harness.exchange_sim import ReplayKrakenClient, ExchangeSimConfig
 from src.backtest.replay_harness.fault_injector import FaultInjector
 from src.backtest.replay_harness.metrics import ReplayMetrics
+from src.execution.position_state_machine import reset_position_registry
 from src.exceptions import InvariantError, OperationalError, DataError
 from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _replay_min_size(base: str) -> Decimal:
+    """Return venue-realistic minimum order sizes for replay synthetic specs."""
+    _MINS = {"XBT": "0.0001", "BTC": "0.0001", "ETH": "0.001", "SOL": "0.01",
+             "XRP": "1", "ADA": "1", "LINK": "0.1", "DOT": "0.1", "AVAX": "0.01"}
+    return Decimal(_MINS.get(base.upper(), "0.01"))
 
 
 def _build_replay_synthetic_spec(symbol: str):
@@ -45,14 +55,15 @@ def _build_replay_synthetic_spec(symbol: str):
 
     base = symbol.split("/")[0] if "/" in symbol else symbol
     raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
+    min_sz = _replay_min_size(raw_base)
     return InstrumentSpec(
         symbol_raw=f"PF_{raw_base}USD",
         symbol_ccxt=f"{raw_base}/USD:USD",
         base=base.upper(),
         quote="USD",
         contract_size=Decimal("1"),
-        min_size=Decimal("1"),
-        size_step=Decimal("1"),
+        min_size=min_sz,
+        size_step=min_sz,
         size_step_source="replay_synthetic",
         price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
         max_leverage=50,
@@ -116,6 +127,8 @@ class BacktestRunner:
         self._metrics: Optional[ReplayMetrics] = None
         self._live_trading: Optional[Any] = None  # LiveTrading instance
         self._db_patches: List[Any] = []  # Active unittest.mock patchers
+        self._runtime_state_dir: Optional[Path] = None
+        self._saved_env: Dict[str, Optional[str]] = {}
 
     def _setup_db_mock(self) -> None:
         """Mock the database layer so replay doesn't need DATABASE_URL.
@@ -164,6 +177,7 @@ class BacktestRunner:
 
     async def run(self) -> ReplayMetrics:
         """Execute the full replay backtest. Returns metrics."""
+        self._install_runtime_isolation()
         self._setup()
         use_db_mock = (
             not self._disable_db_mock
@@ -179,6 +193,46 @@ class BacktestRunner:
             # Always remove DB patching, even when replay raises early.
             if use_db_mock:
                 self._teardown_db_mock()
+            self._restore_runtime_isolation()
+
+    def _install_runtime_isolation(self) -> None:
+        """Force replay-safe process state for one runner invocation."""
+        reset_position_registry()
+
+        runtime_dir = Path(tempfile.mkdtemp(prefix="replay_runtime_"))
+        self._runtime_state_dir = runtime_dir
+        overrides = {
+            "ENV": "dev",
+            "ENVIRONMENT": "dev",
+            "DRY_RUN": "0",
+            "SYSTEM_DRY_RUN": "0",
+            "USE_STATE_MACHINE_V2": "true",
+            "REPLAY_RESEARCH_MINIMAL_LOGS": "1",
+            "REPLAY_FORCE_MARKET_ENTRY": "1",
+            "REPLAY_SKIP_STALE_PENDING_CLOSE": "1",
+            "REPLAY_RELAX_ORDER_RATE_LIMITER": "1",
+            "INSTRUMENT_SPECS_CACHE_PATH": str(runtime_dir / "instrument_specs.json"),
+            "PEAK_EQUITY_STATE_PATH": str(runtime_dir / "peak_equity.json"),
+            "POSITION_PERSISTENCE_PATH": str(runtime_dir / "positions.db"),
+            "KILL_SWITCH_STATE_PATH": str(runtime_dir / "kill_switch_state.json"),
+            "SAFETY_STATE_PATH": str(runtime_dir / "safety_state.json"),
+        }
+        self._saved_env = {key: os.environ.get(key) for key in overrides}
+        for key, value in overrides.items():
+            os.environ[key] = value
+
+    def _restore_runtime_isolation(self) -> None:
+        """Restore process state after replay completes."""
+        reset_position_registry()
+        for key, old_value in self._saved_env.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+        self._saved_env = {}
+        if self._runtime_state_dir is not None:
+            shutil.rmtree(self._runtime_state_dir, ignore_errors=True)
+            self._runtime_state_dir = None
 
     async def _run_with_db_mock(self) -> ReplayMetrics:
         """Run replay body with DB mock already installed."""
@@ -284,8 +338,10 @@ class BacktestRunner:
         exchange_summary = self._exchange.exchange_metrics
         self._metrics.total_fees = Decimal(str(exchange_summary["total_fees"]))
         self._metrics.total_funding = Decimal(str(exchange_summary["total_funding"]))
+        for trade in self._exchange.closed_trades:
+            self._metrics.record_trade(trade)
+        # Use exchange sim as source of truth for gross_pnl (includes partial closes rounding)
         self._metrics.gross_pnl = Decimal(str(exchange_summary["realized_pnl"]))
-        self._metrics.total_trades = int(exchange_summary.get("trades_closed", 0))
         self._metrics.orders_blocked_by_rate_limiter = (
             self._live_trading.execution_gateway._order_rate_limiter.orders_blocked_total
             if self._live_trading and hasattr(self._live_trading, "execution_gateway")
@@ -331,30 +387,6 @@ class BacktestRunner:
         """
         from src.config.config import load_config
 
-        # Set env vars for config loading
-        os.environ.setdefault("ENV", "local")
-        os.environ.setdefault("DRY_RUN", "0")
-        # Enable position state-machine so TP/SL/runner exits fire in replay.
-        os.environ["USE_STATE_MACHINE_V2"] = "true"
-        # Reduce noisy per-tick logs in replay research loops.
-        os.environ["REPLAY_RESEARCH_MINIMAL_LOGS"] = "1"
-        # Replay research: prefer filled entries to avoid stale pending churn.
-        os.environ["REPLAY_FORCE_MARKET_ENTRY"] = "1"
-        # Keep pending positions from being immediately archived in replay.
-        os.environ["REPLAY_SKIP_STALE_PENDING_CLOSE"] = "1"
-        # Replay can cluster synthetic orders; relax order-rate invariant limits.
-        os.environ["REPLAY_RELAX_ORDER_RATE_LIMITER"] = "1"
-
-        # Isolate instrument spec cache so replay never overwrites the live bot's cache
-        import tempfile
-        _replay_cache = tempfile.mktemp(suffix="_replay_specs.json", prefix="instrument_specs_")
-        os.environ["INSTRUMENT_SPECS_CACHE_PATH"] = _replay_cache
-
-        # Isolate peak equity state so replay doesn't read stale production peaks
-        # that would trigger DEGRADED mode (90% phantom drawdown).
-        _replay_peak = tempfile.mktemp(suffix="_peak_equity.json", prefix="replay_")
-        os.environ["PEAK_EQUITY_STATE_PATH"] = _replay_peak
-
         config = load_config()
 
         # Apply overrides
@@ -383,6 +415,50 @@ class BacktestRunner:
                 config.data.data_sanity.min_decision_tf_candles = 1
                 config.data.data_sanity.min_volume_24h_usd = 0
                 config.data.data_sanity.max_spread_pct = 1.0
+
+        # --- Replay research: disable boolean gates the optimizer cannot control ---
+        # These gates exist for live safety but starve the optimizer of trade data.
+        # The optimizer varies continuous params (thresholds, multipliers); boolean
+        # toggles must be set to permissive defaults so the optimizer can explore.
+        if hasattr(config, "risk") and config.risk:
+            # Fee-edge guard: optimizer can vary fee_edge_multiple_k but cannot
+            # toggle this boolean.  When enabled with no TP1 proxy, every signal
+            # is rejected unconditionally.
+            config.risk.fee_edge_guard_enabled = False
+            # Shock guard: blocks entries on flash/wick moves — irrelevant in
+            # simulated replay with 15m bars.
+            if hasattr(config.risk, "shock_guard_enabled"):
+                config.risk.shock_guard_enabled = False
+            # Symbol loss cooldown: pauses a symbol for hours after consecutive
+            # losses — prevents the optimizer from seeing full trade distribution.
+            if hasattr(config.risk, "symbol_loss_cooldown_enabled"):
+                config.risk.symbol_loss_cooldown_enabled = False
+        if hasattr(config, "strategy") and config.strategy:
+            # Post-close cooldown: blocks re-entry after position close.
+            if hasattr(config.strategy, "signal_post_close_cooldown_enabled"):
+                config.strategy.signal_post_close_cooldown_enabled = False
+            # Thesis/conviction gate: blocks entries if conviction < threshold.
+            # Not in optimizer search space.
+            if hasattr(config.strategy, "thesis_management_enabled"):
+                config.strategy.thesis_management_enabled = False
+
+        # --- Sync duplicated params between risk and strategy configs ---
+        # tight_smc_min_rr_multiple exists in both RiskConfig and StrategyConfig.
+        # The optimizer mutates risk.tight_smc_min_rr_multiple; the strategy uses
+        # its own copy to place TP levels.  If they diverge the risk manager
+        # rejects every signal the strategy generates.  Keep them in sync.
+        if (
+            hasattr(config, "risk") and config.risk
+            and hasattr(config, "strategy") and config.strategy
+        ):
+            risk_rr = getattr(config.risk, "tight_smc_min_rr_multiple", None)
+            if risk_rr is not None:
+                try:
+                    config.strategy.tight_smc_min_rr_multiple = float(risk_rr)
+                except (ValueError, AttributeError):
+                    # Pydantic may block direct assignment; use __dict__ bypass
+                    object.__setattr__(config.strategy, "tight_smc_min_rr_multiple", float(risk_rr))
+
         if (
             os.getenv("REPLAY_RELAX_MIN_SCORES", "1") == "1"
             and hasattr(config, "strategy")
@@ -442,6 +518,10 @@ class BacktestRunner:
             # candle_manager.client for candle fetches.
             if getattr(lt.candle_manager, "ohlcv_fetcher", None) is not None:
                 lt.candle_manager.ohlcv_fetcher.client = self._exchange
+                # Disable rate limiting in replay — exchange sim is in-memory.
+                lt.candle_manager.ohlcv_fetcher._sem = asyncio.Semaphore(1000)
+                lt.candle_manager.ohlcv_fetcher.min_delay_ms = 0
+                lt.candle_manager.ohlcv_fetcher.max_retries = 1
         # Replay should not stall on live candle-health entry gate.
         lt._replay_disable_candle_health_gate = True
         # Replay research should bypass strict live gating for signal discovery.
@@ -453,24 +533,17 @@ class BacktestRunner:
         # runs on the same host as live (KBO-137 / invariant monitor isolation).
         if getattr(lt, "hardening", None) is not None:
             lt.hardening.ignore_persisted_halt = True
+            # Disable invariant monitor equity/concentration checks in replay.
+            # Simulated positions can legitimately exceed live safety thresholds
+            # (e.g., 10% drawdown, 35% single-position concentration) without
+            # representing real risk.  Letting the monitor block entries starves
+            # the optimizer of trade data and makes all candidates identical.
+            lt.hardening.disable_invariant_checks = True
 
         # Pre-populate instrument spec registry with synthetic specs for replay symbols.
         # Without this, the auction runner rejects every signal with NO_SPEC because
         # the replay exchange doesn't implement get_instruments().
-        if hasattr(lt, "instrument_spec_registry"):
-            synthetic_specs = [_build_replay_synthetic_spec(sym) for sym in self._symbols]
-            if synthetic_specs:
-                lt.instrument_spec_registry._index(synthetic_specs)
-                lt.instrument_spec_registry._loaded_at = time.time()
-                logger.info(
-                    "REPLAY_SYNTHETIC_SPECS_LOADED",
-                    count=len(synthetic_specs),
-                    symbols=[s.symbol_ccxt for s in synthetic_specs],
-                )
-
-        # Pre-populate instrument spec registry with synthetic specs for replay symbols.
-        # Without this, the auction runner rejects every signal with NO_SPEC because
-        # the replay exchange doesn't implement get_instruments().
+        # NOTE: _index() resets the internal dict, so ALL specs must go in a single call.
         if hasattr(lt, "instrument_spec_registry"):
             import time as _time
 
@@ -478,7 +551,6 @@ class BacktestRunner:
             synthetic_specs: list[InstrumentSpec] = []
             for sym in self._symbols:
                 base = sym.split("/")[0] if "/" in sym else sym
-                # BTC -> XBT for Kraken raw format
                 raw_base = "XBT" if base.upper() in ("BTC", "XBT") else base.upper()
                 synthetic_specs.append(InstrumentSpec(
                     symbol_raw=f"PF_{raw_base}USD",
@@ -486,8 +558,8 @@ class BacktestRunner:
                     base=base.upper(),
                     quote="USD",
                     contract_size=Decimal("1"),
-                    min_size=Decimal("1") if raw_base == "XBT" else Decimal("1"),
-                    size_step=Decimal("1"),
+                    min_size=_replay_min_size(raw_base),
+                    size_step=_replay_min_size(raw_base),
                     size_step_source="replay_synthetic",
                     price_tick=Decimal("0.01") if raw_base == "XBT" else Decimal("0.0001"),
                     max_leverage=50,
@@ -495,6 +567,8 @@ class BacktestRunner:
                     supports_reduce_only=True,
                     last_updated_ts=_time.time(),
                 ))
+            # Also add XBT-aliased specs for BTC (Kraken uses XBT internally)
+            synthetic_specs.extend(_build_replay_synthetic_spec(sym) for sym in self._symbols)
             if synthetic_specs:
                 lt.instrument_spec_registry._index(synthetic_specs)
                 lt.instrument_spec_registry._loaded_at = _time.time()

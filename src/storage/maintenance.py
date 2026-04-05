@@ -29,6 +29,28 @@ CANDLE_RETENTION_DAYS: Dict[str, int] = {
     "4h": 365,
 }
 
+# High-volume system event retention policies in days.
+# Keep user/audit-relevant events longer than noisy research/runtime diagnostics.
+SYSTEM_EVENT_RETENTION_DAYS: Dict[str, int] = {
+    "DECISION_TRACE": 3,
+    "CYCLE_TICK_BEGIN": 3,
+    "CYCLE_TICK_END": 3,
+    "COUNTERFACTUAL_DECISION": 7,
+    "COUNTERFACTUAL_ACTION": 7,
+    "TP_BACKFILL_PLANNED": 7,
+    "TP_BACKFILL_SKIPPED": 7,
+    "METRICS_SNAPSHOT": 7,
+    "ORDER_INTENT_HASH": 7,
+    "RISK_VALIDATION": 14,
+    "SIGNAL_GENERATED": 30,
+    "DISCOVERY_UPDATE": 30,
+    "TP_BACKFILL_PLACED": 30,
+    "TP_BACKFILL_REPLACED": 30,
+    "UNPROTECTED_POSITION": 30,
+    "SYSTEM_STARTUP": 90,
+    "CYCLE_TICK_CRASH": 90,
+}
+
 
 class DatabasePruner:
     """Service for cleaning up old database records."""
@@ -49,31 +71,53 @@ class DatabasePruner:
         Delete DECISION_TRACE events older than *days_to_keep* days.
         Retains signals and critical errors, only deletes high-frequency traces.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
+        deleted = self.prune_old_system_events({"DECISION_TRACE": days_to_keep})
+        return deleted.get("DECISION_TRACE", 0)
+
+    def prune_old_system_events(self, retention_days: Dict[str, int] | None = None) -> Dict[str, int]:
+        """
+        Delete high-volume system event types older than their retention windows.
+
+        Returns a per-event-type deleted-row count.
+        """
+        retention = retention_days or SYSTEM_EVENT_RETENTION_DAYS
+        now = datetime.now(timezone.utc)
+        deleted: Dict[str, int] = {}
 
         with self.db.get_session() as session:
-            try:
-                from src.storage.repository import SystemEventModel
+            from src.storage.repository import SystemEventModel
 
-                query = session.query(SystemEventModel).filter(
-                    SystemEventModel.event_type == "DECISION_TRACE",
-                    SystemEventModel.timestamp < cutoff,
-                )
-
-                count = query.delete(synchronize_session=False)
-                session.commit()
-
-                logger.info(
-                    "Pruned old decision traces",
-                    count=count,
-                    cutoff=cutoff.isoformat(),
-                )
-                return count
-
-            except (OperationalError, OSError) as e:
-                session.rollback()
-                logger.error("Failed to prune decision traces", error=str(e))
-                return 0
+            for event_type, days_to_keep in retention.items():
+                cutoff = now - timedelta(days=days_to_keep)
+                try:
+                    count = (
+                        session.query(SystemEventModel)
+                        .filter(
+                            SystemEventModel.event_type == event_type,
+                            SystemEventModel.timestamp < cutoff,
+                        )
+                        .delete(synchronize_session=False)
+                    )
+                    session.commit()
+                    deleted[event_type] = int(count or 0)
+                    if count:
+                        logger.info(
+                            "Pruned old system events",
+                            event_type=event_type,
+                            count=count,
+                            retention_days=days_to_keep,
+                            cutoff=cutoff.isoformat(),
+                        )
+                except (OperationalError, OSError) as e:
+                    session.rollback()
+                    logger.error(
+                        "Failed to prune system events",
+                        event_type=event_type,
+                        retention_days=days_to_keep,
+                        error=str(e),
+                    )
+                    deleted[event_type] = 0
+        return deleted
 
     def prune_old_candles(self) -> int:
         """
@@ -179,13 +223,14 @@ class DatabasePruner:
         """Run all maintenance tasks and log table stats."""
         logger.info("Starting database maintenance...")
 
-        traces_deleted = self.prune_old_traces(days_to_keep=3)
+        system_events_deleted = self.prune_old_system_events()
         candles_deleted = self.prune_old_candles()
 
         # Log table sizes for monitoring
         self.log_table_stats()
 
         return {
-            "traces_deleted": traces_deleted,
+            "traces_deleted": system_events_deleted.get("DECISION_TRACE", 0),
+            "system_events_deleted": system_events_deleted,
             "candles_deleted": candles_deleted,
         }

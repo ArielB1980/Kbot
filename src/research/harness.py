@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import shlex
@@ -14,7 +15,7 @@ from typing import Callable
 from src.config.config import Config
 from src.monitoring.logger import get_logger
 from src.monitoring.telegram_bot import send_telegram_message
-from src.research.allowlist import AllowlistPolicy
+from src.research.allowlist import PARAMETER_BOUNDS, AllowlistPolicy
 from src.research.evaluator import CandidateEvaluator, EvaluationSpec
 from src.research.kpi import score_candidate
 from src.research.models import CandidateResult
@@ -22,6 +23,138 @@ from src.research.reporting import write_leaderboard, write_per_symbol_best, wri
 from src.research.state_store import ResearchStateStore
 
 logger = get_logger(__name__)
+
+_WARM_START_DIR = Path("data/research/warm_start")
+
+
+class ParameterMemory:
+    """Tracks per-parameter score deltas to guide future mutations.
+
+    Instead of blind random search, this records which parameters moved score
+    up or down and by how much.  Future mutations are biased toward parameters
+    that historically produced improvements, and step sizes adapt over time.
+    """
+
+    def __init__(self, param_keys: tuple[str, ...]):
+        self._keys = param_keys
+        # Cumulative score improvement attributed to each param
+        self._momentum: dict[str, float] = {k: 0.0 for k in param_keys}
+        # Last direction that improved score (+1 or -1), 0 = unknown
+        self._direction: dict[str, float] = {k: 0.0 for k in param_keys}
+        # Count of times each param was part of an improving candidate
+        self._win_count: dict[str, int] = {k: 0 for k in param_keys}
+        # Total times each param was mutated
+        self._try_count: dict[str, int] = {k: 0 for k in param_keys}
+
+    def record(
+        self,
+        source_params: dict[str, float],
+        candidate_params: dict[str, float],
+        score_delta: float,
+    ) -> None:
+        """Record the outcome of a candidate evaluation."""
+        for key in self._keys:
+            s_val = source_params.get(key, 0.0)
+            c_val = candidate_params.get(key, 0.0)
+            if abs(c_val - s_val) < 1e-9:
+                continue
+            self._try_count[key] = self._try_count.get(key, 0) + 1
+            if score_delta > 0:
+                self._momentum[key] = self._momentum.get(key, 0.0) + score_delta
+                self._win_count[key] = self._win_count.get(key, 0) + 1
+                self._direction[key] = 1.0 if c_val > s_val else -1.0
+
+    def pick_params_to_mutate(
+        self, rng: random.Random, count: int
+    ) -> list[str]:
+        """Select parameters to mutate, biased toward historically productive ones.
+
+        Uses a softmax weighting: params that have produced improvements are
+        more likely to be picked, but all params retain a base probability to
+        ensure exploration.
+        """
+        weights: list[float] = []
+        for key in self._keys:
+            tries = self._try_count.get(key, 0)
+            wins = self._win_count.get(key, 0)
+            # Base weight ensures every param gets explored
+            base = 1.0
+            # Bonus proportional to win rate (if tried enough)
+            if tries >= 3:
+                win_rate = wins / tries
+                base += win_rate * 4.0
+            # Small bonus from cumulative momentum
+            base += min(self._momentum.get(key, 0.0) * 0.1, 3.0)
+            weights.append(max(base, 0.1))
+
+        keys_list = list(self._keys)
+        count = min(count, len(keys_list))
+        selected: list[str] = []
+        remaining_keys = list(range(len(keys_list)))
+        remaining_weights = list(weights)
+        for _ in range(count):
+            if not remaining_keys:
+                break
+            chosen = rng.choices(remaining_keys, weights=remaining_weights, k=1)[0]
+            idx = remaining_keys.index(chosen)
+            selected.append(keys_list[chosen])
+            remaining_keys.pop(idx)
+            remaining_weights.pop(idx)
+        return selected
+
+    def get_direction_bias(self, key: str) -> float:
+        """Return directional bias for a parameter (-1, 0, or +1)."""
+        return self._direction.get(key, 0.0)
+
+
+def _warm_start_path(symbol: str) -> Path:
+    """Path to the warm-start JSON for a given symbol."""
+    safe = symbol.replace("/", "_").replace(":", "_")
+    return _WARM_START_DIR / f"{safe}_best.json"
+
+
+def load_warm_start(symbol: str) -> dict[str, float] | None:
+    """Load best-known params for a symbol from disk, or None."""
+    path = _warm_start_path(symbol)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        params = data.get("params")
+        if isinstance(params, dict) and params:
+            logger.info("WARM_START_LOADED", symbol=symbol, path=str(path))
+            return {k: float(v) for k, v in params.items()}
+    except Exception as exc:
+        logger.warning("WARM_START_LOAD_FAILED", symbol=symbol, error=str(exc))
+    return None
+
+
+def save_warm_start(
+    symbol: str, params: dict[str, float], score: float, candidate_id: str
+) -> None:
+    """Persist best-known params for a symbol to disk for cross-run memory."""
+    path = _warm_start_path(symbol)
+    data = {
+        "symbol": symbol,
+        "params": params,
+        "score": score,
+        "candidate_id": candidate_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+        tmp.replace(path)
+        logger.info("WARM_START_SAVED", symbol=symbol, score=score, path=str(path))
+    except Exception as exc:
+        logger.warning(
+            "WARM_START_SAVE_FAILED",
+            symbol=symbol,
+            path=str(path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True)
@@ -52,7 +185,7 @@ class HarnessConfig:
     replay_timeframes: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
     replay_prefilter_enabled: bool = True
     exploration_min_signal_trades: int = 2
-    promotion_min_signal_trades: int = 10
+    promotion_min_signal_trades: int = 20
     min_probe_iterations_before_skip: int = 8
     min_partial_coverage_ratio: float = 0.05
     min_promotion_comparability: float = 0.50
@@ -63,7 +196,7 @@ class HarnessConfig:
     mutate_params_per_candidate: int = 6
     mutate_step_pct: float = 0.25
     random_restart_every_n: int = 10
-    uninformative_surface_probe_count: int = 4
+    uninformative_surface_probe_count: int = 12
 
 
 class SandboxAutoresearchHarness:
@@ -88,6 +221,7 @@ class SandboxAutoresearchHarness:
 
         self._param_keys = tuple(self.policy.allowed_parameter_paths)
         self._baseline_params = self._read_params_from_config(base_config)
+        self._param_memory: ParameterMemory | None = None
 
     async def run(self) -> tuple[Path, Path]:
         """Run the full sandbox autoresearch loop."""
@@ -181,10 +315,10 @@ class SandboxAutoresearchHarness:
                     )
                     if approved:
                         best = result
-                        await self._notify(self._format_milestone(best))
+                        await self._notify(self._format_milestone(best), important=True)
                 else:
                     best = result
-                    await self._notify(self._format_milestone(best))
+                    await self._notify(self._format_milestone(best), important=True)
 
             self.store.update(iteration=idx)
             self._persist_leaderboard(best.candidate_id)
@@ -205,7 +339,8 @@ class SandboxAutoresearchHarness:
                 if self.cfg.auto_queue_promotion_on_replay_pass:
                     self.store.queue_promotion(best.candidate_id)
                     await self._notify(
-                        f"📌 Auto-queued <code>{best.candidate_id}</code> for review after replay pass."
+                        f"📌 Auto-queued <code>{best.candidate_id}</code> for review after replay pass.",
+                        important=True,
                     )
             else:
                 best.accepted = False
@@ -221,7 +356,8 @@ class SandboxAutoresearchHarness:
                 f"Return: {best.metrics.net_return_pct:+.2f}% | "
                 f"MaxDD: {best.metrics.max_drawdown_pct:.2f}% | "
                 f"Sharpe: {best.metrics.sharpe:.2f}"
-            )
+            ),
+            important=True,
         )
         return leaderboard_path, summary_path
 
@@ -323,9 +459,22 @@ class SandboxAutoresearchHarness:
                     )
 
             safe_symbol = symbol.replace("/", "_").replace(":", "_")
+
+            # Cross-run warm start: if we found good params in a previous
+            # cycle, start from those instead of config baseline.
+            warm_params = load_warm_start(symbol)
+            starting_params = warm_params if warm_params is not None else self._baseline_params
+            # Ensure warm-start params include all current allowlist keys
+            for key in self._param_keys:
+                if key not in starting_params:
+                    starting_params[key] = self._baseline_params[key]
+
+            # Initialize per-symbol parameter memory for guided mutation
+            self._param_memory = ParameterMemory(self._param_keys)
+
             baseline = await self._evaluate_candidate(
                 candidate_id=f"{safe_symbol}_baseline",
-                params=self._baseline_params,
+                params=starting_params,
                 evaluator=evaluator,
                 symbol=symbol,
             )
@@ -334,6 +483,7 @@ class SandboxAutoresearchHarness:
             stagnation = 0
             uninformative_streak = 0
             iteration = 0
+            zero_trade_baseline = int(baseline.metrics.trade_count) == 0
             hard_cap = max(1, int(self.cfg.max_iterations_per_symbol if self.cfg.until_convergence else self.cfg.iterations))
             self.store.update_symbol_progress(
                 symbol=symbol,
@@ -378,10 +528,13 @@ class SandboxAutoresearchHarness:
                 await self._wait_while_paused()
                 iteration += 1
                 candidate_id = f"{safe_symbol}_c{iteration:03d}"
-                if self.cfg.random_restart_every_n > 0 and iteration % int(self.cfg.random_restart_every_n) == 0:
-                    params = self._random_restart_params()
+                if zero_trade_baseline and iteration <= 6:
+                    # Aggressively explore when baseline produces no trades
+                    params = self._widen_for_zero_trade_baseline()
+                elif self.cfg.random_restart_every_n > 0 and iteration % int(self.cfg.random_restart_every_n) == 0:
+                    params = self._random_restart_params(iteration=iteration, hard_cap=hard_cap)
                 else:
-                    params = self._mutate_params(best.params)
+                    params = self._mutate_params(best.params, iteration=iteration, hard_cap=hard_cap)
                 result = await self._evaluate_candidate(
                     candidate_id=candidate_id,
                     params=params,
@@ -399,6 +552,11 @@ class SandboxAutoresearchHarness:
                     result.metadata["promotion_ready"] = False
                 result.metadata["window_deltas_vs_baseline"] = self._window_deltas(result, baseline)
                 symbol_results.append(result)
+
+                # Record outcome in parameter memory for guided future mutations
+                score_delta = result.score - best.score
+                if self._param_memory is not None:
+                    self._param_memory.record(best.params, params, score_delta)
 
                 if self._is_behavior_unchanged(result, baseline):
                     uninformative_streak += 1
@@ -439,7 +597,7 @@ class SandboxAutoresearchHarness:
                 if result.score > best.score:
                     best = result
                     stagnation = 0
-                    await self._notify(self._format_milestone(best))
+                    await self._notify(self._format_milestone(best), important=True)
                 else:
                     stagnation += 1
 
@@ -453,7 +611,8 @@ class SandboxAutoresearchHarness:
                 if self.cfg.until_convergence and stagnation >= max(1, self.cfg.max_stagnant_iterations):
                     await self._notify(
                         f"✅ Converged for <code>{symbol}</code> after {iteration} candidates "
-                        f"(stagnant={stagnation})."
+                        f"(stagnant={stagnation}).",
+                        important=True,
                     )
                     break
 
@@ -476,6 +635,14 @@ class SandboxAutoresearchHarness:
                 phase="finished",
             )
 
+            # Persist best params for cross-run warm start so the next cycle
+            # picks up where this one left off instead of starting from scratch.
+            if best.score > -500.0:
+                save_warm_start(symbol, best.params, best.score, best.candidate_id)
+
+            # Clear per-symbol memory
+            self._param_memory = None
+
         if self.store.read_state().get("phase") not in {"stopped", "failed"}:
             self.store.update(phase="finished")
 
@@ -487,7 +654,8 @@ class SandboxAutoresearchHarness:
                 f"Run: <code>{self.run_id}</code>\n"
                 f"Symbols done: {len(completed_symbols)}/{total_symbols}\n"
                 f"Best overall: <code>{best_overall.candidate_id}</code>"
-            )
+            ),
+            important=True,
         )
         return leaderboard_path, summary_path
 
@@ -557,28 +725,108 @@ class SandboxAutoresearchHarness:
             reasons.append("Weak risk-adjusted profile across split windows")
         return (len(reasons) == 0, reasons)
 
+    @staticmethod
+    def _clamp_param(key: str, value: float) -> float:
+        """Clamp a parameter to its allowed bounds if defined."""
+        bounds = PARAMETER_BOUNDS.get(key)
+        if bounds:
+            return max(bounds[0], min(bounds[1], value))
+        return value
+
     def _read_params_from_config(self, config: Config) -> dict[str, float]:
         out: dict[str, float] = {}
         for key in self._param_keys:
             section_name, _, attr = key.partition(".")
-            section = getattr(config, section_name)
-            out[key] = float(getattr(section, attr))
+            section = getattr(config, section_name, None)
+            if section is None:
+                # Optional section (e.g. multi_tp) not present — use bound midpoint
+                bounds = PARAMETER_BOUNDS.get(key)
+                if bounds:
+                    out[key] = round((bounds[0] + bounds[1]) / 2, 6)
+                continue
+            val = getattr(section, attr, None)
+            if val is None:
+                bounds = PARAMETER_BOUNDS.get(key)
+                if bounds:
+                    out[key] = round((bounds[0] + bounds[1]) / 2, 6)
+                continue
+            out[key] = float(val)
         return out
 
-    def _mutate_params(self, source: dict[str, float]) -> dict[str, float]:
+    def _mutate_params(
+        self,
+        source: dict[str, float],
+        step_multiplier: float = 1.0,
+        iteration: int = 0,
+        hard_cap: int = 1,
+    ) -> dict[str, float]:
         candidate = dict(source)
         mutate_count = max(1, int(self.cfg.mutate_params_per_candidate))
-        keys_to_mutate = self.rng.sample(self._param_keys, k=min(mutate_count, len(self._param_keys)))
+
+        # Use parameter memory to pick params weighted by past success
+        mem = self._param_memory
+        if mem is not None and iteration > 6:
+            keys_to_mutate = mem.pick_params_to_mutate(self.rng, mutate_count)
+        else:
+            keys_to_mutate = self.rng.sample(
+                self._param_keys, k=min(mutate_count, len(self._param_keys))
+            )
+
+        # Adaptive step decay: start wide, narrow as we approach the cap.
+        # progress goes 0→1; decay goes 1.0→0.3 (never fully zero).
+        progress = min(iteration / max(hard_cap, 1), 1.0)
+        anneal = 1.0 - 0.7 * progress
+        effective_mult = step_multiplier * anneal
+
         for key in keys_to_mutate:
             value = candidate[key]
-            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct))
-            delta = self.rng.uniform(-step, step)
-            candidate[key] = round(value + delta, 6)
+            step = max(0.001, abs(value) * float(self.cfg.mutate_step_pct)) * effective_mult
+
+            # Directional bias: if memory knows a productive direction,
+            # bias the delta toward it (70% chance follow, 30% explore).
+            direction_bias = mem.get_direction_bias(key) if mem else 0.0
+            if direction_bias != 0.0 and self.rng.random() < 0.7:
+                delta = abs(self.rng.gauss(0, step)) * direction_bias
+            else:
+                delta = self.rng.uniform(-step, step)
+
+            candidate[key] = self._clamp_param(key, round(value + delta, 6))
         return candidate
 
-    def _random_restart_params(self) -> dict[str, float]:
+    def _random_restart_params(self, iteration: int = 0, hard_cap: int = 1) -> dict[str, float]:
         """Sample a fresh candidate around baseline to escape local flats."""
-        return self._mutate_params(self._baseline_params)
+        return self._mutate_params(self._baseline_params, iteration=iteration, hard_cap=hard_cap)
+
+    def _widen_for_zero_trade_baseline(self) -> dict[str, float]:
+        """Aggressively loosen gate parameters when baseline produces 0 trades.
+
+        Instead of random mutation, this deliberately lowers score thresholds
+        and ADX gates to find the region of parameter space where the strategy
+        actually fires signals.
+        """
+        from src.research.allowlist import PARAMETER_BOUNDS
+
+        candidate = dict(self._baseline_params)
+        gate_keys = [
+            k for k in self._param_keys
+            if any(tok in k for tok in (
+                "min_score", "adx_threshold", "cooldown",
+                "fib_proximity", "structure_fallback_score_premium",
+                "cost_cap", "min_rr",
+            ))
+        ]
+        for key in gate_keys:
+            bounds = PARAMETER_BOUNDS.get(key)
+            if bounds:
+                lo, hi = bounds
+                # Bias toward the permissive end: lower thresholds, wider
+                # tolerances, looser cost caps
+                if "fib_proximity" in key and "max" not in key:
+                    # Fib proximity: higher = more permissive
+                    candidate[key] = round(self.rng.uniform(lo + (hi - lo) * 0.5, hi), 6)
+                else:
+                    candidate[key] = round(self.rng.uniform(lo, lo + (hi - lo) * 0.4), 6)
+        return candidate
 
     def _is_behavior_unchanged(self, candidate: CandidateResult, baseline: CandidateResult) -> bool:
         """Detect when candidate produces no meaningful behavior change vs baseline."""
@@ -702,8 +950,16 @@ class SandboxAutoresearchHarness:
             await asyncio.sleep(2)
         self.store.update(phase="running")
 
-    async def _notify(self, message: str) -> None:
-        if self.cfg.enable_telegram:
+    async def _notify(self, message: str, *, important: bool = False) -> None:
+        """Send a research notification.
+
+        Args:
+            message: The notification text.
+            important: If True, always send to Telegram. If False, only log
+                locally. This keeps Telegram quiet unless the optimizer finds
+                a meaningful result or hits a terminal event.
+        """
+        if self.cfg.enable_telegram and important:
             await send_telegram_message(message)
         logger.info("Research notification", message=message)
 
@@ -863,7 +1119,8 @@ class SandboxAutoresearchHarness:
                 f"{'✅' if passed else '⛔'} Replay gate {'passed' if passed else 'failed'} for "
                 f"<code>{best.candidate_id}</code> "
                 f"(seeds={','.join(str(s) for s in self.cfg.replay_gate_seeds)})"
-            )
+            ),
+            important=True,
         )
         return {"passed": passed, "seeds": seed_results}
 

@@ -129,3 +129,66 @@ def test_save_fill_is_globally_idempotent_by_fill_id(tmp_path):
         (fill.fill_id,),
     ).fetchone()
     assert row["cnt"] == 1
+
+
+def test_ensure_stop_bound_logs_missing_stop_only_once(monkeypatch, tmp_path):
+    db_path = tmp_path / "positions.db"
+    persistence = PositionPersistence(db_path=str(db_path))
+    pos = ManagedPosition(
+        symbol="SOL/USD",
+        side=Side.LONG,
+        position_id="pos-missing-stop",
+        initial_size=Decimal("1"),
+        initial_entry_price=Decimal("100"),
+        initial_stop_price=Decimal("95"),
+        initial_tp1_price=None,
+        initial_tp2_price=None,
+        initial_final_target=None,
+    )
+    pos.state = PositionState.OPEN
+
+    calls = []
+
+    def _capture_warning(event, **kwargs):
+        calls.append((event, kwargs))
+
+    monkeypatch.setattr("src.execution.position_persistence.logger.warning", _capture_warning)
+
+    assert persistence._ensure_stop_bound(pos) is False
+    assert persistence._ensure_stop_bound(pos) is False
+    assert len(calls) == 1
+    assert calls[0][0] == "stop_missing_after_reconcile"
+
+    pos.stop_order_id = "stop-1"
+    assert persistence._ensure_stop_bound(pos) is True
+
+    pos.stop_order_id = None
+    assert persistence._ensure_stop_bound(pos) is False
+    assert len(calls) == 2
+
+
+def test_ensure_stop_bound_skips_pending_positions(monkeypatch, tmp_path):
+    db_path = tmp_path / "positions.db"
+    persistence = PositionPersistence(db_path=str(db_path))
+    pos = ManagedPosition(
+        symbol="ETH/USD",
+        side=Side.LONG,
+        position_id="pos-pending-stop-ok",
+        initial_size=Decimal("1"),
+        initial_entry_price=Decimal("100"),
+        initial_stop_price=Decimal("95"),
+        initial_tp1_price=None,
+        initial_tp2_price=None,
+        initial_final_target=None,
+    )
+    pos.state = PositionState.PENDING
+
+    calls = []
+
+    def _capture_warning(event, **kwargs):
+        calls.append((event, kwargs))
+
+    monkeypatch.setattr("src.execution.position_persistence.logger.warning", _capture_warning)
+
+    assert persistence._ensure_stop_bound(pos) is True
+    assert calls == []

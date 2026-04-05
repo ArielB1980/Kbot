@@ -6,6 +6,7 @@ import asyncio
 import csv
 import hashlib
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -16,6 +17,7 @@ from src.backtest.backtest_engine import BacktestEngine, BacktestMetrics
 from src.backtest.replay_harness.runner import BacktestRunner
 from src.config.config import Config
 from src.data.data_acquisition import DataAcquisition
+from src.data.coinapi_client import CoinAPIClient
 from src.data.kraken_client import KrakenClient
 from src.data.symbol_utils import futures_candidate_symbols
 from src.monitoring.logger import get_logger
@@ -277,6 +279,26 @@ class CandidateEvaluator:
         normalized = [metrics_from_backtest(m, self.spec.starting_equity) for m in all_metrics]
         return _average_metrics(normalized)
 
+    @staticmethod
+    @contextmanager
+    def _suppress_replay_override_env_vars():
+        """Temporarily remove REPLAY_OVERRIDE_* env vars so research mutations take effect.
+
+        The continuous daemon exports REPLAY_OVERRIDE_* env vars for promotion
+        validation.  These override the very config parameters that the research
+        harness is mutating, making all candidates behave identically to
+        baseline ("uninformative surface").  We strip them during evaluation so
+        that config_overrides from the harness actually reach the strategy.
+        """
+        saved: dict[str, str] = {}
+        for key in list(os.environ):
+            if key.startswith("REPLAY_OVERRIDE_"):
+                saved[key] = os.environ.pop(key)
+        try:
+            yield
+        finally:
+            os.environ.update(saved)
+
     async def _run_aggregate_replay_for_period(
         self,
         params: dict[str, float],
@@ -294,26 +316,42 @@ class CandidateEvaluator:
         for symbol in self.spec.symbols:
             coverage = self._coverage_status.get(symbol, {})
             if not coverage.get("available_start") or not coverage.get("available_end"):
-                normalized.append(_failed_metrics("partial_data_non_comparable"))
-                paused_ratios.append(1.0)
+                # Don't produce a -999 sentinel for partial data — this causes
+                # the optimizer to skip the symbol entirely.  Instead, return
+                # 0-trade metrics so the optimizer can try loosening gates.
+                normalized.append(CandidateMetrics(
+                    net_return_pct=0.0,
+                    max_drawdown_pct=0.0,
+                    sharpe=0.0,
+                    sortino=None,
+                    win_rate_pct=0.0,
+                    trade_count=0,
+                    rejection_reasons=["partial_data_non_comparable"],
+                ))
+                paused_ratios.append(0.0)
                 continue
             try:
-                runner = BacktestRunner(
-                    data_dir=Path(self.spec.replay_data_dir),
-                    symbols=[symbol],
-                    start=start_date,
-                    end=end_date,
-                    tick_interval_seconds=900,
-                    max_ticks=max(1, int(self.spec.replay_max_ticks)),
-                    timeframes=list(self.spec.replay_timeframes),
-                    config_overrides=params,
-                    disable_cycle_guard_throttle=True,
-                    disable_db_mock=bool(os.getenv("DATABASE_URL", "").strip()),
-                )
-                replay = await asyncio.wait_for(
-                    runner.run(),
-                    timeout=max(1, int(self.spec.replay_eval_timeout_seconds)),
-                )
+                with self._suppress_replay_override_env_vars():
+                    runner = BacktestRunner(
+                        data_dir=Path(self.spec.replay_data_dir),
+                        symbols=[symbol],
+                        start=start_date,
+                        end=end_date,
+                        tick_interval_seconds=900,
+                        max_ticks=max(1, int(self.spec.replay_max_ticks)),
+                        timeframes=list(self.spec.replay_timeframes),
+                        config_overrides=params,
+                        disable_cycle_guard_throttle=True,
+                        # NEVER disable the DB mock during research replay.
+                        # Replay reads candles from CSV, not DB.  Disabling the
+                        # mock causes save_trade() to write phantom trades into
+                        # the production trades table.
+                        disable_db_mock=False,
+                    )
+                    replay = await asyncio.wait_for(
+                        runner.run(),
+                        timeout=max(1, int(self.spec.replay_eval_timeout_seconds)),
+                    )
                 summary = replay.summary()
                 paused_ratio = float((summary.get("system") or {}).get("trade_paused_ratio", 0.0))
                 paused_ratios.append(paused_ratio)
@@ -375,10 +413,18 @@ class CandidateEvaluator:
                 results["complete"] = False
             results["timeframes"][timeframe] = {**coverage, "ok": timeframe_ok, "candle_count": len(candles)}
         base_timeframe = self.spec.replay_timeframes[0] if self.spec.replay_timeframes else None
-        base_cov = results["timeframes"].get(base_timeframe or "")
-        if base_cov and base_cov.get("first_ts") and base_cov.get("last_ts"):
-            results["available_start"] = str(base_cov["first_ts"])
-            results["available_end"] = str(base_cov["last_ts"])
+        available_start, available_end = _select_available_window_from_timeframes(
+            results["timeframes"],
+            min_coverage_ratio=self.spec.min_partial_coverage_ratio,
+        )
+        if available_start and available_end:
+            results["available_start"] = available_start.isoformat()
+            results["available_end"] = available_end.isoformat()
+        elif base_timeframe:
+            base_cov = results["timeframes"].get(base_timeframe or "")
+            if base_cov and base_cov.get("first_ts") and base_cov.get("last_ts"):
+                results["available_start"] = str(base_cov["first_ts"])
+                results["available_end"] = str(base_cov["last_ts"])
         return results
 
     async def _backfill_symbol(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> None:
@@ -390,15 +436,43 @@ class CandidateEvaluator:
             futures_api_secret=self.base_config.exchange.futures_api_secret or "",
             use_testnet=False,
         )
+        coinapi_key = (os.getenv("COINAPI_API_KEY") or "").strip()
+        coinapi_client = CoinAPIClient(api_key=coinapi_key) if coinapi_key else None
         try:
             await client.initialize()
-            acq = DataAcquisition(client, [symbol], [])
-            await acq.fetch_spot_historical(
-                symbol=symbol,
-                timeframe=timeframe,
-                start_time=start,
-                end_time=end,
-            )
+            acq = DataAcquisition(client, [symbol], [], coinapi_client=coinapi_client)
+            sources = ["kraken"]
+            if timeframe in {"1m", "15m", "1h"} and coinapi_client is not None:
+                sources = ["coinapi", "kraken"]
+            elif coinapi_client is not None:
+                sources = ["kraken", "coinapi"]
+
+            last_error: Exception | None = None
+            for source in sources:
+                try:
+                    await acq.fetch_spot_historical(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        start_time=start,
+                        end_time=end,
+                        source=source,
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    logger.warning(
+                        "Replay preflight backfill source failed",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        source=source,
+                        start=start.isoformat(),
+                        end=end.isoformat(),
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+
+            if last_error is not None:
+                raise last_error
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Replay preflight backfill failed",
@@ -414,6 +488,11 @@ class CandidateEvaluator:
                 await client.close()
             except Exception:  # noqa: BLE001
                 pass
+            if coinapi_client is not None:
+                try:
+                    await coinapi_client.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _coverage_comparability_score(self, coverage: dict[str, Any]) -> float:
         """Compute comparable-data score in [0,1] from timeframe coverages."""
@@ -554,6 +633,52 @@ def _calculate_coverage(symbol: str, timeframe: str, start: datetime, end: datet
     }
 
 
+def _select_available_window_from_timeframes(
+    timeframes: dict[str, Any],
+    *,
+    min_coverage_ratio: float,
+) -> tuple[datetime | None, datetime | None]:
+    """
+    Select the comparable replay window for a symbol across prepared timeframes.
+
+    Prefer non-provider-capped timeframes with enough coverage. Provider-capped
+    lower timeframes like 1m are useful for execution simulation, but they
+    should not collapse the effective research window to a few recent days.
+    """
+    preferred: list[tuple[datetime, datetime]] = []
+    fallback: list[tuple[datetime, datetime]] = []
+
+    for coverage in (timeframes or {}).values():
+        first_raw = coverage.get("first_ts")
+        last_raw = coverage.get("last_ts")
+        if not first_raw or not last_raw:
+            continue
+        first = datetime.fromisoformat(str(first_raw))
+        last = datetime.fromisoformat(str(last_raw))
+        if last <= first:
+            continue
+        fallback.append((first, last))
+
+        try:
+            ratio = float(coverage.get("coverage_ratio", 0.0))
+        except (TypeError, ValueError):
+            ratio = 0.0
+        if coverage.get("provider_cap"):
+            continue
+        if ratio >= float(min_coverage_ratio):
+            preferred.append((first, last))
+
+    selected = preferred or fallback
+    if not selected:
+        return None, None
+
+    start = max(first for first, _ in selected)
+    end = min(last for _, last in selected)
+    if end <= start:
+        return None, None
+    return start, end
+
+
 def _write_replay_csv(data_dir: Path, symbol: str, timeframe: str, candles: list[Any]) -> None:
     """Write replay candle csv from DB candles."""
     safe_symbol = symbol.replace("/", "_").replace(":", "_")
@@ -614,14 +739,25 @@ def _compose_window_outcome(
     windows: list[dict[str, Any]],
 ) -> EvaluationOutcome:
     if not holdout_metrics_all:
-        failed = _failed_metrics("No successful holdout evaluations across windows")
+        # Instead of returning a -999% sentinel that causes the optimizer to
+        # skip this symbol entirely, return a 0-trade penalty score.  This
+        # lets the optimizer try mutations that might produce trades.
+        zero_trade = CandidateMetrics(
+            net_return_pct=0.0,
+            max_drawdown_pct=0.0,
+            sharpe=0.0,
+            sortino=None,
+            win_rate_pct=0.0,
+            trade_count=0,
+            rejection_reasons=["No successful holdout evaluations across windows"],
+        )
         return EvaluationOutcome(
-            metrics=failed,
+            metrics=zero_trade,
             diagnostics={
                 "per_window": windows,
                 "train_score": None,
                 "holdout_score": None,
-                "composite_score": -10_000.0,
+                "composite_score": -500.0,
             },
         )
 
@@ -695,4 +831,3 @@ def _metrics_to_dict(m: CandidateMetrics) -> dict[str, Any]:
         "trade_count": m.trade_count,
         "rejection_reasons": list(m.rejection_reasons),
     }
-

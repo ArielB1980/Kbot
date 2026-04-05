@@ -12,7 +12,11 @@ from unittest import mock
 
 import pytest
 
-from src.storage.maintenance import CANDLE_RETENTION_DAYS, DatabasePruner
+from src.storage.maintenance import (
+    CANDLE_RETENTION_DAYS,
+    SYSTEM_EVENT_RETENTION_DAYS,
+    DatabasePruner,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +37,12 @@ class TestRetentionPolicies:
 
     def test_1d_candles_not_pruned(self):
         assert "1d" not in CANDLE_RETENTION_DAYS
+
+    def test_system_event_retention_covers_counterfactual_decisions(self):
+        assert SYSTEM_EVENT_RETENTION_DAYS["COUNTERFACTUAL_DECISION"] == 7
+
+    def test_system_event_retention_keeps_signals_longer(self):
+        assert SYSTEM_EVENT_RETENTION_DAYS["SIGNAL_GENERATED"] == 30
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +88,13 @@ class TestDatabasePruner:
         session.commit.assert_called_once()
 
     def test_prune_old_traces_default_3_days(self, pruner):
+        with mock.patch.object(pruner, "prune_old_system_events", return_value={"DECISION_TRACE": 10}) as mocked:
+            result = pruner.prune_old_traces()
+
+        assert result == 10
+        mocked.assert_called_once_with({"DECISION_TRACE": 3})
+
+    def test_prune_old_system_events_commits_per_event_type(self, pruner):
         session = mock.MagicMock()
         pruner.db.get_session.return_value.__enter__ = mock.MagicMock(return_value=session)
         pruner.db.get_session.return_value.__exit__ = mock.MagicMock(return_value=False)
@@ -85,21 +102,29 @@ class TestDatabasePruner:
         query = session.query.return_value.filter.return_value
         query.delete.return_value = 10
 
-        result = pruner.prune_old_traces()
+        result = pruner.prune_old_system_events({"DECISION_TRACE": 3, "COUNTERFACTUAL_DECISION": 7})
 
-        assert result == 10
-        session.commit.assert_called_once()
+        assert result == {"DECISION_TRACE": 10, "COUNTERFACTUAL_DECISION": 10}
+        assert session.commit.call_count == 2
 
     def test_run_maintenance_returns_both_counts(self, pruner):
         """run_maintenance aggregates trace + candle counts."""
         with (
-            mock.patch.object(pruner, "prune_old_traces", return_value=3),
+            mock.patch.object(
+                pruner,
+                "prune_old_system_events",
+                return_value={"DECISION_TRACE": 3, "COUNTERFACTUAL_DECISION": 11},
+            ),
             mock.patch.object(pruner, "prune_old_candles", return_value=7),
             mock.patch.object(pruner, "log_table_stats", return_value={}),
         ):
             result = pruner.run_maintenance()
 
-        assert result == {"traces_deleted": 3, "candles_deleted": 7}
+        assert result == {
+            "traces_deleted": 3,
+            "system_events_deleted": {"DECISION_TRACE": 3, "COUNTERFACTUAL_DECISION": 11},
+            "candles_deleted": 7,
+        }
 
 
 # ---------------------------------------------------------------------------

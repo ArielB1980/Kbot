@@ -121,11 +121,32 @@ PY
 
 daemon_pid=""
 daemon_running=0
+daemon_owner=""
+daemon_user_mismatch=0
+expected_user="$(id -un)"
 if [[ -f "${PID_FILE}" ]]; then
   daemon_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
 fi
-if [[ -n "${daemon_pid}" ]] && kill -0 "${daemon_pid}" 2>/dev/null; then
-  daemon_running=1
+if [[ -n "${daemon_pid}" ]] && ps -p "${daemon_pid}" >/dev/null 2>&1; then
+  daemon_owner="$(ps -o user= -p "${daemon_pid}" 2>/dev/null | tr -d ' ')"
+  if [[ "${daemon_owner}" == "${expected_user}" ]]; then
+    daemon_running=1
+  else
+    daemon_user_mismatch=1
+  fi
+fi
+
+for control_file in "${PID_FILE}" "${LATEST_RUN_FILE}" "${STATE_ROOT}/daemon.lock"; do
+  if [[ -e "${control_file}" ]] && [[ ! -w "${control_file}" ]]; then
+    owner="$(stat -c '%U' "${control_file}" 2>/dev/null || echo unknown)"
+    log_msg "error" "CONTROL_FILE_OWNERSHIP_MISMATCH" "file=${control_file} owner=${owner} expected=${expected_user} action=manual_intervention_required"
+    exit 0
+  fi
+done
+
+if [[ "${daemon_user_mismatch}" == "1" ]]; then
+  log_msg "error" "DAEMON_WRONG_USER" "pid=${daemon_pid} owner=${daemon_owner:-unknown} expected=${expected_user} action=manual_intervention_required"
+  exit 0
 fi
 
 restart_daemon() {
@@ -187,7 +208,8 @@ fi
 
 state_file="${RUNS_DIR}/${latest_run_id}/state.json"
 run_log="${RUNS_DIR}/${latest_run_id}/research.log"
-if [[ ! -f "${state_file}" ]]; then
+run_dir="${RUNS_DIR}/${latest_run_id}"
+if [[ ! -f "${state_file}" ]] && ! compgen -G "${run_dir}/state_w*.json" >/dev/null; then
   log_msg "warn" "MISSING_STATE_FILE" "run_id=${latest_run_id} action=restart_daemon"
   restart_daemon "missing_state_file"
   exit 0
@@ -198,35 +220,85 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+run_dir = Path("${run_dir}")
 state_path = Path("${state_file}")
 run_log = Path("${run_log}")
 watchdog_state = Path("${WATCHDOG_STATE_FILE}")
 
-loaded = json.loads(state_path.read_text())
-state = loaded if isinstance(loaded, dict) else {}
 now = datetime.now(timezone.utc)
 
-updated_raw = state.get("updated_at")
-updated_age = 10**9
-if updated_raw:
+state_paths = [state_path] if state_path.exists() else sorted(run_dir.glob("state_w*.json"))
+log_paths = [run_log] if run_log.exists() else sorted(run_dir.glob("research_w*.log"))
+
+states: list[tuple[Path, dict]] = []
+for path in state_paths:
     try:
-        dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
-        updated_age = int((now - dt).total_seconds())
-    except ValueError:
-        updated_age = 10**9
+        loaded = json.loads(path.read_text())
+    except Exception:
+        continue
+    if isinstance(loaded, dict):
+        states.append((path, loaded))
+
+updated_age = 10**9
+state_updated_ages: list[int] = []
+for path, state in states:
+    updated_raw = state.get("updated_at")
+    if updated_raw:
+        try:
+            dt = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00"))
+            state_updated_ages.append(int((now - dt).total_seconds()))
+            continue
+        except ValueError:
+            pass
+    state_updated_ages.append(int(now.timestamp() - path.stat().st_mtime))
+if state_updated_ages:
+    updated_age = min(state_updated_ages)
 
 log_age = 10**9
-if run_log.exists():
-    log_age = int(now.timestamp() - run_log.stat().st_mtime)
+if log_paths:
+    log_age = min(int(now.timestamp() - path.stat().st_mtime) for path in log_paths)
 
-phase = str(state.get("phase") or "")
-completed = len(state.get("completed_symbols") or [])
-total = int(state.get("total_symbols") or 0)
-current_symbol = str(state.get("current_symbol") or "")
-sp_raw = (state.get("symbol_progress") or {}).get(current_symbol) if current_symbol else {}
-sp = sp_raw if isinstance(sp_raw, dict) else {}
-iteration = sp.get("iteration")
-marker = f"{phase}|{completed}|{total}|{current_symbol}|{iteration}"
+phase = ""
+completed = 0
+total = 0
+current_symbol = ""
+current_iteration = None
+worker_markers: list[str] = []
+phase_rank = {"running": 4, "idle": 3, "done": 2, "finished": 2, "error": 1, "failed": 1}
+best_phase_rank = -1
+latest_current_ts = None
+
+for path, state in states:
+    state_phase = str(state.get("phase") or "")
+    rank = phase_rank.get(state_phase, 0)
+    if rank > best_phase_rank:
+        phase = state_phase
+        best_phase_rank = rank
+    completed_symbols = state.get("completed_symbols") or []
+    if isinstance(completed_symbols, list):
+        completed += len(completed_symbols)
+    try:
+        total += int(state.get("total_symbols") or 0)
+    except Exception:
+        pass
+    state_current = str(state.get("current_symbol") or "")
+    symbol_progress = state.get("symbol_progress") or {}
+    sp_raw = symbol_progress.get(state_current) if state_current else {}
+    sp = sp_raw if isinstance(sp_raw, dict) else {}
+    state_iteration = sp.get("iteration", state.get("iteration"))
+    worker_markers.append(f"{path.name}:{state_phase}:{state_current}:{state_iteration}")
+    if state_current:
+        updated_raw = state.get("updated_at")
+        try:
+            ts = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00")).timestamp() if updated_raw else path.stat().st_mtime
+        except ValueError:
+            ts = path.stat().st_mtime
+        if latest_current_ts is None or ts > latest_current_ts:
+            latest_current_ts = ts
+            current_symbol = state_current
+            current_iteration = state_iteration
+
+marker = "|".join([phase, str(completed), str(total), current_symbol, str(current_iteration), *sorted(worker_markers)])
 
 same_for = 0
 if watchdog_state.exists():
@@ -241,9 +313,12 @@ watchdog_state.write_text(
 )
 
 tail_no_candles = 0
-if run_log.exists():
-    lines = run_log.read_text(errors="replace").splitlines()[-2000:]
-    tail_no_candles = sum(1 for line in lines if "No candles for" in line)
+for path in log_paths:
+    try:
+        lines = path.read_text(errors="replace").splitlines()[-500:]
+    except Exception:
+        continue
+    tail_no_candles += sum(1 for line in lines if "No candles for" in line)
 
 print(f"phase={phase}")
 print(f"completed={completed}")

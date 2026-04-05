@@ -497,6 +497,14 @@ class StrategyConfig(BaseSettings):
 
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
+    allow_counter_trend: bool = Field(
+        default=True,
+        description="Allow signals counter to HTF EMA200 bias",
+    )
+    counter_trend_score_penalty: float = Field(
+        default=5.0, ge=0.0, le=30.0,
+        description="Score penalty for counter-trend signals",
+    )
     
     # Scoring Gates
     min_score_tight_smc_aligned: float = Field(default=75.0, ge=0.0, le=100.0)
@@ -505,7 +513,7 @@ class StrategyConfig(BaseSettings):
     min_score_wide_structure_neutral: float = Field(default=75.0, ge=0.0, le=100.0)
     
     # Fib Enforcement
-    fib_proximity_bps: float = Field(default=20.0, ge=0.0, le=100.0) # 0.2%
+    fib_proximity_bps: float = Field(default=20.0, ge=0.0, le=200.0) # 0.2%
     fib_proximity_adaptive_enabled: bool = Field(
         default=False,
         description="Scale fib proximity tolerance with ATR ratio (wider in high vol)",
@@ -1222,12 +1230,16 @@ class Config(BaseSettings):
         import os
         import re
         
-        # Regex to find ${VAR} or $VAR
+        # Regex to find ${VAR}, ${VAR:-default}, or $VAR
         pattern = re.compile(r'\$\{([^}]+)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)')
-        
+
         def replace_match(match):
-            var_name = match.group(1) or match.group(2)
-            return os.environ.get(var_name, match.group(0))  # Return original if not found
+            expr = match.group(1) or match.group(2)
+            # Support ${VAR:-default} syntax
+            if ":-" in expr:
+                var_name, default = expr.split(":-", 1)
+                return os.environ.get(var_name, default)
+            return os.environ.get(expr, match.group(0))  # Return original if not found
             
         expanded_content = pattern.sub(replace_match, raw_content)
         config_dict = yaml.safe_load(expanded_content)

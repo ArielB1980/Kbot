@@ -258,6 +258,22 @@ class TestExchangeSim:
             size=Decimal("0.1"),
         )
         assert result["status"] == "filled"
+
+    @pytest.mark.asyncio
+    async def test_fetch_order_includes_deterministic_trade_ids(self, exchange):
+        ex, clock = exchange
+        result = await ex.place_futures_order(
+            symbol="BTC/USD:USD", side="buy", order_type="market",
+            size=Decimal("0.1"),
+            client_order_id="entry-1",
+        )
+
+        fetched = await ex.fetch_order(result["id"], "BTC/USD:USD")
+
+        assert fetched is not None
+        assert len(fetched["trades"]) == 1
+        assert fetched["trades"][0]["id"] == f'{result["id"]}-fill-1'
+        assert fetched["trades"][0]["order"] == result["id"]
         assert result["filled"] > 0
 
     @pytest.mark.asyncio
@@ -603,6 +619,51 @@ class TestReduceOnlySemantics:
         # Should be flat, NOT reversed into a short
         positions = await ex.get_all_futures_positions()
         assert len(positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_market_fill_reports_capped_size(self, exchange):
+        """Oversized reduceOnly market fills should report the executable size, not the requested size."""
+        ex, clock = exchange
+        await ex.place_futures_order(
+            symbol="BTC/USD:USD", side="buy", order_type="market",
+            size=Decimal("0.1"),
+        )
+        result = await ex.place_futures_order(
+            symbol="BTC/USD:USD", side="sell", order_type="market",
+            size=Decimal("0.2"), reduce_only=True,
+        )
+
+        fetched = await ex.fetch_order(result["id"], "BTC/USD:USD")
+
+        assert fetched is not None
+        assert fetched["status"] == "filled"
+        assert Decimal(str(fetched["amount"])) == Decimal("0.1")
+        assert Decimal(str(fetched["filled"])) == Decimal("0.1")
+        assert Decimal(str(fetched["remaining"])) == Decimal("0")
+        assert Decimal(str(fetched["trades"][0]["amount"])) == Decimal("0.1")
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_limit_fill_reports_capped_size(self, exchange):
+        """Oversized reduceOnly limit fills should also be clipped in the reported order payload."""
+        ex, clock = exchange
+        await ex.place_futures_order(
+            symbol="BTC/USD:USD", side="buy", order_type="market",
+            size=Decimal("0.1"),
+        )
+        result = await ex.place_futures_order(
+            symbol="BTC/USD:USD", side="sell", order_type="limit",
+            size=Decimal("0.2"), price=Decimal("49900"), reduce_only=True,
+        )
+
+        ex.step(clock.now())
+        fetched = await ex.fetch_order(result["id"], "BTC/USD:USD")
+
+        assert fetched is not None
+        assert fetched["status"] == "filled"
+        assert Decimal(str(fetched["amount"])) == Decimal("0.1")
+        assert Decimal(str(fetched["filled"])) == Decimal("0.1")
+        assert Decimal(str(fetched["remaining"])) == Decimal("0")
+        assert Decimal(str(fetched["trades"][0]["amount"])) == Decimal("0.1")
 
     @pytest.mark.asyncio
     async def test_non_reduce_can_reverse(self, exchange):

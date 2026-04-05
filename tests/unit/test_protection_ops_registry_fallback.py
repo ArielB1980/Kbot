@@ -13,7 +13,7 @@ from src.execution.position_state_machine import (
     PositionState,
 )
 from src.domain.models import Side
-from src.live.protection_ops import reconcile_stop_loss_order_ids
+from src.live.protection_ops import reconcile_protective_orders, reconcile_stop_loss_order_ids
 
 
 class _FakeClient:
@@ -105,3 +105,21 @@ async def test_reconcile_stop_loss_order_ids_uses_registry_fallback_and_updates_
     assert stale_pos.stop_order_id == "live-stop"
     assert ("DASH/USD", "live-stop") in persistence.saved
     assert ("PF_DASHUSD", "live-stop") in persistence.saved
+
+
+@pytest.mark.asyncio
+async def test_reconcile_protective_orders_skips_legacy_backfill_in_replay_v2():
+    lt = SimpleNamespace(
+        config=SimpleNamespace(
+            execution=SimpleNamespace(tp_backfill_enabled=True),
+        ),
+        use_state_machine_v2=True,
+        _replay_relaxed_signal_gates=True,
+        client=SimpleNamespace(),
+    )
+
+    await reconcile_protective_orders(
+        lt,
+        [{"symbol": "XRP/USD", "size": "100"}],
+        {"XRP/USD": Decimal("1.4")},
+    )

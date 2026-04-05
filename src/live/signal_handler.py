@@ -13,6 +13,7 @@ from src.exceptions import OperationalError, DataError
 from src.domain.models import Signal, SignalType, Side
 from src.execution.equity import calculate_effective_equity
 from src.execution.position_manager_v2 import ActionType as ActionTypeV2
+from src.execution.position_state_machine import InvariantViolation
 from src.monitoring.logger import get_logger
 
 if TYPE_CHECKING:
@@ -284,7 +285,7 @@ async def handle_signal_v2(
 
     try:
         lt.position_registry.register_position(position)
-    except (OperationalError, DataError) as e:
+    except (OperationalError, DataError, InvariantViolation) as e:
         logger.error("Failed to register position", error=str(e), error_type=type(e).__name__)
         return await _fail(f"Failed to register position: {e}")
 

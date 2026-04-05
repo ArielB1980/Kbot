@@ -365,6 +365,16 @@ cmd_start_continuous() {
     cd \"${TRADING_DIR}\"
     chmod +x \"${TRADING_DIR}/scripts/research_continuous.sh\"
     mkdir -p data/research/continuous_daemon/logs
+    for CONTROL_FILE in \
+      data/research/continuous_daemon/daemon.lock \
+      data/research/continuous_daemon/daemon.pid \
+      data/research/continuous_daemon/latest_run_id; do
+      if [ -e \"\${CONTROL_FILE}\" ] && [ ! -w \"\${CONTROL_FILE}\" ]; then
+        OWNER=\$(stat -c %U \"\${CONTROL_FILE}\" 2>/dev/null || echo unknown)
+        echo \"continuous daemon control file not writable: \${CONTROL_FILE} owner=\${OWNER}\"
+        exit 1
+      fi
+    done
     if [ -f data/research/continuous_daemon/daemon.pid ]; then
       PID=\$(cat data/research/continuous_daemon/daemon.pid || true)
       if [ -n \"\${PID:-}\" ] && kill -0 \"\${PID}\" 2>/dev/null; then
@@ -390,15 +400,28 @@ cmd_status_continuous() {
     cd \"${TRADING_DIR}\"
     PID_FILE=data/research/continuous_daemon/daemon.pid
     LATEST_FILE=data/research/continuous_daemon/latest_run_id
+    EXPECTED_USER=\$(id -un)
     echo \"daemon_pid=\$(cat \"\${PID_FILE}\" 2>/dev/null || echo none)\"
     if [ -f \"\${PID_FILE}\" ]; then
       PID=\$(cat \"\${PID_FILE}\" || true)
-      if [ -n \"\${PID:-}\" ] && kill -0 \"\${PID}\" 2>/dev/null; then
-        echo \"daemon_running=true\"
+      if [ -n \"\${PID:-}\" ] && ps -p \"\${PID}\" >/dev/null 2>&1; then
+        OWNER=\$(ps -o user= -p \"\${PID}\" 2>/dev/null | tr -d \" \")
+        echo \"daemon_owner=\${OWNER:-unknown}\"
+        if [ \"\${OWNER:-}\" = \"\${EXPECTED_USER}\" ]; then
+          echo \"daemon_user_mismatch=false\"
+          echo \"daemon_running=true\"
+        else
+          echo \"daemon_user_mismatch=true\"
+          echo \"daemon_running=false\"
+        fi
       else
+        echo \"daemon_owner=none\"
+        echo \"daemon_user_mismatch=false\"
         echo \"daemon_running=false\"
       fi
     else
+      echo \"daemon_owner=none\"
+      echo \"daemon_user_mismatch=false\"
       echo \"daemon_running=false\"
     fi
     echo \"latest_run_id=\$(cat \"\${LATEST_FILE}\" 2>/dev/null || echo none)\"
@@ -692,4 +715,3 @@ case "${COMMAND}" in
     exit 1
     ;;
 esac
-

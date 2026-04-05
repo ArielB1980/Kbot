@@ -237,6 +237,7 @@ class ReplayKrakenClient:
             "latency_injected_ms_total": 0.0,
             "trades_closed": 0,
         }
+        self._closed_trades: List[Dict[str, Any]] = []
         self._symbol_resolution_cache: Dict[str, str] = {}
 
     # -- Initialization --
@@ -557,7 +558,10 @@ class ReplayKrakenClient:
 
         # Fee: market orders are always taker for stops/market
         fee_rate = Decimal(str(self._config.taker_fee_bps / 10_000))
-        fill_size = order.size - order.filled_size
+        fill_size = self._get_effective_fill_size(order)
+        if fill_size <= 0:
+            order.status = OrderStatus.CANCELLED
+            return []
         fee = fill_size * fill_price * fee_rate
 
         fill = SimFill(
@@ -572,7 +576,10 @@ class ReplayKrakenClient:
             reduce_only=order.reduce_only,
         )
 
-        order.filled_size = order.size
+        order.filled_size += fill_size
+        if order.reduce_only and order.filled_size < order.size:
+            # Reduce-only orders are exchange-capped at current exposure.
+            order.size = order.filled_size
         order.avg_fill_price = fill_price
         order.status = OrderStatus.FILLED
         order.filled_at = now
@@ -613,7 +620,10 @@ class ReplayKrakenClient:
         ))
 
         fill_price = order.price  # Limit orders fill at limit price
-        fill_size = order.size - order.filled_size
+        fill_size = self._get_effective_fill_size(order)
+        if fill_size <= 0:
+            order.status = OrderStatus.CANCELLED
+            return []
         fee = fill_size * fill_price * fee_rate
 
         fill = SimFill(
@@ -628,7 +638,10 @@ class ReplayKrakenClient:
             reduce_only=order.reduce_only,
         )
 
-        order.filled_size = order.size
+        order.filled_size += fill_size
+        if order.reduce_only and order.filled_size < order.size:
+            # Reduce-only orders are exchange-capped at current exposure.
+            order.size = order.filled_size
         order.avg_fill_price = fill_price
         order.status = OrderStatus.FILLED
         order.filled_at = now
@@ -641,6 +654,27 @@ class ReplayKrakenClient:
 
         self._apply_fill_to_position(fill, reduce_only=order.reduce_only)
         return [fill]
+
+    def _get_effective_fill_size(self, order: SimOrder) -> Decimal:
+        """Return the exchange-executable fill size for an order at this instant."""
+        requested = order.size - order.filled_size
+        if requested <= 0:
+            return Decimal("0")
+        if not order.reduce_only:
+            return requested
+
+        pos = self._positions.get(order.symbol)
+        if pos is None:
+            return Decimal("0")
+
+        is_same_direction = (
+            (pos.side == "long" and order.side == "buy") or
+            (pos.side == "short" and order.side == "sell")
+        )
+        if is_same_direction:
+            return Decimal("0")
+
+        return min(requested, pos.size)
 
     def _apply_fill_to_position(self, fill: SimFill, reduce_only: bool = False) -> None:
         """Update positions based on a fill.
@@ -693,6 +727,14 @@ class ReplayKrakenClient:
                     pnl = self._calculate_close_pnl(pos, fill.price, pos.size)
                     self._realized_pnl += pnl
                     self._metrics["trades_closed"] += 1
+                    self._closed_trades.append({
+                        "symbol": fill.symbol,
+                        "side": pos.side,
+                        "entry_price": float(pos.entry_price),
+                        "exit_price": float(fill.price),
+                        "size": float(pos.size),
+                        "pnl": float(pnl),
+                    })
                     remaining = effective_size - pos.size
                     del self._positions[fill.symbol]
                     if remaining > 0 and not reduce_only:
@@ -709,6 +751,14 @@ class ReplayKrakenClient:
                     # Partial close
                     pnl = self._calculate_close_pnl(pos, fill.price, effective_size)
                     self._realized_pnl += pnl
+                    self._closed_trades.append({
+                        "symbol": fill.symbol,
+                        "side": pos.side,
+                        "entry_price": float(pos.entry_price),
+                        "exit_price": float(fill.price),
+                        "size": float(effective_size),
+                        "pnl": float(pnl),
+                    })
                     pos.size -= effective_size
 
         # Update margin
@@ -1212,6 +1262,20 @@ class ReplayKrakenClient:
         ]
 
     def _order_to_dict(self, order: SimOrder) -> Dict[str, Any]:
+        trades = []
+        for index, (price, size, fee, is_maker) in enumerate(order.fills, start=1):
+            trades.append(
+                {
+                    "id": f"{order.id}-fill-{index}",
+                    "order": order.id,
+                    "price": float(price),
+                    "amount": float(size),
+                    "fee": float(fee),
+                    "maker": bool(is_maker),
+                    "side": order.side,
+                    "symbol": order.symbol,
+                }
+            )
         return {
             "id": order.id,
             "clientOrderId": order.client_order_id,
@@ -1228,6 +1292,7 @@ class ReplayKrakenClient:
             "reduceOnly": order.reduce_only,
             "datetime": order.created_at.isoformat() if order.created_at else None,
             "timestamp": int(order.created_at.timestamp() * 1000) if order.created_at else None,
+            "trades": trades,
             "info": {
                 "order_id": order.id,
                 "status": order.status.value,
@@ -1236,6 +1301,11 @@ class ReplayKrakenClient:
         }
 
     # -- Metrics --
+
+    @property
+    def closed_trades(self) -> List[Dict[str, Any]]:
+        """Return all closed trade records accumulated during the replay."""
+        return self._closed_trades
 
     @property
     def exchange_metrics(self) -> Dict[str, Any]:
@@ -1251,4 +1321,5 @@ class ReplayKrakenClient:
             "total_orders": len(self._orders),
             "total_fills": len(self._fill_log),
             "jitter_seed": self._config.jitter_seed,
+            "closed_trades": list(self._closed_trades),
         }

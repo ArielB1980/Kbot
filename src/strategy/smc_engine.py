@@ -1585,25 +1585,40 @@ class SMCEngine:
             reasoning.append("❌ Insufficient candles for structure detection")
             return None
         
-        # Detect order blocks
-        order_block = self._find_order_block(candles_1h, bias)
-        
+        # Detect order blocks in BOTH directions and pick the most recent
+        ob_bullish = self._find_order_block(candles_1h, "bullish")
+        ob_bearish = self._find_order_block(candles_1h, "bearish")
+
+        # Pick the most recent (highest index) valid OB
+        if ob_bullish and ob_bearish:
+            order_block = ob_bullish if ob_bullish['index'] >= ob_bearish['index'] else ob_bearish
+        else:
+            order_block = ob_bullish or ob_bearish
+
         if not order_block:
             reasoning.append("❌ No valid order block found")
             return None
-        
+
         reasoning.append(
             f"✓ Order block detected: {order_block['type']} at ${order_block['price']}"
         )
-        
-        # Detect fair value gaps
-        fvg = self._find_fair_value_gap(candles_1h, bias, symbol=symbol)
-        
+
+        # Detect fair value gaps in BOTH directions and pick the most recent unmitigated one
+        fvg_bullish = self._find_fair_value_gap(candles_1h, "bullish", symbol=symbol)
+        fvg_bearish = self._find_fair_value_gap(candles_1h, "bearish", symbol=symbol)
+
+        if fvg_bullish and fvg_bearish:
+            fvg = fvg_bullish if fvg_bullish['index'] >= fvg_bearish['index'] else fvg_bearish
+        else:
+            fvg = fvg_bullish or fvg_bearish
+
         if fvg:
             reasoning.append(f"✓ Fair value gap detected at ${fvg['price']}")
-        
-        # Detect break of structure (configurable requirement for trade validity)
-        bos = self._detect_break_of_structure(candles_1h, bias)
+
+        # Detect break of structure in BOTH directions
+        bos_bullish = self._detect_break_of_structure(candles_1h, "bullish")
+        bos_bearish = self._detect_break_of_structure(candles_1h, "bearish")
+        bos = bos_bullish or bos_bearish
         
         # Check if BOS is required (configurable)
         require_bos = getattr(self.config, 'require_bos_confirmation', False)
@@ -1613,10 +1628,20 @@ class SMCEngine:
             return None
         
         if bos:
-            reasoning.append(f"✓ Break of structure confirmed")
+            reasoning.append("✓ Break of structure confirmed")
         else:
             reasoning.append("○ No break of structure yet (not required)")
-        
+
+        # Counter-trend gate: if disabled, reject structure that opposes HTF bias
+        allow_counter = getattr(self.config, 'allow_counter_trend', True)
+        if not allow_counter and bias != "neutral":
+            ob_dir = order_block['type'] if order_block else None
+            if ob_dir and ob_dir != bias:
+                reasoning.append(
+                    f"❌ Counter-trend blocked: {ob_dir} OB vs {bias} bias"
+                )
+                return None
+
         return {
             'order_block': order_block,
             'fvg': fvg,
@@ -1909,8 +1934,15 @@ class SMCEngine:
         invalid_level = Decimal("0")
         signal_type = SignalType.NO_SIGNAL
         
-        # 4. Calculate Entry & Stop Base (from 4H structure)
-        if bias == "bullish":
+        # 4. Calculate Entry & Stop Base (from structure direction, not HTF bias)
+        # Determine signal direction from the detected structure itself
+        structure_direction: Optional[str] = None
+        if order_block:
+            structure_direction = order_block['type']  # "bullish" or "bearish"
+        elif fvg:
+            structure_direction = fvg['type']  # "bullish" or "bearish"
+
+        if structure_direction == "bullish":
             signal_type = SignalType.LONG
             if setup_type == SetupType.OB:
                 entry_price = order_block['high']
@@ -1918,14 +1950,13 @@ class SMCEngine:
             elif setup_type == SetupType.FVG:
                 entry_price = fvg['top']
                 invalid_level = fvg['bottom']
-            else: # BOS/Trend
-                # Fallback: Entry at decision TF close, stop at recent swing low
+            else:  # BOS/Trend
                 entry_price = decision_candles[-1].close
                 invalid_level = min(c.low for c in decision_candles[-20:])
-                
+
             stop_loss = invalid_level - (atr * stop_mult)
-            
-        elif bias == "bearish":  # bearish
+
+        elif structure_direction == "bearish":
             signal_type = SignalType.SHORT
             if setup_type == SetupType.OB:
                 entry_price = order_block['low']
@@ -1933,30 +1964,15 @@ class SMCEngine:
             elif setup_type == SetupType.FVG:
                 entry_price = fvg['bottom']
                 invalid_level = fvg['top']
-            else: # BOS/Trend
+            else:  # BOS/Trend
                 entry_price = decision_candles[-1].close
                 invalid_level = max(c.high for c in decision_candles[-20:])
-                
+
             stop_loss = invalid_level + (atr * stop_mult)
-            
+
         else:
-             # Neutral bias - generally no trade unless counter-trend enabled?
-             # Neutral can trade if score is high.
-             # Assume logic mirrors bullish/bearish based on structure type
-             if structure.get('order_block'):
-                 ob = structure['order_block']
-                 if ob['type'] == 'bullish':
-                     signal_type = SignalType.LONG
-                     entry_price = ob['high']
-                     invalid_level = ob['low']
-                     stop_loss = invalid_level - (atr * stop_mult)
-                 else:
-                     signal_type = SignalType.SHORT
-                     entry_price = ob['low']
-                     invalid_level = ob['high']
-                     stop_loss = invalid_level + (atr * stop_mult)
-             else:
-                 return SignalType.NO_SIGNAL, Decimal("0"), Decimal("0"), None, [], {}
+            # No directional structure found
+            return SignalType.NO_SIGNAL, Decimal("0"), Decimal("0"), None, [], {}
                  
         # 5. TP Logic - use 1H for swing point precision (finer granularity)
         lookback = 50

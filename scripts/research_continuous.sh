@@ -10,6 +10,11 @@ set -euo pipefail
 TRADING_DIR="${DEPLOY_TRADING_DIR:-/home/trading/TradingSystem}"
 cd "${TRADING_DIR}"
 
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "[$(date -u +%FT%TZ)] refusing to run continuous daemon as root; re-run as trading" >&2
+  exit 1
+fi
+
 STATE_ROOT="data/research/continuous_daemon"
 RUNS_DIR="${STATE_ROOT}/runs"
 LOG_DIR="${STATE_ROOT}/logs"
@@ -51,7 +56,7 @@ DEFAULT_MODE="${RESEARCH_CONT_MODE:-replay}"
 DEFAULT_ITERATIONS="${RESEARCH_CONT_ITER:-50}"
 DEFAULT_DAYS="${RESEARCH_CONT_DAYS:-120}"
 DEFAULT_SYMBOLS="${RESEARCH_CONT_SYMBOLS:-BTC/USD,ETH/USD,SOL/USD,XRP/USD,ADA/USD,LINK/USD}"
-DEFAULT_OBJECTIVE_MODE="${RESEARCH_CONT_OBJECTIVE_MODE:-net_pnl_only}"
+DEFAULT_OBJECTIVE_MODE="${RESEARCH_CONT_OBJECTIVE_MODE:-risk_adjusted}"
 DEFAULT_SYMBOL_BY_SYMBOL="${RESEARCH_CONT_SYMBOL_BY_SYMBOL:-1}"
 DEFAULT_SYMBOLS_FROM_LIVE_UNIVERSE="${RESEARCH_CONT_SYMBOLS_FROM_LIVE_UNIVERSE:-0}"
 DEFAULT_SYMBOLS_FROM_CONFIG_UNIVERSE="${RESEARCH_CONT_SYMBOLS_FROM_CONFIG_UNIVERSE:-0}"
@@ -60,8 +65,8 @@ LIVE_UNIVERSE_FOR_APPLY="${RESEARCH_CONT_LIVE_UNIVERSE_FOR_APPLY:-BTC/USD,ETH/US
 DEFAULT_UNTIL_CONVERGENCE="${RESEARCH_CONT_UNTIL_CONVERGENCE:-1}"
 DEFAULT_MAX_STAGNANT_ITERS="${RESEARCH_CONT_MAX_STAGNANT_ITERS:-20}"
 DEFAULT_MAX_ITERS_PER_SYMBOL="${RESEARCH_CONT_MAX_ITERS_PER_SYMBOL:-120}"
-DEFAULT_AUTO_BACKFILL_DATA="${RESEARCH_CONT_AUTO_BACKFILL_DATA:-0}"
-DEFAULT_REPLAY_TIMEFRAMES="${RESEARCH_CONT_REPLAY_TIMEFRAMES:-1m,15m,1h,4h,1d}"
+DEFAULT_AUTO_BACKFILL_DATA="${RESEARCH_CONT_AUTO_BACKFILL_DATA:-1}"
+DEFAULT_REPLAY_TIMEFRAMES="${RESEARCH_CONT_REPLAY_TIMEFRAMES:-15m,1h,4h,1d}"
 DEFAULT_WINDOW_OFFSETS="${RESEARCH_CONT_WINDOW_OFFSETS:-0,90,180}"
 DEFAULT_HOLDOUT_RATIO="${RESEARCH_CONT_HOLDOUT_RATIO:-0.30}"
 DEFAULT_TELEGRAM="${RESEARCH_CONT_TELEGRAM:-0}"
@@ -78,6 +83,9 @@ CF_CANDIDATES_DIR="${RESEARCH_CONT_CF_CANDIDATES_DIR:-data/research/counterfactu
 CF_TIMEOUT_SECONDS="${RESEARCH_CONT_CF_TIMEOUT_SECONDS:-300}"
 CF_BATCH_TIMEOUT_SECONDS="${RESEARCH_CONT_CF_BATCH_TIMEOUT_SECONDS:-300}"
 TG_NOTIFY="${RESEARCH_CONT_TG_NOTIFY:-1}"
+FALSIFICATION_SIGNAL_TIMEOUT_SECONDS="${RESEARCH_CONT_FALSIFICATION_SIGNAL_TIMEOUT_SECONDS:-1800}"
+FALSIFICATION_RANDOM_TIMEOUT_SECONDS="${RESEARCH_CONT_FALSIFICATION_RANDOM_TIMEOUT_SECONDS:-2700}"
+FALSIFICATION_RANDOM_TRIALS="${RESEARCH_CONT_FALSIFICATION_RANDOM_TRIALS:-3}"
 PROMOTION_ENABLED="${RESEARCH_CONT_PROMOTION_ENABLED:-1}"
 PROMOTION_MIN_OPEN_SYMBOLS="${RESEARCH_CONT_PROMOTION_MIN_OPEN_SYMBOLS:-5}"
 PROMOTION_STABLE_CYCLES="${RESEARCH_CONT_PROMOTION_STABLE_CYCLES:-3}"
@@ -145,6 +153,213 @@ total = int(s.get("total_symbols") or 0)
 current = str(s.get("current_symbol") or "")
 last_completed = str(completed[-1]) if completed else ""
 print(f"{len(completed)}|{total}|{current}|{last_completed}")
+PY
+}
+
+safe_path_token() {
+  local raw="${1:-}"
+  raw="${raw//\//_}"
+  raw="${raw//,/__}"
+  raw="${raw// /_}"
+  printf '%s' "${raw//[^A-Za-z0-9._-]/_}"
+}
+
+update_worker_slot_state() {
+  local slot_state_file="$1"
+  local job_state_file="$2"
+  local slot_symbol="$3"
+  local slot_phase="$4"
+  local assigned_count="$5"
+  "${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+slot_state_path = Path("${slot_state_file}")
+job_state_path = Path("${job_state_file}") if "${job_state_file}" else None
+slot_symbol = "${slot_symbol}"
+slot_phase = "${slot_phase}"
+assigned_count = int("${assigned_count}" or 0)
+
+def load_payload(path) -> dict:
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+slot_state = load_payload(slot_state_path)
+job_state = load_payload(job_state_path)
+
+merged = {
+    "best_candidate_id": slot_state.get("best_candidate_id"),
+    "completed_symbols": list(slot_state.get("completed_symbols") or []),
+    "control": {"paused": False, "stop_requested": False},
+    "current_symbol": slot_state.get("current_symbol"),
+    "eligible_symbols": list(slot_state.get("eligible_symbols") or []),
+    "iteration": int(slot_state.get("iteration") or 0),
+    "last_error": slot_state.get("last_error"),
+    "leaderboard": list(slot_state.get("leaderboard") or []),
+    "pending_prompt": None,
+    "phase": slot_state.get("phase") or "idle",
+    "promotion_queue": list(slot_state.get("promotion_queue") or []),
+    "run_id": slot_state.get("run_id"),
+    "skipped_ineligible_symbols": dict(slot_state.get("skipped_ineligible_symbols") or {}),
+    "symbol_best_candidates": dict(slot_state.get("symbol_best_candidates") or {}),
+    "symbol_progress": dict(slot_state.get("symbol_progress") or {}),
+    "total_iterations": int(slot_state.get("total_iterations") or 0),
+    "total_symbols": assigned_count,
+    "updated_at": slot_state.get("updated_at"),
+}
+
+if slot_symbol and slot_symbol not in merged["eligible_symbols"]:
+    merged["eligible_symbols"].append(slot_symbol)
+
+if job_state:
+    merged["best_candidate_id"] = job_state.get("best_candidate_id") or merged["best_candidate_id"]
+    merged["last_error"] = job_state.get("last_error") or merged["last_error"]
+    merged["run_id"] = job_state.get("run_id") or merged["run_id"]
+    merged["updated_at"] = job_state.get("updated_at") or merged["updated_at"]
+    merged["leaderboard"] = list(job_state.get("leaderboard") or merged["leaderboard"])
+    merged["promotion_queue"] = list(job_state.get("promotion_queue") or merged["promotion_queue"])
+    merged["total_iterations"] = int(job_state.get("total_iterations") or merged["total_iterations"])
+    for sym in job_state.get("eligible_symbols") or []:
+        if sym not in merged["eligible_symbols"]:
+            merged["eligible_symbols"].append(sym)
+    merged["symbol_progress"].update(job_state.get("symbol_progress") or {})
+    merged["symbol_best_candidates"].update(job_state.get("symbol_best_candidates") or {})
+    merged["skipped_ineligible_symbols"].update(job_state.get("skipped_ineligible_symbols") or {})
+
+if slot_phase in {"finished", "done"} and slot_symbol and slot_symbol not in merged["completed_symbols"]:
+    merged["completed_symbols"].append(slot_symbol)
+
+if slot_phase == "running":
+    merged["phase"] = "running"
+    merged["current_symbol"] = str(job_state.get("current_symbol") or slot_symbol or "")
+elif slot_phase == "error":
+    merged["phase"] = "error"
+    merged["current_symbol"] = str(slot_symbol or "")
+    merged["last_error"] = merged["last_error"] or f"worker_exit_nonzero:{slot_symbol or 'unknown'}"
+else:
+    merged["phase"] = slot_phase
+    merged["current_symbol"] = ""
+
+if merged["current_symbol"]:
+    progress = merged["symbol_progress"].get(merged["current_symbol"]) or {}
+    try:
+        merged["iteration"] = int(progress.get("iteration") or job_state.get("iteration") or 0)
+    except Exception:
+        merged["iteration"] = 0
+else:
+    merged["iteration"] = 0
+
+merged["updated_at"] = merged["updated_at"] or datetime.now(timezone.utc).isoformat()
+slot_state_path.write_text(json.dumps(merged, indent=2, sort_keys=True))
+PY
+}
+
+write_aggregate_state() {
+  local aggregate_state_file="$1"
+  local run_id="$2"
+  local total_symbols="$3"
+  shift 3
+  "${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+state_paths = [Path(p) for p in [$(printf '"%s",' "$@" | sed 's/,$//')]]
+run_id = "${run_id}"
+total_symbols = int("${total_symbols}" or 0)
+
+merged = {
+    "best_candidate_id": None,
+    "completed_symbols": [],
+    "control": {"paused": False, "stop_requested": False},
+    "current_symbol": None,
+    "eligible_symbols": [],
+    "iteration": 0,
+    "last_error": None,
+    "leaderboard": [],
+    "pending_prompt": None,
+    "phase": "idle",
+    "promotion_queue": [],
+    "run_id": run_id,
+    "skipped_ineligible_symbols": {},
+    "symbol_best_candidates": {},
+    "symbol_progress": {},
+    "total_iterations": 0,
+    "total_symbols": total_symbols,
+    "updated_at": None,
+}
+
+phase_rank = {"running": 4, "idle": 3, "done": 2, "finished": 2, "error": 1, "failed": 1}
+best_phase_rank = -1
+latest_current_ts = None
+
+for path in state_paths:
+    if not path.exists():
+        continue
+    try:
+        state = json.loads(path.read_text())
+    except Exception:
+        continue
+    if not isinstance(state, dict):
+        continue
+
+    for symbol in state.get("completed_symbols") or []:
+        if symbol not in merged["completed_symbols"]:
+            merged["completed_symbols"].append(symbol)
+    for symbol in state.get("eligible_symbols") or []:
+        if symbol not in merged["eligible_symbols"]:
+            merged["eligible_symbols"].append(symbol)
+    merged["symbol_progress"].update(state.get("symbol_progress") or {})
+    merged["symbol_best_candidates"].update(state.get("symbol_best_candidates") or {})
+    merged["skipped_ineligible_symbols"].update(state.get("skipped_ineligible_symbols") or {})
+    if state.get("leaderboard"):
+        merged["leaderboard"].extend(state.get("leaderboard") or [])
+    if state.get("promotion_queue"):
+        merged["promotion_queue"].extend(state.get("promotion_queue") or [])
+    merged["best_candidate_id"] = state.get("best_candidate_id") or merged["best_candidate_id"]
+    merged["last_error"] = state.get("last_error") or merged["last_error"]
+    try:
+        merged["total_iterations"] += int(state.get("total_iterations") or 0)
+    except Exception:
+        pass
+
+    state_phase = str(state.get("phase") or "")
+    rank = phase_rank.get(state_phase, 0)
+    if rank > best_phase_rank:
+        merged["phase"] = state_phase or merged["phase"]
+        best_phase_rank = rank
+
+    state_current = str(state.get("current_symbol") or "")
+    if state_current:
+        updated_raw = state.get("updated_at")
+        try:
+            current_ts = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00")).timestamp() if updated_raw else path.stat().st_mtime
+        except ValueError:
+            current_ts = path.stat().st_mtime
+        if latest_current_ts is None or current_ts >= latest_current_ts:
+            latest_current_ts = current_ts
+            merged["current_symbol"] = state_current
+            progress = state.get("symbol_progress") or {}
+            state_progress = progress.get(state_current) or {}
+            try:
+                merged["iteration"] = int(state_progress.get("iteration") or state.get("iteration") or 0)
+            except Exception:
+                merged["iteration"] = 0
+
+    updated_raw = state.get("updated_at")
+    if updated_raw and (merged["updated_at"] is None or str(updated_raw) > str(merged["updated_at"])):
+        merged["updated_at"] = updated_raw
+
+if merged["phase"] == "idle" and len(merged["completed_symbols"]) >= total_symbols and total_symbols > 0:
+    merged["phase"] = "done"
+merged["updated_at"] = merged["updated_at"] or datetime.now(timezone.utc).isoformat()
+Path("${aggregate_state_file}").write_text(json.dumps(merged, indent=2, sort_keys=True))
 PY
 }
 
@@ -504,70 +719,219 @@ PY
   write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle start run_id=${RUN_ID}" | tee -a "${LOG_DIR}/daemon.log"
 
-  (
-    # Keep daemon lock in supervisor only; do not leak fd 9 to child.
-    exec 9>&-
-    "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" research \
-      --mode "${MODE}" \
-      --iterations "${ITERATIONS}" \
-      --days "${DAYS}" \
-      --symbols "${SYMBOLS}" \
-      --objective-mode "${OBJECTIVE_MODE}" \
-      ${SYMBOL_MODE_FLAG} \
-      ${SYMBOLS_LIVE_FLAG} \
-      ${SYMBOLS_CONFIG_FLAG} \
-      ${CONVERGENCE_FLAG} \
-      --max-stagnant-iterations "${MAX_STAGNANT_ITERS}" \
-      --max-iterations-per-symbol "${MAX_ITERS_PER_SYMBOL}" \
-      --window-offsets "${WINDOW_OFFSETS}" \
-      --holdout-ratio "${HOLDOUT_RATIO}" \
-      ${BACKFILL_FLAG} \
-      --replay-timeframes "${REPLAY_TIMEFRAMES}" \
-      ${TELEGRAM_FLAG} \
-      --state-file "${STATE_FILE}" \
-      --out-dir "${OUT_DIR}" \
-      > "${RUN_LOG}" 2>&1
-  ) &
-  RESEARCH_PID=$!
+  # ---------------------------------------------------------------------------
+  # Parallel worker launch: keep one worker slot per CPU-minus-one, but treat
+  # symbols as the queued unit of work. Each slot runs one symbol at a time and
+  # immediately pulls the next pending symbol when it finishes, which avoids a
+  # slow slice (for example XRP/SOL) pinning one worker while other CPUs sit
+  # idle. Slot state files remain stable for watchdog/status compatibility.
+  # ---------------------------------------------------------------------------
+  NCPU="$(nproc)"
+  NWORKERS=$(( NCPU > 1 ? NCPU - 1 : 1 ))
+
+  IFS=',' read -ra ALL_SYMBOLS <<< "${SYMBOLS}"
+  NSYMS=${#ALL_SYMBOLS[@]}
+  if (( NWORKERS > NSYMS )); then
+    NWORKERS=${NSYMS}
+  fi
+
+  declare -a WORKER_PIDS=()
+  declare -a WORKER_STATE_FILES=()
+  declare -a WORKER_LOGS=()
+  declare -a WORKER_OUTDIRS=()
+  declare -a WORKER_JOB_STATE_FILES=()
+  declare -a WORKER_CURRENT_SYMBOLS=()
+  declare -a WORKER_ASSIGNED_COUNTS=()
+
+  NEXT_SYMBOL_INDEX=0
+  RESEARCH_RC=0
+
+  launch_next_symbol_for_slot() {
+    local w="$1"
+    local symbol safe_symbol symbol_seq job_state job_out
+
+    if (( NEXT_SYMBOL_INDEX >= NSYMS )); then
+      WORKER_PIDS[$w]=""
+      WORKER_JOB_STATE_FILES[$w]=""
+      WORKER_CURRENT_SYMBOLS[$w]=""
+      update_worker_slot_state "${WORKER_STATE_FILES[$w]}" "" "" "done" "${WORKER_ASSIGNED_COUNTS[$w]:-0}"
+      return 1
+    fi
+
+    symbol="${ALL_SYMBOLS[$NEXT_SYMBOL_INDEX]}"
+    symbol_seq=$(( NEXT_SYMBOL_INDEX + 1 ))
+    NEXT_SYMBOL_INDEX=$(( NEXT_SYMBOL_INDEX + 1 ))
+    safe_symbol="$(safe_path_token "${symbol}")"
+    job_state="${RUN_DIR}/state_w${w}_${symbol_seq}_${safe_symbol}.json"
+    job_out="${OUT_DIR}/w${w}_${symbol_seq}_${safe_symbol}"
+    mkdir -p "${job_out}"
+
+    WORKER_JOB_STATE_FILES[$w]="${job_state}"
+    WORKER_CURRENT_SYMBOLS[$w]="${symbol}"
+    WORKER_OUTDIRS[$w]="${job_out}"
+    WORKER_ASSIGNED_COUNTS[$w]=$(( ${WORKER_ASSIGNED_COUNTS[$w]:-0} + 1 ))
+
+    log_daemon "  worker ${w}: assigned symbol=${symbol} state=${job_state}"
+    printf '\n=== SLOT %s SYMBOL %s START %s ===\n' "${w}" "${symbol}" "$(date -u +%FT%TZ)" >> "${WORKER_LOGS[$w]}"
+
+    (
+      exec 9>&-
+      export LOG_LEVEL="${RESEARCH_LOG_LEVEL:-WARNING}"
+      "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" research \
+        --mode "${MODE}" \
+        --iterations "${ITERATIONS}" \
+        --days "${DAYS}" \
+        --symbols "${symbol}" \
+        --objective-mode "${OBJECTIVE_MODE}" \
+        ${SYMBOL_MODE_FLAG} \
+        ${SYMBOLS_LIVE_FLAG} \
+        ${SYMBOLS_CONFIG_FLAG} \
+        ${CONVERGENCE_FLAG} \
+        --max-stagnant-iterations "${MAX_STAGNANT_ITERS}" \
+        --max-iterations-per-symbol "${MAX_ITERS_PER_SYMBOL}" \
+        --window-offsets "${WINDOW_OFFSETS}" \
+        --holdout-ratio "${HOLDOUT_RATIO}" \
+        ${BACKFILL_FLAG} \
+        --replay-timeframes "${REPLAY_TIMEFRAMES}" \
+        ${TELEGRAM_FLAG} \
+        --state-file "${job_state}" \
+        --out-dir "${job_out}" \
+        >> "${WORKER_LOGS[$w]}" 2>&1
+    ) &
+    WORKER_PIDS[$w]=$!
+    update_worker_slot_state "${WORKER_STATE_FILES[$w]}" "${job_state}" "${symbol}" "running" "${WORKER_ASSIGNED_COUNTS[$w]}"
+    return 0
+  }
+
+  for (( w=0; w < NWORKERS; w++ )); do
+    W_STATE="${RUN_DIR}/state_w${w}.json"
+    W_LOG="${RUN_DIR}/research_w${w}.log"
+    W_OUT="${OUT_DIR}/w${w}"
+    mkdir -p "${W_OUT}"
+    : > "${W_LOG}"
+
+    WORKER_PIDS+=("")
+    WORKER_STATE_FILES+=("${W_STATE}")
+    WORKER_LOGS+=("${W_LOG}")
+    WORKER_OUTDIRS+=("${W_OUT}")
+    WORKER_JOB_STATE_FILES+=("")
+    WORKER_CURRENT_SYMBOLS+=("")
+    WORKER_ASSIGNED_COUNTS+=(0)
+
+    update_worker_slot_state "${W_STATE}" "" "" "idle" "0"
+    launch_next_symbol_for_slot "${w}" || true
+  done
+
+  write_aggregate_state "${STATE_FILE}" "${RUN_ID}" "${NSYMS}" "${WORKER_STATE_FILES[@]}"
+  log_daemon "  launched ${NWORKERS} worker slots for ${NSYMS} queued symbols"
+
+  # Monitor loop: poll all workers, report per-worker progress, cap logs.
   LAST_DONE=-1
   LAST_SYMBOL=""
   load_notify_state "${NOTIFY_STATE_FILE}"
 
-  while kill -0 "${RESEARCH_PID}" 2>/dev/null; do
-    # Keep watchdog/reporting pointers in sync even if another process rewrites state files.
+  # Disable errexit in the monitoring loop — poll/progress commands may return
+  # non-zero legitimately (e.g. empty string tests, python poll scripts).
+  set +e
+  while true; do
     write_latest_run_id "${RUN_ID}"
-    PROG="$(poll_symbol_progress "${STATE_FILE}")"
-    DONE="$(echo "${PROG}" | cut -d'|' -f1)"
-    TOTAL="$(echo "${PROG}" | cut -d'|' -f2)"
-    CURRENT_SYMBOL="$(echo "${PROG}" | cut -d'|' -f3)"
-    LAST_COMPLETED="$(echo "${PROG}" | cut -d'|' -f4)"
-    if [[ "${DONE}" =~ ^[0-9]+$ ]] && [[ "${DONE}" -gt "${LAST_DONE}" ]]; then
-      if [[ -n "${LAST_COMPLETED}" ]] && [[ "${LAST_COMPLETED}" != "${LAST_SYMBOL}" ]]; then
+    ACTIVE_JOBS=0
+
+    for (( w=0; w < NWORKERS; w++ )); do
+      pid="${WORKER_PIDS[$w]:-}"
+      current_symbol="${WORKER_CURRENT_SYMBOLS[$w]:-}"
+      current_job_state="${WORKER_JOB_STATE_FILES[$w]:-}"
+      assigned_count="${WORKER_ASSIGNED_COUNTS[$w]:-0}"
+
+      if [[ -z "${pid}" ]]; then
+        continue
+      fi
+
+      if kill -0 "${pid}" 2>/dev/null; then
+        ACTIVE_JOBS=1
+        update_worker_slot_state "${WORKER_STATE_FILES[$w]}" "${current_job_state}" "${current_symbol}" "running" "${assigned_count}"
+        continue
+      fi
+
+      wait "${pid}"
+      rc=$?
+      (( rc > RESEARCH_RC )) && RESEARCH_RC=${rc}
+      WORKER_PIDS[$w]=""
+      printf '=== SLOT %s SYMBOL %s END %s rc=%s ===\n' "${w}" "${current_symbol}" "$(date -u +%FT%TZ)" "${rc}" >> "${WORKER_LOGS[$w]}"
+
+      if [[ "${rc}" -eq 0 ]]; then
+        update_worker_slot_state "${WORKER_STATE_FILES[$w]}" "${current_job_state}" "${current_symbol}" "finished" "${assigned_count}"
+      else
+        update_worker_slot_state "${WORKER_STATE_FILES[$w]}" "${current_job_state}" "${current_symbol}" "error" "${assigned_count}"
+      fi
+
+      if launch_next_symbol_for_slot "${w}"; then
+        ACTIVE_JOBS=1
+      fi
+    done
+
+    write_aggregate_state "${STATE_FILE}" "${RUN_ID}" "${NSYMS}" "${WORKER_STATE_FILES[@]}"
+
+    # Aggregate progress across all worker state files.
+    TOTAL_DONE=0
+    TOTAL_SYMS=${NSYMS}
+    AGG_CURRENT=""
+    AGG_LAST_COMPLETED=""
+    for wf in "${WORKER_STATE_FILES[@]}"; do
+      PROG="$(poll_symbol_progress "${wf}")"
+      D="$(echo "${PROG}" | cut -d'|' -f1)"
+      C="$(echo "${PROG}" | cut -d'|' -f3)"
+      L="$(echo "${PROG}" | cut -d'|' -f4)"
+      if [[ "${D}" =~ ^[0-9]+$ ]]; then
+        TOTAL_DONE=$(( TOTAL_DONE + D ))
+      fi
+      if [[ -n "${C}" ]]; then AGG_CURRENT="${C}"; fi
+      if [[ -n "${L}" ]]; then AGG_LAST_COMPLETED="${L}"; fi
+    done
+
+    if [[ "${TOTAL_DONE}" -gt "${LAST_DONE}" ]]; then
+      if [[ -n "${AGG_LAST_COMPLETED}" ]] && [[ "${AGG_LAST_COMPLETED}" != "${LAST_SYMBOL}" ]]; then
         send_tg "📈 Symbol progress
 run_id=${RUN_ID}
-done=${DONE}/${TOTAL}
-completed=${LAST_COMPLETED}
-current=${CURRENT_SYMBOL:-none}"
-        LAST_SYMBOL="${LAST_COMPLETED}"
+done=${TOTAL_DONE}/${TOTAL_SYMS}
+completed=${AGG_LAST_COMPLETED}
+current=${AGG_CURRENT:-none}"
+        LAST_SYMBOL="${AGG_LAST_COMPLETED}"
         save_notify_state "${NOTIFY_STATE_FILE}" "${LAST_DONE}" "${LAST_SYMBOL}"
       fi
-      LAST_DONE="${DONE}"
+      LAST_DONE="${TOTAL_DONE}"
       save_notify_state "${NOTIFY_STATE_FILE}" "${LAST_DONE}" "${LAST_SYMBOL}"
     fi
-    CAP_MSG="$(cap_log_file "${RUN_LOG}" "${RUN_LOG_MAX_BYTES}" "${RUN_LOG_TRIM_TO_BYTES}")"
-    if [[ -n "${CAP_MSG}" ]]; then
-      echo "[$(date -u +%FT%TZ)] ${CAP_MSG}" | tee -a "${LOG_DIR}/daemon.log"
+
+    for wl in "${WORKER_LOGS[@]}"; do
+      CAP_MSG="$(cap_log_file "${wl}" "${RUN_LOG_MAX_BYTES}" "${RUN_LOG_TRIM_TO_BYTES}")"
+      if [[ -n "${CAP_MSG}" ]]; then
+        echo "[$(date -u +%FT%TZ)] ${CAP_MSG}" | tee -a "${LOG_DIR}/daemon.log"
+      fi
+    done
+
+    if (( ACTIVE_JOBS == 0 )) && (( NEXT_SYMBOL_INDEX >= NSYMS )); then
+      break
     fi
     sleep 15
   done
-
-  set +e
-  wait "${RESEARCH_PID}"
-  RESEARCH_RC=$?
   set -e
+
+  write_aggregate_state "${STATE_FILE}" "${RUN_ID}" "${NSYMS}" "${WORKER_STATE_FILES[@]}"
+
+  # Concatenate worker logs into canonical RUN_LOG for post-run hooks.
+  for (( w=0; w < NWORKERS; w++ )); do
+    echo "=== WORKER ${w} ===" >> "${RUN_LOG}"
+    cat "${WORKER_LOGS[$w]}" >> "${RUN_LOG}" 2>/dev/null || true
+  done
 
   write_latest_run_id "${RUN_ID}"
   echo "[$(date -u +%FT%TZ)] cycle end run_id=${RUN_ID} rc=${RESEARCH_RC}" | tee -a "${LOG_DIR}/daemon.log"
+
+  "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/scripts/aggregate_research_run_artifacts.py" \
+    --run-id "${RUN_ID}" \
+    --artifacts-dir "${OUT_DIR}" \
+    >> "${POST_LOG}" 2>&1 || true
 
   RUN_SUMMARY="$("${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
 import json
@@ -695,6 +1059,49 @@ run_id=${RUN_ID}
 ${CF_SUMMARY}
 single=${OUT_DIR}/counterfactual_single.json
 batch=${OUT_DIR}/counterfactual_batch.json"
+
+  # --- Strategy falsification diagnostics (best-effort) ---
+  {
+    log_daemon "falsification_signal_accuracy_start run_id=${RUN_ID}"
+    timeout "${FALSIFICATION_SIGNAL_TIMEOUT_SECONDS}" "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" falsification-signal-accuracy \
+      --symbols "${SYMBOLS}" --days "${DAYS}" \
+      --data-dir "data/replay" \
+      --timeframes "${REPLAY_TIMEFRAMES}" \
+      --out-file "${OUT_DIR}/falsification_signal_accuracy.json" \
+      || log_daemon "falsification_signal_accuracy failed rc=$?"
+
+    log_daemon "falsification_random_entry_start run_id=${RUN_ID}"
+    timeout "${FALSIFICATION_RANDOM_TIMEOUT_SECONDS}" "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/run.py" falsification-random-entry \
+      --symbols "${SYMBOLS}" --days "${DAYS}" \
+      --data-dir "data/replay" \
+      --timeframes "${REPLAY_TIMEFRAMES}" \
+      --trials "${FALSIFICATION_RANDOM_TRIALS}" \
+      --out-file "${OUT_DIR}/falsification_random_entry.json" \
+      || log_daemon "falsification_random_entry failed rc=$?"
+  } >> "${POST_LOG}" 2>&1 || true
+
+  FALSIFICATION_SUMMARY="$("${TRADING_DIR}/venv/bin/python3" - <<PY 2>/dev/null || true
+import json
+from pathlib import Path
+sa = Path("${OUT_DIR}/falsification_signal_accuracy.json")
+if sa.exists():
+    d = json.loads(sa.read_text())
+    e = d.get("edge_assessment", {})
+    print(f"signal_accuracy: signals={d.get('total_signals',0)} best_hr={e.get('best_hit_rate','?')} p={e.get('best_p_value','?')} edge={e.get('has_directional_edge')}")
+else:
+    print("signal_accuracy: missing")
+re = Path("${OUT_DIR}/falsification_random_entry.json")
+if re.exists():
+    d = json.loads(re.read_text())
+    avg = d.get("random_mean", {})
+    print(f"random_entry: trials={d.get('num_successful',0)} avg_return={avg.get('net_return_pct',0):.2f}% avg_wr={avg.get('win_rate_pct',0):.1f}%")
+else:
+    print("random_entry: missing")
+PY
+)"
+  send_tg "🔬 Strategy falsification diagnostics
+run_id=${RUN_ID}
+${FALSIFICATION_SUMMARY}"
 
   "${TRADING_DIR}/venv/bin/python3" "${TRADING_DIR}/scripts/research_campaign_gate.py" \
     --run-id "${RUN_ID}" \

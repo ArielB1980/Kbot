@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import json
 from pathlib import Path
 
 
@@ -141,3 +142,39 @@ def test_decide_continues_when_window_non_comparable():
     assert decision == "continue"
     assert reason == "falsification_window_non_comparable"
 
+
+def test_cycle_stats_falls_back_to_nested_worker_best_files(tmp_path: Path):
+    module = _load_module()
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "completed_symbols": ["BTC/USD"],
+                "total_symbols": 1,
+                "symbol_best_candidates": {"BTC/USD": "BTC_USD_c001"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_dir = tmp_path / "artifacts"
+    nested = artifacts_dir / "w0_1_BTC_USD"
+    nested.mkdir(parents=True)
+    (nested / "run_best_by_symbol.json").write_text(
+        json.dumps(
+            {
+                "best_by_symbol": {
+                    "BTC/USD": {
+                        "candidate_id": "BTC_USD_c001",
+                        "accepted": False,
+                        "metrics": {"trade_count": 3, "net_return_pct": 1.25},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stats = module._cycle_stats("run1", state_file=state_file, artifacts_dir=artifacts_dir)
+
+    assert stats.nonbaseline_best == 1
+    assert stats.avg_best_trade_count == 3.0

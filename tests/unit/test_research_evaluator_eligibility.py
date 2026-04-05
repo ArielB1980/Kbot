@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from src.research.evaluator import CandidateEvaluator, EvaluationSpec
+from src.research.evaluator import (
+    CandidateEvaluator,
+    EvaluationSpec,
+    _select_available_window_from_timeframes,
+)
 
 
 def _stub_config() -> SimpleNamespace:
@@ -85,3 +90,109 @@ async def test_assess_symbol_eligibility_rejects_low_comparability_partial() -> 
     assert status["eligibility_tier"] == "ineligible"
     assert status["has_available_window"] is False
     assert "partial_data_non_comparable" in status["reasons"]
+
+
+def test_select_available_window_ignores_provider_capped_timeframe_when_deeper_data_exists() -> None:
+    start, end = _select_available_window_from_timeframes(
+        {
+            "1m": {
+                "coverage_ratio": 1.0,
+                "provider_cap": 720,
+                "first_ts": "2026-03-10T00:00:00+00:00",
+                "last_ts": "2026-03-12T00:00:00+00:00",
+            },
+            "15m": {
+                "coverage_ratio": 0.95,
+                "provider_cap": None,
+                "first_ts": "2025-10-01T00:00:00+00:00",
+                "last_ts": "2026-04-01T00:00:00+00:00",
+            },
+            "1h": {
+                "coverage_ratio": 0.95,
+                "provider_cap": None,
+                "first_ts": "2025-12-01T00:00:00+00:00",
+                "last_ts": "2026-04-01T00:00:00+00:00",
+            },
+        },
+        min_coverage_ratio=0.60,
+    )
+
+    assert start is not None and end is not None
+    assert start.isoformat() == "2025-12-01T00:00:00+00:00"
+    assert end.isoformat() == "2026-04-01T00:00:00+00:00"
+
+
+def test_select_available_window_falls_back_to_provider_capped_timeframe_when_needed() -> None:
+    start, end = _select_available_window_from_timeframes(
+        {
+            "1m": {
+                "coverage_ratio": 1.0,
+                "provider_cap": 720,
+                "first_ts": "2026-03-10T00:00:00+00:00",
+                "last_ts": "2026-03-12T00:00:00+00:00",
+            }
+        },
+        min_coverage_ratio=0.60,
+    )
+
+    assert start is not None and end is not None
+    assert start.isoformat() == "2026-03-10T00:00:00+00:00"
+    assert end.isoformat() == "2026-03-12T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbol_prefers_coinapi_for_lower_timeframes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluator = CandidateEvaluator(
+        base_config=_stub_config(),
+        spec=EvaluationSpec(
+            symbols=("BTC/USD",),
+            lookback_days=2,
+            starting_equity=Decimal("10000"),
+            mode="replay",
+        ),
+    )
+
+    calls: list[str] = []
+
+    class _FakeKrakenClient:
+        def __init__(self, *args, **kwargs):  # noqa: D401, ANN003
+            pass
+
+        async def initialize(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeCoinAPIClient:
+        def __init__(self, *args, **kwargs):  # noqa: D401, ANN003
+            pass
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeDataAcquisition:
+        def __init__(self, *args, **kwargs):  # noqa: D401, ANN003
+            pass
+
+        async def fetch_spot_historical(self, *, source: str, **kwargs):  # noqa: D401, ANN003
+            calls.append(source)
+            if source == "coinapi":
+                return []
+            raise AssertionError("Kraken fallback should not be used when CoinAPI succeeds")
+
+    monkeypatch.setenv("COINAPI_API_KEY", "test-key")
+    monkeypatch.setattr("src.research.evaluator.KrakenClient", _FakeKrakenClient)
+    monkeypatch.setattr("src.research.evaluator.CoinAPIClient", _FakeCoinAPIClient)
+    monkeypatch.setattr("src.research.evaluator.DataAcquisition", _FakeDataAcquisition)
+
+    await evaluator._backfill_symbol(
+        "BTC/USD",
+        "15m",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert calls == ["coinapi"]
