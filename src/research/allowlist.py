@@ -44,6 +44,18 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "multi_tp.tp2_close_pct",
     "multi_tp.runner_pct",
     "multi_tp.trailing_stop_atr_multiplier",
+    # ── Hold time / auction dynamics (the time dimension of edge) ──
+    "risk.auction_min_hold_minutes",
+    "risk.auction_min_hold_high_conviction_minutes",
+    "risk.auction_min_hold_high_conviction_threshold",
+    "risk.auction_swap_threshold",
+    # ── Trailing stop dynamics (how long winners run) ──
+    "multi_tp.tighten_trail_at_final_target_atr_mult",
+    # ── Post-close cooldowns (how soon re-entry after exit) ──
+    "strategy.signal_post_close_cooldown_win_minutes",
+    "strategy.signal_post_close_cooldown_loss_minutes",
+    # ── Thesis decay (how long conviction holds) ──
+    "strategy.thesis_time_decay_window_hours",
     # ── Risk / position sizing ──
     "risk.risk_per_trade_pct",
     "risk.target_leverage",
@@ -77,12 +89,24 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "strategy.wide_structure_atr_stop_min": (0.2, 2.5),
     "strategy.wide_structure_atr_stop_max": (0.5, 4.0),
     # Take profit / exit — full range exploration
-    "multi_tp.tp1_r_multiple": (0.5, 3.0),
-    "multi_tp.tp1_close_pct": (0.1, 0.6),
-    "multi_tp.tp2_r_multiple": (1.0, 6.0),
+    "multi_tp.tp1_r_multiple": (0.3, 3.0),
+    "multi_tp.tp1_close_pct": (0.1, 0.8),
+    "multi_tp.tp2_r_multiple": (0.5, 6.0),
     "multi_tp.tp2_close_pct": (0.1, 0.6),
     "multi_tp.runner_pct": (0.05, 0.5),
     "multi_tp.trailing_stop_atr_multiplier": (1.0, 3.0),
+    # Hold time / auction dynamics
+    "risk.auction_min_hold_minutes": (30.0, 2880.0),  # 30 min to 48 hours
+    "risk.auction_min_hold_high_conviction_minutes": (60.0, 2880.0),  # 1h to 48h
+    "risk.auction_min_hold_high_conviction_threshold": (30.0, 80.0),
+    "risk.auction_swap_threshold": (5.0, 40.0),
+    # Trailing stop dynamics
+    "multi_tp.tighten_trail_at_final_target_atr_mult": (0.5, 3.0),
+    # Post-close cooldowns
+    "strategy.signal_post_close_cooldown_win_minutes": (0.0, 360.0),
+    "strategy.signal_post_close_cooldown_loss_minutes": (0.0, 720.0),
+    # Thesis decay
+    "strategy.thesis_time_decay_window_hours": (1.0, 168.0),  # 1h to 1 week
     # Risk sizing
     "risk.risk_per_trade_pct": (0.005, 0.05),
     "risk.target_leverage": (2.0, 10.0),

@@ -64,10 +64,10 @@ def metrics_from_backtest(metrics: BacktestMetrics, starting_equity: Decimal) ->
 class ScoreWeights:
     """Weights for composite short-horizon candidate scoring."""
 
-    return_weight: float = 1.0
-    drawdown_weight: float = 0.8
-    sharpe_weight: float = 0.35
-    win_rate_weight: float = 0.1
+    return_weight: float = 0.5
+    drawdown_weight: float = 1.2
+    sharpe_weight: float = 0.8
+    win_rate_weight: float = 0.3
     trade_count_weight: float = 0.01
 
 

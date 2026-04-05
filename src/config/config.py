@@ -176,11 +176,11 @@ class RiskConfig(BaseSettings):
     auction_max_per_cluster: int = Field(default=8, ge=1, le=50)  # Balanced for 25 positions (was 12)
     auction_max_per_symbol: int = Field(default=1, ge=1, le=5)
     auction_swap_threshold: float = Field(default=10.0, ge=0.0, le=50.0)
-    auction_min_hold_minutes: int = Field(default=15, ge=0, le=480)
+    auction_min_hold_minutes: int = Field(default=15, ge=0, le=2880)
     auction_min_hold_high_conviction_minutes: int = Field(
         default=120,
         ge=0,
-        le=480,
+        le=2880,
         description="Minimum hold for high-conviction positions before strategic auction closes",
     )
     auction_min_hold_high_conviction_threshold: float = Field(
@@ -803,11 +803,11 @@ class MultiTPConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     enabled: bool = False
-    tp1_r_multiple: float = Field(default=1.0, ge=0.5, le=5.0)
-    tp1_close_pct: float = Field(default=0.40, ge=0.1, le=0.6)
-    tp2_r_multiple: float = Field(default=2.5, ge=1.0, le=10.0)
-    tp2_close_pct: float = Field(default=0.40, ge=0.1, le=0.6)
-    runner_pct: float = Field(default=0.20, ge=0.05, le=0.5)
+    tp1_r_multiple: float = Field(default=0.5, ge=0.3, le=5.0)
+    tp1_close_pct: float = Field(default=0.60, ge=0.1, le=0.8)
+    tp2_r_multiple: float = Field(default=1.5, ge=0.5, le=10.0)
+    tp2_close_pct: float = Field(default=0.25, ge=0.1, le=0.6)
+    runner_pct: float = Field(default=0.15, ge=0.05, le=0.5)
     move_sl_to_be_after_tp1: bool = True
     trailing_stop_enabled: bool = True
     trailing_stop_atr_multiplier: float = Field(default=1.5, ge=1.0, le=3.0)

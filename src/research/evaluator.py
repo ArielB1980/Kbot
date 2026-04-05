@@ -713,6 +713,10 @@ def _apply_params(config: Config, params: dict[str, float]) -> None:
         if not tail:
             continue
         section = getattr(config, head)
+        # Coerce to int when the field is typed as int to avoid type mismatches
+        current = getattr(section, tail, None)
+        if isinstance(current, int) and not isinstance(current, bool):
+            value = int(round(value))
         setattr(section, tail, value)
 
 

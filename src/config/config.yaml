@@ -357,11 +357,11 @@ execution:
 ## Multi-TP Configuration (V2)
 multi_tp:
   enabled: true
-  tp1_r_multiple: 1.0   # Close 40% at 1R
-  tp1_close_pct: 0.40
-  tp2_r_multiple: 2.5   # Close 40% at 2.5R
-  tp2_close_pct: 0.40
-  runner_pct: 0.20      # Keep 20% as runner
+  tp1_r_multiple: 0.5   # Close 60% at 0.5R — capture profit before auction rotates
+  tp1_close_pct: 0.60
+  tp2_r_multiple: 1.5   # Close 25% at 1.5R — tighter TP2 so more trades reach it
+  tp2_close_pct: 0.25
+  runner_pct: 0.15      # Keep 15% as runner (60% TP1 + 25% TP2 = 85%)
   move_sl_to_be_after_tp1: true  # Auto move to breakeven after TP1
   trailing_stop_enabled: true    # Enable trailing for runner
   trailing_stop_atr_multiplier: 1.5
@@ -384,18 +384,18 @@ multi_tp:
   # Regime-aware runner sizing: auto-adjust runner % based on market structure
   regime_runner_sizing_enabled: true
   regime_runner_overrides:
-    tight_smc:             # OB/FVG setups: smaller runner, bigger TP1/TP2
+    tight_smc:             # OB/FVG setups: take profit early, small runner
       runner_pct: 0.10
-      tp1_close_pct: 0.50
-      tp2_close_pct: 0.40
+      tp1_close_pct: 0.65
+      tp2_close_pct: 0.25
     wide_structure:        # BOS/TREND setups: bigger runner for trend capture
-      runner_pct: 0.30
-      tp1_close_pct: 0.35
-      tp2_close_pct: 0.35
-    consolidation:         # Ranging market: small runner, take profits quickly
-      runner_pct: 0.10
+      runner_pct: 0.25
       tp1_close_pct: 0.50
-      tp2_close_pct: 0.40
+      tp2_close_pct: 0.25
+    consolidation:         # Ranging market: take profit fast, tiny runner
+      runner_pct: 0.05
+      tp1_close_pct: 0.70
+      tp2_close_pct: 0.25
   # Hybrid exit mode (feature-flagged): choose runner vs fixed TP3 by regime
   hybrid_exit_mode_enabled: false
   hybrid_exit_canary_symbols: []  # Empty = all symbols when enabled

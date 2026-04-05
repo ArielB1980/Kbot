@@ -16,6 +16,7 @@ from src.config.config import Config
 from src.monitoring.logger import get_logger
 from src.monitoring.telegram_bot import send_telegram_message
 from src.research.allowlist import PARAMETER_BOUNDS, AllowlistPolicy
+from src.research.counterfactual_twin import evaluate_counterfactual_uplift, load_decision_tape
 from src.research.evaluator import CandidateEvaluator, EvaluationSpec
 from src.research.kpi import score_candidate
 from src.research.models import CandidateResult
@@ -166,10 +167,10 @@ class HarnessConfig:
     out_dir: str = "data/research"
     decision_timeout_seconds: int = 90
     evaluation_mode: str = "backtest"
-    lookback_days: int = 30
+    lookback_days: int = 365
     symbols: tuple[str, ...] = ("BTC/USD", "ETH/USD", "SOL/USD")
     enable_telegram: bool = True
-    evaluation_window_offsets_days: tuple[int, ...] = (0, 30, 60)
+    evaluation_window_offsets_days: tuple[int, ...] = (96, 0)
     holdout_ratio: float = 0.30
     auto_replay_gate: bool = False
     replay_gate_seeds: tuple[int, ...] = (42,)
@@ -182,19 +183,19 @@ class HarnessConfig:
     max_stagnant_iterations: int = 20
     max_iterations_per_symbol: int = 300
     auto_backfill_data: bool = True
-    replay_timeframes: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
+    replay_timeframes: tuple[str, ...] = ("15m", "1h", "4h", "1d")
     replay_prefilter_enabled: bool = True
     exploration_min_signal_trades: int = 2
-    promotion_min_signal_trades: int = 20
+    promotion_min_signal_trades: int = 50
     min_probe_iterations_before_skip: int = 8
     min_partial_coverage_ratio: float = 0.05
     min_promotion_comparability: float = 0.50
-    replay_eval_timeout_seconds: int = 3600
-    replay_max_ticks: int = 20000
+    replay_eval_timeout_seconds: int = 7200
+    replay_max_ticks: int = 250000
     max_paused_candle_health_ratio: float = 0.80
     max_symbols_per_cycle: int = 40
     mutate_params_per_candidate: int = 6
-    mutate_step_pct: float = 0.25
+    mutate_step_pct: float = 3.0
     random_restart_every_n: int = 10
     uninformative_surface_probe_count: int = 12
 
@@ -635,6 +636,27 @@ class SandboxAutoresearchHarness:
                 phase="finished",
             )
 
+            # Counterfactual twin: validate candidate against live decision tape
+            # to ensure backtest improvements translate to real-world uplift.
+            if best.candidate_id != f"{safe_symbol}_baseline" and best.accepted:
+                twin_report = await self._run_counterfactual_twin(symbol, best)
+                best.metadata["counterfactual_twin"] = twin_report
+                if twin_report.get("utility_uplift", 0.0) <= 0:
+                    best.metadata["counterfactual_twin_warning"] = (
+                        "Candidate does not improve utility on live decision tape"
+                    )
+                    await self._notify(
+                        f"⚠️ Counterfactual twin for <code>{symbol}</code>: "
+                        f"utility uplift={twin_report.get('utility_uplift', 0):.2f} "
+                        f"(no improvement on live tape)."
+                    )
+                else:
+                    await self._notify(
+                        f"✅ Counterfactual twin for <code>{symbol}</code>: "
+                        f"utility uplift=+{twin_report.get('utility_uplift', 0):.2f}, "
+                        f"delta opens={twin_report.get('delta_open_count', 0):+d}."
+                    )
+
             # Persist best params for cross-run warm start so the next cycle
             # picks up where this one left off instead of starting from scratch.
             if best.score > -500.0:
@@ -846,6 +868,33 @@ class SandboxAutoresearchHarness:
         # Treat only hard-failure sentinel baselines as non-informative.
         # Zero-trade baselines can still become informative after mutations.
         return float(m.net_return_pct) <= -900.0
+
+    async def _run_counterfactual_twin(
+        self, symbol: str, candidate: CandidateResult
+    ) -> dict:
+        """Run counterfactual twin against live decision tape for a symbol."""
+        try:
+            tape = load_decision_tape(since_hours=168, symbols=(symbol,))
+            if len(tape) < 5:
+                return {
+                    "skipped": True,
+                    "reason": f"Insufficient decision tape ({len(tape)} decisions)",
+                    "samples": len(tape),
+                }
+            report = evaluate_counterfactual_uplift(
+                base_config=self.base_config,
+                candidate_params=candidate.params,
+                tape=tape,
+            )
+            return report
+        except Exception as exc:
+            logger.warning(
+                "COUNTERFACTUAL_TWIN_FAILED",
+                symbol=symbol,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return {"skipped": True, "reason": str(exc)}
 
     async def _requires_operator_decision(self, baseline: CandidateResult, candidate: CandidateResult) -> bool:
         return (
