@@ -6,6 +6,7 @@ import asyncio
 import csv
 import hashlib
 import os
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -265,6 +266,7 @@ class CandidateEvaluator:
                     end=end_date.isoformat(),
                     error=str(exc),
                     error_type=type(exc).__name__,
+                    traceback=traceback.format_exc(),
                 )
             finally:
                 if getattr(engine, "client", None):

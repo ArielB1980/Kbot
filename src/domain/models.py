@@ -111,9 +111,20 @@ class Signal:
     meta_info: dict = field(default_factory=dict)       # Fibs, filters, etc.  # Detailed score components (SMC, Fib, Cost, etc.)
     
     def __post_init__(self):
-        """Validate signal."""
+        """Validate signal and coerce numeric fields to Decimal."""
         if self.timestamp.tzinfo is None:
             raise ValueError("Signal timestamp must be timezone-aware (UTC)")
+        # Coerce price fields to Decimal — SMC engine may produce float values
+        if not isinstance(self.entry_price, Decimal):
+            object.__setattr__(self, 'entry_price', Decimal(str(self.entry_price)))
+        if not isinstance(self.stop_loss, Decimal):
+            object.__setattr__(self, 'stop_loss', Decimal(str(self.stop_loss)))
+        if self.take_profit is not None and not isinstance(self.take_profit, Decimal):
+            object.__setattr__(self, 'take_profit', Decimal(str(self.take_profit)))
+        if self.adx is not None and not isinstance(self.adx, Decimal):
+            object.__setattr__(self, 'adx', Decimal(str(self.adx)))
+        if self.atr is not None and not isinstance(self.atr, Decimal):
+            object.__setattr__(self, 'atr', Decimal(str(self.atr)))
 
 
 @dataclass
