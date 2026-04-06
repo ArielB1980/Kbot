@@ -32,6 +32,8 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.fib_proximity_adaptive_scale",
     "strategy.fib_proximity_max_bps",
     "strategy.structure_fallback_score_premium",
+    # ── Higher TF filter (controls the -4 to -5 penalty on out-of-zone signals) ──
+    "strategy.higher_tf_penalty_outside_zone",
     # ── Stop loss sizing (THE critical knob — currently far too tight) ──
     "strategy.tight_smc_atr_stop_min",
     "strategy.tight_smc_atr_stop_max",
@@ -83,6 +85,8 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "strategy.fib_proximity_adaptive_scale": (0.0, 1.0),
     "strategy.fib_proximity_max_bps": (20.0, 200.0),
     "strategy.structure_fallback_score_premium": (0.0, 20.0),
+    # Higher TF penalty — let optimizer reduce or eliminate it
+    "strategy.higher_tf_penalty_outside_zone": (-10.0, 0.0),
     # Stop loss — widen bounds significantly so optimizer can find the sweet spot
     "strategy.tight_smc_atr_stop_min": (0.1, 1.5),
     "strategy.tight_smc_atr_stop_max": (0.2, 3.0),
