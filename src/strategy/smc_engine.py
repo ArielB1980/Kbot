@@ -788,10 +788,12 @@ class SMCEngine:
             ablate_wait_structure_break = os.getenv("REPLAY_ABLATE_DISABLE_WAIT_STRUCTURE_BREAK", "0") == "1"
             ablate_reconfirmation = os.getenv("REPLAY_ABLATE_DISABLE_RECONFIRMATION", "0") == "1"
 
+            rsi_divergence_state = "none"
+
             if ms_change:
                 # Structure change detected - check confirmation (on 4H)
                 confirmed = self.ms_tracker.check_confirmation(
-                    symbol, 
+                    symbol,
                     effective_decision_candles,  # Use decision TF for confirmation
                     ms_change,
                     required_candles=required_candles # Dynamic
@@ -803,8 +805,6 @@ class SMCEngine:
                     )
                     reasoning_parts.append("🧪 Ablation: bypass market-structure confirmation gate")
                     confirmed = True
-                
-                rsi_divergence_state = "none"
                 if confirmed:
                     # Structure already detected on 4H in Step 1.5
                     # Use structure_4h (already set above) - no need to re-detect on 1H
