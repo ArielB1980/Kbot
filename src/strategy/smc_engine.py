@@ -804,13 +804,13 @@ class SMCEngine:
                     reasoning_parts.append("🧪 Ablation: bypass market-structure confirmation gate")
                     confirmed = True
                 
+                rsi_divergence_state = "none"
                 if confirmed:
                     # Structure already detected on 4H in Step 1.5
                     # Use structure_4h (already set above) - no need to re-detect on 1H
                     # structure_signal is already set to structure_4h
-                    
+
                     # V4: RSI Divergence Check - on 1H for faster response
-                    rsi_divergence_state = "none"
                     if self.config.rsi_divergence_enabled:
                          rsi_values = self.indicators.calculate_rsi(refine_candles_1h, self.config.rsi_period)
                          rsi_divergence_state = self.indicators.detect_rsi_divergence(refine_candles_1h, rsi_values, self.config.rsi_divergence_lookback)
