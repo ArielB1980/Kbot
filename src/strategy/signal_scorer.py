@@ -19,13 +19,18 @@ logger = get_logger(__name__)
 @dataclass
 class SignalScore:
     """Composite quality score for a signal with breakdown."""
-    total_score: float  # 0-100
+    total_score: float  # 0-130
     smc_quality: float  # 0-25
     fib_confluence: float  # 0-20
     htf_alignment: float  # 0-20
-    adx_strength: float  # 0-15
+    trend_confirmation: float  # 0-12 (structure confirmation replaces ADX)
     cost_efficiency: float  # 0-20
-    ema_slope: float = 0.0  # 0-15 (bonus when slope aligns with direction)
+    volume_confirmation: float = 0.0  # 0-15 (volume replaces EMA slope)
+    rsi_divergence: float = 0.0  # 0-10 (bonus when RSI divergence aligns with signal)
+    fib_1h_confluence: float = 0.0  # 0-8 (multi-TF Fib overlap bonus)
+    # Backward compat aliases (deprecated, read-only)
+    adx_strength: float = 0.0
+    ema_slope: float = 0.0
     
     def get_grade(self) -> str:
         """Convert score to letter grade."""
@@ -70,39 +75,63 @@ class SignalScorer:
         fib_levels: Optional[FibonacciLevels],
         adx: float,
         cost_bps: Decimal,
-        bias: str
+        bias: str,
+        rsi_divergence: str = "none",
+        volume_ratio: float = 0.0,
+        market_structure_state: str = "neutral",
+        fib_1h_overlap: bool = False,
     ) -> SignalScore:
-        """
-        Calculate composite quality score for a signal.
-        
+        """Calculate composite quality score for a signal.
+
         Args:
             signal: Generated signal
             structures: SMC structures dict (OB, FVG, BOS)
             fib_levels: Fibonacci levels (if available)
-            adx: ADX value for trend strength
+            adx: ADX value for trend strength (legacy, used when adx_scoring_enabled=True)
             cost_bps: Estimated cost in basis points
             bias: HTF bias (bullish/bearish/neutral)
-        
+            rsi_divergence: RSI divergence state ("bullish", "bearish", or "none")
+            volume_ratio: Breakout volume / 20-period avg volume (0 = no data)
+            market_structure_state: From MarketStructureTracker ("bullish", "bearish", "neutral")
+            fib_1h_overlap: True if 4H OTE overlaps 1H retracement zone
+
         Returns:
             SignalScore with total and component scores
         """
-        # Score each component
         smc_score = self._score_smc_quality(structures)
         fib_score = self._score_fib_confluence(signal, fib_levels)
         htf_score = self._score_htf_alignment(signal, bias)
-        adx_score = self._score_adx_strength(adx)
         cost_score = self._score_cost_efficiency(signal, cost_bps)
-        ema_slope_score = self._score_ema_slope(signal)
+        rsi_div_score = self._score_rsi_divergence(signal, rsi_divergence)
 
-        total = smc_score + fib_score + htf_score + adx_score + cost_score + ema_slope_score
+        # Volume confirmation replaces EMA slope; structure confirmation replaces ADX
+        vol_score = self._score_volume_confirmation(volume_ratio)
+        struct_score = self._score_structure_confirmation(signal, market_structure_state)
+
+        # 1H Fib confluence bonus
+        fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
+
+        # Legacy fallbacks (enabled via config flags for A/B testing)
+        adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
+        ema_slope_score = self._score_ema_slope(signal) if not getattr(self.config, "volume_score_enabled", True) else 0.0
+
+        total = (
+            smc_score + fib_score + htf_score + cost_score + rsi_div_score
+            + vol_score + struct_score + fib_1h_score
+            + adx_score + ema_slope_score
+        )
 
         score = SignalScore(
             total_score=total,
             smc_quality=smc_score,
             fib_confluence=fib_score,
             htf_alignment=htf_score,
-            adx_strength=adx_score,
+            trend_confirmation=struct_score,
             cost_efficiency=cost_score,
+            volume_confirmation=vol_score,
+            rsi_divergence=rsi_div_score,
+            fib_1h_confluence=fib_1h_score,
+            adx_strength=adx_score,
             ema_slope=ema_slope_score,
         )
 
@@ -114,13 +143,15 @@ class SignalScorer:
             breakdown={
                 "smc": f"{smc_score:.1f}",
                 "fib": f"{fib_score:.1f}",
+                "fib_1h": f"{fib_1h_score:.1f}",
                 "htf": f"{htf_score:.1f}",
-                "adx": f"{adx_score:.1f}",
+                "volume": f"{vol_score:.1f}",
+                "structure": f"{struct_score:.1f}",
                 "cost": f"{cost_score:.1f}",
-                "ema_slope": f"{ema_slope_score:.1f}",
+                "rsi_div": f"{rsi_div_score:.1f}",
             }
         )
-        
+
         return score
     
     def check_score_gate(self, score: float, setup_type: str, bias: str) -> Tuple[bool, float]:
@@ -131,21 +162,28 @@ class SignalScorer:
             (passed: bool, threshold: float)
         """
         from src.domain.models import SetupType
-        
-        # Determine strictness based on regime/bias
-        is_tight = setup_type in [SetupType.OB, SetupType.FVG]
+
         is_aligned = bias != "neutral"
-        
-        if is_tight:
+
+        # Unified regime: single threshold pair for all setup types
+        if getattr(self.config, "unified_regime_enabled", True):
             if is_aligned:
-                threshold = self.config.min_score_tight_smc_aligned
+                threshold = getattr(self.config, "min_score_smc_aligned", 60.0)
             else:
-                threshold = self.config.min_score_tight_smc_neutral
-        else: # wide_structure (BOS/TREND)
-            if is_aligned:
-                threshold = self.config.min_score_wide_structure_aligned
+                threshold = getattr(self.config, "min_score_smc_neutral", 65.0)
+        else:
+            # Legacy: tight_smc vs wide_structure thresholds
+            is_tight = setup_type in [SetupType.OB, SetupType.FVG]
+            if is_tight:
+                if is_aligned:
+                    threshold = self.config.min_score_tight_smc_aligned
+                else:
+                    threshold = self.config.min_score_tight_smc_neutral
             else:
-                threshold = self.config.min_score_wide_structure_neutral
+                if is_aligned:
+                    threshold = self.config.min_score_wide_structure_aligned
+                else:
+                    threshold = self.config.min_score_wide_structure_neutral
 
         override = os.getenv("REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD")
         if override is not None and override.strip():
@@ -321,6 +359,66 @@ class SignalScorer:
 
         is_long = signal.signal_type == SignalType.LONG
         if (slope == "up" and is_long) or (slope == "down" and not is_long):
+            return bonus
+
+        return 0.0
+
+    def _score_fib_1h_confluence(self, fib_1h_overlap: bool) -> float:
+        """Score 1H Fibonacci confluence with 4H OTE (0-8 points).
+
+        Awards bonus when 4H OTE zone overlaps 1H retracement zone,
+        per EmperorBTC's multi-TF Fibonacci methodology.
+        """
+        if not getattr(self.config, "fib_1h_confluence_enabled", True):
+            return 0.0
+        if fib_1h_overlap:
+            return getattr(self.config, "fib_1h_confluence_bonus", 8.0)
+        return 0.0
+
+    def _score_volume_confirmation(self, volume_ratio: float) -> float:
+        """Score breakout volume confirmation (0-15 points).
+
+        Volume ratio is breakout candle volume / 20-period average volume.
+        Thresholds from MoneyTaur: strong (1.5x) and moderate (1.2x).
+        """
+        if not getattr(self.config, "volume_score_enabled", True):
+            return 0.0
+        high_mult = getattr(self.config, "volume_score_high_mult", 1.5)
+        low_mult = getattr(self.config, "volume_score_low_mult", 1.2)
+        if volume_ratio >= high_mult:
+            return 15.0
+        if volume_ratio >= low_mult:
+            return 8.0
+        return 0.0
+
+    def _score_structure_confirmation(self, signal: Signal, market_structure_state: str) -> float:
+        """Score market structure confirmation (0-12 points).
+
+        Awards points when MarketStructureTracker state (HH/HL or LH/LL)
+        confirms the signal direction. Replaces ADX as trend filter.
+        """
+        if not getattr(self.config, "structure_confirmation_score_enabled", True):
+            return 0.0
+        points = getattr(self.config, "structure_confirmation_score_points", 12.0)
+        is_long = signal.signal_type == SignalType.LONG
+        if (market_structure_state == "bullish" and is_long) or (
+            market_structure_state == "bearish" and not is_long
+        ):
+            return points
+        return 0.0
+
+    def _score_rsi_divergence(self, signal: Signal, divergence: str) -> float:
+        """Score RSI divergence alignment with signal direction (0 to rsi_divergence_score_bonus).
+
+        Awards bonus when 1H RSI divergence confirms signal direction:
+        bullish divergence + LONG = bonus, bearish divergence + SHORT = bonus.
+        """
+        bonus = getattr(self.config, "rsi_divergence_score_bonus", 10.0)
+        if bonus <= 0 or divergence == "none":
+            return 0.0
+
+        is_long = signal.signal_type == SignalType.LONG
+        if (divergence == "bullish" and is_long) or (divergence == "bearish" and not is_long):
             return bonus
 
         return 0.0

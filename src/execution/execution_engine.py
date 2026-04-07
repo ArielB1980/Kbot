@@ -159,11 +159,14 @@ class ExecutionEngine:
         Returns a dict of orders/intents.
         """
         # 1. Price Conversion (Spot -> Futures)
+        # Ensure Decimal arithmetic — signal prices may arrive as float from backtests
+        _entry = Decimal(str(signal.entry_price)) if not isinstance(signal.entry_price, Decimal) else signal.entry_price
+        _stop = Decimal(str(signal.stop_loss)) if not isinstance(signal.stop_loss, Decimal) else signal.stop_loss
         # Calculate Spot percentages
         if signal.signal_type == SignalType.LONG:
-            sl_pct = (signal.entry_price - signal.stop_loss) / signal.entry_price
+            sl_pct = (_entry - _stop) / _entry
         else:
-            sl_pct = (signal.stop_loss - signal.entry_price) / signal.entry_price
+            sl_pct = (_stop - _entry) / _entry
             
         # Apply to Futures Mark Price ("Reference Price")
         # Entry assumed at current mark price for market orders
@@ -465,11 +468,13 @@ class ExecutionEngine:
                 # Candidates in Signal are SPOT prices - convert to futures
                 spot_tp = candidates[structure_idx]
                 # Calculate % dist from spot entry
+                _ep = Decimal(str(signal.entry_price)) if not isinstance(signal.entry_price, Decimal) else signal.entry_price
+                _sp = Decimal(str(spot_tp)) if not isinstance(spot_tp, Decimal) else spot_tp
                 if side == SignalType.LONG:
-                     dist_pct = (spot_tp - signal.entry_price) / signal.entry_price
+                     dist_pct = (_sp - _ep) / _ep
                      fut_tp_candidate = fut_entry * (Decimal("1") + dist_pct)
                 else:
-                     dist_pct = (signal.entry_price - spot_tp) / signal.entry_price
+                     dist_pct = (_ep - _sp) / _ep
                      fut_tp_candidate = fut_entry * (Decimal("1") - dist_pct)
                 
                 final_tps.append(fut_tp_candidate)

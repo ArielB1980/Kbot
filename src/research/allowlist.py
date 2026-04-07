@@ -17,7 +17,6 @@ IMMUTABLE_CODE_PATH_PREFIXES: tuple[str, ...] = (
 # Constrain autonomous changes to a curated strategy parameter subset only.
 ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     # ── Entry quality gates ──
-    "strategy.adx_threshold",
     "strategy.fvg_min_size_pct",
     "strategy.entry_zone_tolerance_pct",
     "strategy.entry_zone_tolerance_atr_mult",
@@ -26,15 +25,31 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "strategy.min_score_wide_structure_aligned",
     "strategy.min_score_wide_structure_neutral",
     "strategy.signal_cooldown_hours",
-    "strategy.ema_slope_bonus",
     "strategy.bos_volume_threshold_mult",
+    # ── Volume confirmation scoring (replaces EMA slope) ──
+    "strategy.volume_score_high_mult",
+    "strategy.volume_score_low_mult",
+    # ── Structure confirmation scoring (replaces ADX) ──
+    "strategy.structure_confirmation_score_points",
     "strategy.fib_proximity_bps",
     "strategy.fib_proximity_adaptive_scale",
     "strategy.fib_proximity_max_bps",
     "strategy.structure_fallback_score_premium",
+    # ── RSI divergence scoring ──
+    "strategy.rsi_divergence_score_bonus",
+    # ── 1H Fibonacci confluence scoring ──
+    "strategy.fib_1h_confluence_bonus",
+    "strategy.fib_multi_tf_tolerance_bps",
     # ── Higher TF filter (controls the -4 to -5 penalty on out-of-zone signals) ──
     "strategy.higher_tf_penalty_outside_zone",
-    # ── Stop loss sizing (THE critical knob — currently far too tight) ──
+    # ── Stop loss sizing — unified regime per-setup-type stops ──
+    "strategy.smc_atr_stop_ob",
+    "strategy.smc_atr_stop_fvg",
+    "strategy.smc_atr_stop_bos",
+    "strategy.smc_atr_stop_trend",
+    "strategy.min_score_smc_aligned",
+    "strategy.min_score_smc_neutral",
+    # ── Legacy regime stop sizing (used when unified_regime_enabled=False) ──
     "strategy.tight_smc_atr_stop_min",
     "strategy.tight_smc_atr_stop_max",
     "strategy.wide_structure_atr_stop_min",
@@ -70,7 +85,6 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
 # Min/max bounds per parameter to prevent degenerate values.
 PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     # Entry quality gates
-    "strategy.adx_threshold": (8.0, 40.0),
     "strategy.fvg_min_size_pct": (0.0001, 0.01),
     "strategy.entry_zone_tolerance_pct": (0.5, 5.0),
     "strategy.entry_zone_tolerance_atr_mult": (0.05, 1.5),
@@ -79,15 +93,31 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "strategy.min_score_wide_structure_aligned": (30.0, 95.0),
     "strategy.min_score_wide_structure_neutral": (30.0, 95.0),
     "strategy.signal_cooldown_hours": (0.0, 24.0),
-    "strategy.ema_slope_bonus": (0.0, 15.0),
     "strategy.bos_volume_threshold_mult": (0.5, 3.0),
+    # Volume confirmation scoring (replaces EMA slope)
+    "strategy.volume_score_high_mult": (0.8, 3.0),
+    "strategy.volume_score_low_mult": (0.5, 2.0),
+    # Structure confirmation scoring (replaces ADX)
+    "strategy.structure_confirmation_score_points": (5.0, 20.0),
     "strategy.fib_proximity_bps": (20.0, 200.0),
     "strategy.fib_proximity_adaptive_scale": (0.0, 1.0),
     "strategy.fib_proximity_max_bps": (20.0, 200.0),
     "strategy.structure_fallback_score_premium": (0.0, 20.0),
+    # RSI divergence scoring
+    "strategy.rsi_divergence_score_bonus": (0.0, 20.0),
+    # 1H Fibonacci confluence scoring
+    "strategy.fib_1h_confluence_bonus": (0.0, 15.0),
+    "strategy.fib_multi_tf_tolerance_bps": (10.0, 100.0),
     # Higher TF penalty — let optimizer reduce or eliminate it
     "strategy.higher_tf_penalty_outside_zone": (-10.0, 0.0),
-    # Stop loss — widen bounds significantly so optimizer can find the sweet spot
+    # Stop loss — unified regime per-setup-type stops
+    "strategy.smc_atr_stop_ob": (0.1, 1.5),
+    "strategy.smc_atr_stop_fvg": (0.1, 1.5),
+    "strategy.smc_atr_stop_bos": (0.2, 2.0),
+    "strategy.smc_atr_stop_trend": (0.2, 2.0),
+    "strategy.min_score_smc_aligned": (30.0, 95.0),
+    "strategy.min_score_smc_neutral": (30.0, 95.0),
+    # Legacy regime stop sizing
     "strategy.tight_smc_atr_stop_min": (0.1, 1.5),
     "strategy.tight_smc_atr_stop_max": (0.2, 3.0),
     "strategy.wide_structure_atr_stop_min": (0.2, 2.5),

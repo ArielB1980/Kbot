@@ -421,10 +421,16 @@ class StrategyConfig(BaseSettings):
     adx_threshold: float = Field(default=20.0, ge=10.0, le=40.0)
     atr_period: int = Field(default=14, ge=7, le=30)
     
-    # Stop buffering (Regime specific ranges - adjusted for 4H ATR)
-    # 4H ATR is ~2-3x larger than 1H ATR, so multipliers are reduced
-    # tight_smc: 0.15-0.30 ATR (4H) - was 0.3-0.6 on 1H
-    # wide_structure: 0.50-0.60 ATR (4H) - was 1.0-1.2 on 1H
+    # Unified regime: single regime with setup-type-based stop sizing
+    unified_regime_enabled: bool = Field(default=True, description="Collapse tight_smc/wide_structure into single 'smc' regime")
+    smc_atr_stop_ob: float = Field(default=0.3, ge=0.1, le=1.5, description="ATR stop multiplier for Order Block setups")
+    smc_atr_stop_fvg: float = Field(default=0.4, ge=0.1, le=1.5, description="ATR stop multiplier for FVG setups")
+    smc_atr_stop_bos: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for BOS setups")
+    smc_atr_stop_trend: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for trend setups")
+    min_score_smc_aligned: float = Field(default=60.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias")
+    min_score_smc_neutral: float = Field(default=65.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias")
+
+    # Legacy regime-specific stop ranges (used when unified_regime_enabled=False)
     tight_smc_atr_stop_min: float = Field(default=0.15, ge=0.05, le=1.0)
     tight_smc_atr_stop_max: float = Field(default=0.30, ge=0.05, le=1.0)
     wide_structure_atr_stop_min: float = Field(default=0.50, ge=0.2, le=2.0)
@@ -457,7 +463,11 @@ class StrategyConfig(BaseSettings):
     
     rsi_period: int = Field(default=14, ge=7, le=30)
 
-    rsi_divergence_enabled: bool = False  # Single flag for RSI divergence (removed duplicate rsi_divergence_check)
+    rsi_divergence_enabled: bool = True
+    rsi_divergence_score_bonus: float = Field(
+        default=10.0, ge=0.0, le=20.0,
+        description="Score bonus when 1H RSI divergence aligns with signal direction",
+    )
     
     # SMC Parameters
     orderblock_lookback: int = Field(default=50, ge=20, le=200)
@@ -485,13 +495,16 @@ class StrategyConfig(BaseSettings):
     bos_confirmation_candles: int = Field(default=3, ge=1, le=10)
     require_bos_confirmation: bool = Field(default=False)  # Optional filter for higher quality
     bos_volume_confirmation_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Require break candle volume > threshold × avg volume for BOS",
     )
     bos_volume_threshold_mult: float = Field(
         default=1.5, ge=1.0, le=5.0,
         description="Break candle volume must exceed this multiple of 20-period avg volume",
     )
+    # Fib hard gate (disabled by default — scoring handles confluence instead)
+    fib_hard_gate_enabled: bool = Field(default=False, description="Hard-reject OB/FVG signals not in OTE/key Fib level")
+
     fvg_mitigation_mode: Literal["touched", "partial", "full"] = "touched"
     fvg_partial_fill_pct: float = Field(default=0.5, ge=0.0, le=1.0)
 
@@ -537,13 +550,32 @@ class StrategyConfig(BaseSettings):
     weekly_fib_confluence_weight: float = Field(default=0.25, ge=0.0, le=1.0)
     daily_bias_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     min_weekly_zone_width_pct: float = Field(default=1.5, ge=0.1, le=20.0)
-    higher_tf_penalty_outside_zone: float = Field(default=-18.0)
+    higher_tf_penalty_outside_zone: float = Field(default=0.0)
+    higher_tf_penalty_bonus_only: bool = Field(
+        default=True,
+        description="When True, clamp higher-TF adjustment to non-negative (bonus only, never penalty)",
+    )
 
-    # EMA slope scoring bonus
+    # EMA slope scoring bonus (legacy, replaced by volume_score)
     ema_slope_bonus: float = Field(
         default=0.0, ge=0.0, le=15.0,
         description="Bonus points when EMA200 slope aligns with signal direction (0=disabled)",
     )
+
+    # Volume confirmation scoring (replaces EMA slope)
+    volume_score_enabled: bool = Field(default=True, description="Enable volume confirmation scoring (replaces EMA slope)")
+    volume_score_high_mult: float = Field(default=1.5, ge=0.8, le=3.0, description="Volume ratio for full 15pt bonus")
+    volume_score_low_mult: float = Field(default=1.2, ge=0.5, le=2.0, description="Volume ratio for 8pt bonus")
+
+    # Structure confirmation scoring (replaces ADX)
+    structure_confirmation_score_enabled: bool = Field(default=True, description="Enable HH/HL structure scoring (replaces ADX)")
+    structure_confirmation_score_points: float = Field(default=12.0, ge=0.0, le=20.0, description="Points for confirmed structure alignment")
+    adx_scoring_enabled: bool = Field(default=False, description="Legacy ADX scoring (disabled when structure confirmation is on)")
+
+    # 1H Fibonacci confluence scoring
+    fib_1h_confluence_enabled: bool = Field(default=True, description="Enable 1H Fib confluence bonus scoring")
+    fib_1h_confluence_bonus: float = Field(default=8.0, ge=0.0, le=15.0, description="Bonus points for 4H-1H Fib overlap")
+    fib_multi_tf_tolerance_bps: float = Field(default=30.0, ge=10.0, le=100.0, description="Tolerance in bps for multi-TF Fib overlap")
 
     # Persistent institutional memory (thesis + conviction decay)
     memory_enabled: bool = Field(default=False, description="Enable thesis memory tracking")
@@ -551,6 +583,12 @@ class StrategyConfig(BaseSettings):
     thesis_score_enabled: bool = Field(default=False, description="Apply conviction score adjustment")
     thesis_management_enabled: bool = Field(default=False, description="Apply conviction-driven position management")
     thesis_canary_symbols: List[str] = Field(default_factory=list, description="Optional symbol allowlist for thesis behaviors")
+    thesis_structural_invalidation_enabled: bool = Field(
+        default=True, description="Kill thesis on zone breach instead of gradual time decay",
+    )
+    thesis_time_decay_enabled: bool = Field(
+        default=False, description="Enable gradual time-based conviction decay (legacy, overridden by structural mode)",
+    )
     thesis_time_decay_max_points: float = Field(default=45.0, ge=0.0, le=100.0)
     thesis_time_decay_window_hours: float = Field(default=12.0, ge=1.0, le=168.0)
     thesis_zone_breach_penalty_points: float = Field(default=35.0, ge=0.0, le=100.0)
