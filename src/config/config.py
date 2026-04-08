@@ -346,7 +346,7 @@ class RiskConfig(BaseSettings):
     tight_smc_avg_hold_hours: float = Field(default=6.0, ge=1.0, le=24.0)  # For funding calc
     
     # Wide-stop structure regime (BOS/TREND): 1.5-3.0% stops
-    wide_structure_max_distortion_pct: float = Field(default=0.15, ge=0.10, le=0.25)  # R:R distortion
+    wide_structure_max_distortion_pct: float = Field(default=0.25, ge=0.10, le=0.40)  # R:R distortion — relaxed to let BTC/SOL signals through
     wide_structure_avg_hold_hours: float = Field(default=36.0, ge=12.0, le=72.0)  # For funding calc
     wide_structure_funding_hard_cap_bps: float = Field(
         default=15.0, ge=0.0, le=80.0, description="Hard reject wide-structure entries when projected funding burden exceeds this bps cap"

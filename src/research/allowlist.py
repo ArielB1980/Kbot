@@ -80,6 +80,8 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "risk.tight_smc_cost_cap_bps",
     "risk.tight_smc_min_rr_multiple",
     "risk.fee_edge_multiple_k",
+    # ── Fee/funding distortion threshold (controls how much fee drag is tolerated) ──
+    "risk.wide_structure_max_distortion_pct",
 )
 
 # Min/max bounds per parameter to prevent degenerate values.
@@ -148,6 +150,8 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "risk.tight_smc_cost_cap_bps": (10.0, 50.0),
     "risk.tight_smc_min_rr_multiple": (1.5, 5.0),
     "risk.fee_edge_multiple_k": (1.0, 10.0),
+    # Fee/funding distortion threshold
+    "risk.wide_structure_max_distortion_pct": (0.10, 0.40),
 }
 
 # Hard lock these paths even if they appear in future candidate generation logic.

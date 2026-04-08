@@ -69,7 +69,7 @@ class ScoreWeights:
     sharpe_weight: float = 0.8
     win_rate_weight: float = 0.3
     trade_count_weight: float = 0.15
-    min_trade_floor: int = 30
+    min_trade_floor: int = 5
 
 
 def score_candidate(metrics: CandidateMetrics, weights: ScoreWeights | None = None) -> float:
