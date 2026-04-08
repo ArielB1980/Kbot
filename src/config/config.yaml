@@ -210,7 +210,7 @@ strategy:
   atr_period: 14
   atr_multiplier_stop: 1.5  # ATR multiplier for stop-loss buffer
   rsi_period: 14
-  rsi_divergence_enabled: false  # Optional confirmation only
+  rsi_divergence_enabled: true  # Wired into signal scoring per MoneyTaur methodology
   
   # SMC Parameters
   orderblock_lookback: 50
