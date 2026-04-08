@@ -163,7 +163,7 @@ risk:
   tight_smc_cost_cap_bps: 25.0
   tight_smc_min_rr_multiple: 2.0
   tight_smc_avg_hold_hours: 6.0
-  wide_structure_max_distortion_pct: 0.15
+  wide_structure_max_distortion_pct: 0.25
   wide_structure_avg_hold_hours: 36.0
   wide_structure_funding_hard_cap_bps: 15.0
   

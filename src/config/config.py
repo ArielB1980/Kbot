@@ -39,7 +39,7 @@ LIVE_RESEARCH_RISK_BOUNDS: dict[str, tuple[float, float]] = {
     "max_position_size_usd": (1000.0, 1000000.0),
     "tight_smc_cost_cap_bps": (10.0, 50.0),
     "tight_smc_min_rr_multiple": (1.5, 5.0),
-    "wide_structure_max_distortion_pct": (0.10, 0.25),
+    "wide_structure_max_distortion_pct": (0.10, 0.40),
 }
 
 class ExchangeConfig(BaseSettings):
@@ -114,7 +114,7 @@ class RiskSymbolOverride(BaseSettings):
     max_position_size_usd: Optional[float] = Field(default=None, ge=1000.0, le=1000000.0)
     tight_smc_cost_cap_bps: Optional[float] = Field(default=None, ge=10.0, le=50.0)
     tight_smc_min_rr_multiple: Optional[float] = Field(default=None, ge=1.5, le=5.0)
-    wide_structure_max_distortion_pct: Optional[float] = Field(default=None, ge=0.10, le=0.25)
+    wide_structure_max_distortion_pct: Optional[float] = Field(default=None, ge=0.10, le=0.40)
 
 
 class RiskConfig(BaseSettings):
