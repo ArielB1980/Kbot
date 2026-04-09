@@ -737,8 +737,9 @@ class SandboxAutoresearchHarness:
 
     def _promotion_gate(self, metrics) -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        if metrics.trade_count < 30:
-            reasons.append("Too few trades for statistical confidence (<30)")
+        min_trades = self.cfg.promotion_min_signal_trades
+        if metrics.trade_count < min_trades:
+            reasons.append(f"Too few trades for statistical confidence (<{min_trades})")
         if metrics.max_drawdown_pct > 35.0:
             reasons.append("Max drawdown exceeds hard cap (35%)")
         if metrics.net_return_pct <= -10.0:
