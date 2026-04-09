@@ -427,8 +427,8 @@ class StrategyConfig(BaseSettings):
     smc_atr_stop_fvg: float = Field(default=0.4, ge=0.1, le=1.5, description="ATR stop multiplier for FVG setups")
     smc_atr_stop_bos: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for BOS setups")
     smc_atr_stop_trend: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for trend setups")
-    min_score_smc_aligned: float = Field(default=60.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias")
-    min_score_smc_neutral: float = Field(default=65.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias")
+    min_score_smc_aligned: float = Field(default=45.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias")
+    min_score_smc_neutral: float = Field(default=50.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias")
 
     # Legacy regime-specific stop ranges (used when unified_regime_enabled=False)
     tight_smc_atr_stop_min: float = Field(default=0.15, ge=0.05, le=1.0)
@@ -574,7 +574,7 @@ class StrategyConfig(BaseSettings):
 
     # 1H Fibonacci confluence scoring
     fib_1h_confluence_enabled: bool = Field(default=True, description="Enable 1H Fib confluence bonus scoring")
-    fib_1h_confluence_bonus: float = Field(default=8.0, ge=0.0, le=15.0, description="Bonus points for 4H-1H Fib overlap")
+    fib_1h_confluence_bonus: float = Field(default=8.0, ge=4.0, le=15.0, description="Bonus points for 4H-1H Fib overlap")
     fib_multi_tf_tolerance_bps: float = Field(default=30.0, ge=10.0, le=100.0, description="Tolerance in bps for multi-TF Fib overlap")
 
     # Persistent institutional memory (thesis + conviction decay)

@@ -231,6 +231,8 @@ strategy:
 
   # V2.3 Scoring & Regimes (Slightly relaxed)
   ema_neutral_zone_bps: 10.0
+  min_score_smc_aligned: 45.0  # Unified regime — signals typically score 28-53; 60 was unreachable
+  min_score_smc_neutral: 50.0  # Neutral bias — slightly higher bar since no HTF alignment bonus
   min_score_tight_smc_aligned: 55.0  # Relaxed — aligned bias gives +20 HTF so ceiling is high
   min_score_tight_smc_neutral: 35.0  # Neutral bias caps HTF at 10 and kills EMA slope → max realistic ~60, must be low
   min_score_wide_structure_aligned: 50.0  # Wide structure has fewer SMC points

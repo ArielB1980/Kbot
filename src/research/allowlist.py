@@ -82,6 +82,9 @@ ALLOWED_PARAMETER_PATHS: tuple[str, ...] = (
     "risk.fee_edge_multiple_k",
     # ── Fee/funding distortion threshold (controls how much fee drag is tolerated) ──
     "risk.wide_structure_max_distortion_pct",
+    # ── Legacy scoring components (still in baseline config, must be allowlisted) ──
+    "strategy.adx_threshold",
+    "strategy.ema_slope_bonus",
 )
 
 # Min/max bounds per parameter to prevent degenerate values.
@@ -108,7 +111,7 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     # RSI divergence scoring
     "strategy.rsi_divergence_score_bonus": (0.0, 20.0),
     # 1H Fibonacci confluence scoring
-    "strategy.fib_1h_confluence_bonus": (0.0, 15.0),
+    "strategy.fib_1h_confluence_bonus": (4.0, 15.0),
     "strategy.fib_multi_tf_tolerance_bps": (10.0, 100.0),
     # Higher TF penalty — let optimizer reduce or eliminate it
     "strategy.higher_tf_penalty_outside_zone": (-10.0, 0.0),
@@ -152,6 +155,9 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     "risk.fee_edge_multiple_k": (1.0, 10.0),
     # Fee/funding distortion threshold
     "risk.wide_structure_max_distortion_pct": (0.10, 0.40),
+    # Legacy scoring components
+    "strategy.adx_threshold": (10.0, 40.0),
+    "strategy.ema_slope_bonus": (0.0, 15.0),
 }
 
 # Hard lock these paths even if they appear in future candidate generation logic.
