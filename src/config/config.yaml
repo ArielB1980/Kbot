@@ -135,7 +135,7 @@ risk:
   tight_stop_threshold_pct: 0.015  # Definition of "tight stop" (1.5%)
   funding_cost_threshold_pct: 0.02  # Optional: block entries if projected funding > 2%
   fee_edge_guard_enabled: true  # Deterministic TP1 edge-vs-cost gate to prevent fee-dominated entries
-  fee_edge_multiple_k: 5.0  # Require edge_bps >= fee_bps_rt * k
+  fee_edge_multiple_k: 3.0  # Require edge_bps >= fee_bps_rt * k (5x too aggressive for perps)
   fee_edge_use_conservative_taker: true  # Assume taker-like roundtrip cost for conservative gating
   fee_edge_slippage_bps_est: 4.0
   fee_edge_funding_floor_bps: 2.0

@@ -1078,6 +1078,12 @@ class SMCEngine:
                     
                     # Create TEMP signal for scoring
                     # Ensure ADX and ATR are Decimal types
+                    # Check if price is inside the weekly Fib zone
+                    _inside_weekly = (
+                        higher_tf_context is not None
+                        and higher_tf_context.allowed_entry
+                        and higher_tf_context.weekly_fib_zone_low is not None
+                    )
                     temp_signal = Signal(
                         timestamp=timestamp,
                         symbol=symbol,
@@ -1092,6 +1098,7 @@ class SMCEngine:
                         adx=Decimal(str(adx_value)),
                         atr=atr_value if isinstance(atr_value, Decimal) else Decimal(str(atr_value)),
                         atr_ratio=atr_ratio,
+                        inside_weekly_zone=_inside_weekly,
                         ema200_slope=ema200_slope,
                         tp_candidates=tp_candidates
                     )
@@ -1192,6 +1199,7 @@ class SMCEngine:
                             "structure": float(score_obj.trend_confirmation),
                             "rsi_div": float(score_obj.rsi_divergence),
                             "fib_1h": float(score_obj.fib_1h_confluence),
+                            "adx_grad": float(score_obj.adx_gradient),
                             "cost": float(score_obj.cost_efficiency),
                             "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                             "higher_tf_penalty": float(higher_tf_penalty),
@@ -1326,6 +1334,7 @@ class SMCEngine:
                                 "structure": score_obj.trend_confirmation,
                                 "rsi_div": score_obj.rsi_divergence,
                                 "fib_1h": score_obj.fib_1h_confluence,
+                                "adx_grad": score_obj.adx_gradient,
                                 "cost": score_obj.cost_efficiency,
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
                                 "higher_tf_penalty": higher_tf_penalty,

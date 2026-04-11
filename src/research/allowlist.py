@@ -152,7 +152,7 @@ PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
     # Cost / RR constraints (RiskConfig)
     "risk.tight_smc_cost_cap_bps": (10.0, 50.0),
     "risk.tight_smc_min_rr_multiple": (1.5, 5.0),
-    "risk.fee_edge_multiple_k": (1.0, 10.0),
+    "risk.fee_edge_multiple_k": (1.5, 5.0),
     # Fee/funding distortion threshold
     "risk.wide_structure_max_distortion_pct": (0.10, 0.40),
     # Legacy scoring components

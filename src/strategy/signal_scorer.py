@@ -28,6 +28,7 @@ class SignalScore:
     volume_confirmation: float = 0.0  # 0-15 (volume replaces EMA slope)
     rsi_divergence: float = 0.0  # 0-10 (bonus when RSI divergence aligns with signal)
     fib_1h_confluence: float = 0.0  # 0-8 (multi-TF Fib overlap bonus)
+    adx_gradient: float = 0.0  # 0-6 (ADX gradient bonus)
     # Backward compat aliases (deprecated, read-only)
     adx_strength: float = 0.0
     ema_slope: float = 0.0
@@ -111,13 +112,16 @@ class SignalScorer:
         # 1H Fib confluence bonus
         fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
 
+        # ADX gradient bonus (always on — free dynamic range from data we already have)
+        adx_gradient = self._score_adx_gradient(adx)
+
         # Legacy fallbacks (enabled via config flags for A/B testing)
         adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
         ema_slope_score = self._score_ema_slope(signal) if not getattr(self.config, "volume_score_enabled", True) else 0.0
 
         total = (
             smc_score + fib_score + htf_score + cost_score + rsi_div_score
-            + vol_score + struct_score + fib_1h_score
+            + vol_score + struct_score + fib_1h_score + adx_gradient
             + adx_score + ema_slope_score
         )
 
@@ -131,6 +135,7 @@ class SignalScorer:
             volume_confirmation=vol_score,
             rsi_divergence=rsi_div_score,
             fib_1h_confluence=fib_1h_score,
+            adx_gradient=adx_gradient,
             adx_strength=adx_score,
             ema_slope=ema_slope_score,
         )
@@ -197,24 +202,32 @@ class SignalScorer:
     def _score_smc_quality(self, structures: Dict) -> float:
         """
         Score SMC structure quality (0-25 points).
-        
-        Scoring:
-        - Order Block present: +10
-        - FVG present: +8
-        - BOS confirmed: +7
-        - Max: 25 (all structures)
+
+        Continuous scoring based on structure strength:
+        - Order Block: 7.5–15 scaled by displacement ratio
+        - FVG: 5–12 scaled by gap size
+        - BOS: 5–10 scaled by confirmation strength
+        - Max: 25 (capped)
         """
         score = 0.0
-        
-        if structures.get("order_block"):
-            score += 10.0
-        
-        if structures.get("fvg"):
-            score += 8.0
-        
-        if structures.get("bos"):
-            score += 7.0
-        
+
+        ob = structures.get("order_block")
+        if ob:
+            displacement = ob.get("displacement_ratio", 1.5) if isinstance(ob, dict) else 1.5
+            # Scale: 1.5x displacement = 7.5 pts, 3.0x = 15 pts
+            score += min(10.0 * displacement / 2.0, 15.0)
+
+        fvg = structures.get("fvg")
+        if fvg:
+            gap_pct = fvg.get("gap_size_pct", 0.001) if isinstance(fvg, dict) else 0.001
+            # Scale: 0.07% = 5 pts, 0.3% = 12 pts
+            score += min(5.0 + gap_pct * 2333.0, 12.0)
+
+        bos = structures.get("bos")
+        if bos:
+            confirmation = bos.get("confirmation_strength", 1.0) if isinstance(bos, dict) else 1.0
+            score += min(5.0 + confirmation * 2.5, 10.0)
+
         return min(score, 25.0)
     
     def _effective_fib_proximity_bps(self, signal: Signal) -> float:
@@ -284,7 +297,8 @@ class SignalScorer:
         Score HTF alignment (-penalty to +20 points).
 
         Logic:
-        - Direction aligned with Bias: +20
+        - Direction aligned with Bias AND inside weekly zone: +20
+        - Direction aligned with Bias, outside weekly zone: +12
         - Bias Neutral: +10
         - Counter-trend: -counter_trend_score_penalty (default -5)
         """
@@ -297,12 +311,28 @@ class SignalScorer:
         is_long = signal.signal_type == SignalType.LONG
 
         if (is_bullish and is_long) or (not is_bullish and not is_long):
-            return 20.0
+            # Aligned — check if inside weekly zone for full bonus
+            inside_zone = getattr(signal, "inside_weekly_zone", None)
+            if inside_zone:
+                return 20.0
+            return 12.0  # Aligned but outside weekly zone
 
         # Counter-trend: apply negative penalty so signal must score higher elsewhere
         penalty = getattr(self.config, "counter_trend_score_penalty", 5.0)
         return -penalty
     
+    def _score_adx_gradient(self, adx: float) -> float:
+        """ADX gradient bonus (0-6 points).
+
+        Uses ADX data already computed for the hard gate to add dynamic range.
+        ADX 20-25: 0, ADX 25-35: +3, ADX 35+: +6.
+        """
+        if adx >= 35.0:
+            return 6.0
+        if adx >= 25.0:
+            return 3.0
+        return 0.0
+
     def _score_adx_strength(self, adx: float) -> float:
         """
         Score ADX trend strength (0-15 points).
@@ -329,18 +359,13 @@ class SignalScorer:
         """
         Score cost efficiency (0-20 points).
 
-        Lower cost relative to potential reward = higher score.
+        Linear scale: 0 bps = 20 pts, 50 bps = 0 pts.
+        Spreads signals out instead of clustering at step boundaries.
         """
-        if cost_bps <= Decimal("10"):
-            return 20.0
-        elif cost_bps <= Decimal("20"):
-            return 15.0
-        elif cost_bps <= Decimal("30"):
-            return 10.0
-        elif cost_bps <= Decimal("50"):
-            return 5.0
-        else:
+        cost_float = float(cost_bps)
+        if cost_float >= 50.0:
             return 0.0
+        return max(0.0, 20.0 * (1.0 - cost_float / 50.0))
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).

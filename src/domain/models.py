@@ -102,6 +102,7 @@ class Signal:
     atr: Decimal
     ema200_slope: str  # e.g., "up", "down", "flat"
     atr_ratio: Optional[Decimal] = None # Ratio of Current ATR / Avg ATR (for Vol Sizing)
+    inside_weekly_zone: bool = False  # Whether price is inside HTF weekly Fib zone
     score: float = 0.0  # Quality score (0-100)
     tp_candidates: list[Decimal] = field(default_factory=list)  # Structure-based TP levels
     score_breakdown: dict = field(default_factory=dict)

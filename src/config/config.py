@@ -333,7 +333,7 @@ class RiskConfig(BaseSettings):
     funding_cost_threshold_pct: float | None = Field(default=0.02, ge=0.0, le=0.10)
     # Deterministic edge-vs-cost gate (TP1 proxy)
     fee_edge_guard_enabled: bool = Field(default=False)
-    fee_edge_multiple_k: float = Field(default=5.0, ge=1.0, le=20.0)
+    fee_edge_multiple_k: float = Field(default=3.0, ge=1.0, le=20.0)
     fee_edge_use_conservative_taker: bool = Field(default=True)
     fee_edge_slippage_bps_est: float = Field(default=4.0, ge=0.0, le=50.0)
     fee_edge_funding_floor_bps: float = Field(default=2.0, ge=0.0, le=50.0)
