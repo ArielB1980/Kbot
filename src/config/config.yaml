@@ -359,11 +359,11 @@ execution:
 ## Multi-TP Configuration (V2)
 multi_tp:
   enabled: true
-  tp1_r_multiple: 0.5   # Close 60% at 0.5R — capture profit before auction rotates
-  tp1_close_pct: 0.60
+  tp1_r_multiple: 0.75  # Raised from 0.5R — zero-drawdown profile gives room to let winners run
+  tp1_close_pct: 0.50   # Reduced from 60% — less defensive on symbols showing edge
   tp2_r_multiple: 1.5   # Close 25% at 1.5R — tighter TP2 so more trades reach it
   tp2_close_pct: 0.25
-  runner_pct: 0.15      # Keep 15% as runner (60% TP1 + 25% TP2 = 85%)
+  runner_pct: 0.25      # Raised from 15% — more runner allocation on trend-following (50/25/25 split)
   move_sl_to_be_after_tp1: true  # Auto move to breakeven after TP1
   trailing_stop_enabled: true    # Enable trailing for runner
   trailing_stop_atr_multiplier: 1.5
