@@ -520,8 +520,9 @@ class StrategyConfig(BaseSettings):
         description="Maximum points awarded for level freshness component",
     )
     freshness_age_bonus_threshold: int = Field(
-        default=20, ge=5, le=100,
-        description="Candles of age before untouched levels receive the age bonus",
+        default=10, ge=5, le=100,
+        description="Candles of age before untouched levels receive the age bonus "
+                    "(calibrated from 400-day replay — lift begins at age 10-20)",
     )
     freshness_age_bonus_multiplier: float = Field(
         default=1.2, ge=1.0, le=2.0,

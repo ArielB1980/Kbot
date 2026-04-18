@@ -444,49 +444,40 @@ class SignalScorer:
     def _score_level_freshness(self, structures: Dict, max_points: float = 10.0) -> float:
         """Score level freshness (Phase 1: Gap 1 — untouched levels outperform tested).
 
-        Per-level base from freshness grade:
+        Calibrated from 400-day replay (N=626 signals, FVG mode=full):
+          - OB body_freshness (Moneytaur institutional zone) shows monotonic
+            forward-return ordering: untouched +2.80%, partial +2.59%, tested +1.48%
+          - OB wick_freshness showed a partial>untouched inversion driven by zone
+            misclassification (39/92 wick-partial entries were body-untouched)
+          - FVG freshness was non-monotonic (noise): +2.24% / +1.98% / +2.32%
+
+        Scorer therefore reads OB body_freshness and drops FVG from the blend.
+        FVG freshness is still captured in structure_info for Phase 2 multi-TF
+        research but contributes 0 to the live score.
+
+        Per-level base:
             fully_untouched      → 1.0
-            partially_mitigated  → 0.5   (wick-only touches)
-            fully_tested         → 0.0   (body closed through)
-
-        Age bonus: untouched levels older than the configured threshold receive
-        a multiplier (capped at 1.0) — older untouched levels are higher conviction.
-
-        Combination:
-            both OB and FVG present  → 0.6 * OB + 0.4 * FVG
-            only one                 → that level's score
-            neither                  → 0.0
+            partially_mitigated  → 0.85  (slightly lower mean return, higher hit rate)
+            fully_tested         → 0.0
         """
-        age_threshold = int(getattr(self.config, "freshness_age_bonus_threshold", 20))
+        age_threshold = int(getattr(self.config, "freshness_age_bonus_threshold", 10))
         age_multiplier = float(getattr(self.config, "freshness_age_bonus_multiplier", 1.2))
 
-        def level_score(level: Optional[Dict]) -> Optional[float]:
-            if not level or not isinstance(level, dict):
-                return None
-            grade = level.get("freshness", "fully_untouched")
-            base = {
-                "fully_untouched": 1.0,
-                "partially_mitigated": 0.5,
-                "fully_tested": 0.0,
-            }.get(grade, 0.0)
-            age = int(level.get("age_candles", 0) or 0)
-            if grade == "fully_untouched" and age >= age_threshold:
-                base = min(1.0, base * age_multiplier)
-            return base
+        ob = structures.get("order_block")
+        if not ob or not isinstance(ob, dict):
+            return 0.0
 
-        ob_score = level_score(structures.get("order_block"))
-        fvg_score = level_score(structures.get("fvg"))
+        grade = ob.get("body_freshness") or ob.get("freshness", "fully_untouched")
+        base = {
+            "fully_untouched": 1.0,
+            "partially_mitigated": 0.85,
+            "fully_tested": 0.0,
+        }.get(grade, 0.0)
+        age = int(ob.get("age_candles", 0) or 0)
+        if grade == "fully_untouched" and age >= age_threshold:
+            base = min(1.0, base * age_multiplier)
 
-        if ob_score is not None and fvg_score is not None:
-            combined = 0.6 * ob_score + 0.4 * fvg_score
-        elif ob_score is not None:
-            combined = ob_score
-        elif fvg_score is not None:
-            combined = fvg_score
-        else:
-            combined = 0.0
-
-        return combined * max_points
+        return base * max_points
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).
