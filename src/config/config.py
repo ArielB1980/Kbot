@@ -427,8 +427,8 @@ class StrategyConfig(BaseSettings):
     smc_atr_stop_fvg: float = Field(default=0.4, ge=0.1, le=1.5, description="ATR stop multiplier for FVG setups")
     smc_atr_stop_bos: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for BOS setups")
     smc_atr_stop_trend: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for trend setups")
-    min_score_smc_aligned: float = Field(default=45.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias")
-    min_score_smc_neutral: float = Field(default=50.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias")
+    min_score_smc_aligned: float = Field(default=30.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias (Phase 2: recalibrated for ~100pt range)")
+    min_score_smc_neutral: float = Field(default=35.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias (Phase 2: recalibrated for ~100pt range)")
 
     # Legacy regime-specific stop ranges (used when unified_regime_enabled=False)
     tight_smc_atr_stop_min: float = Field(default=0.15, ge=0.05, le=1.0)
@@ -465,8 +465,10 @@ class StrategyConfig(BaseSettings):
 
     rsi_divergence_enabled: bool = True
     rsi_divergence_score_bonus: float = Field(
-        default=10.0, ge=0.0, le=20.0,
-        description="Score bonus when 1H RSI divergence aligns with signal direction",
+        default=0.0, ge=0.0, le=20.0,
+        description="Score bonus when 1H RSI divergence aligns with signal direction. "
+        "Phase 2: zeroed — anti-predictive on BTC/SOL/LINK (IC -0.27/-0.42/-0.17). "
+        "Detection code intact for re-evaluation at 90+ days.",
     )
     
     # SMC Parameters
@@ -571,6 +573,14 @@ class StrategyConfig(BaseSettings):
     structure_confirmation_score_enabled: bool = Field(default=True, description="Enable HH/HL structure scoring (replaces ADX)")
     structure_confirmation_score_points: float = Field(default=12.0, ge=0.0, le=20.0, description="Points for confirmed structure alignment")
     adx_scoring_enabled: bool = Field(default=False, description="Legacy ADX scoring (disabled when structure confirmation is on)")
+
+    # Scorer version: phase_ad (legacy 100pt) or structure_primary (structure hard gate + cost 0-20)
+    scorer_version: str = "structure_primary"
+    # Structure-primary scorer: cost-only gate thresholds (0-20 scale)
+    # Signals must first pass the structure hard gate (market structure confirmed),
+    # then the cost score must exceed these thresholds.
+    min_score_structure_primary_aligned: float = 10.0
+    min_score_structure_primary_neutral: float = 12.0
 
     # 1H Fibonacci confluence scoring
     fib_1h_confluence_enabled: bool = Field(default=True, description="Enable 1H Fib confluence bonus scoring")

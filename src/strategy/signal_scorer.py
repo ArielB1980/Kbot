@@ -15,33 +15,72 @@ from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
 
+SCORER_WEIGHTS = {
+    "phase_ad": {
+        "fib": 1.0, "htf": 1.0, "cost": 1.0, "rsi_div": 1.0,
+        "volume": 1.0, "structure": 1.0, "fib_1h": 1.0,
+        "adx": 1.0, "ema_slope": 1.0,
+        "cost_max": 25.0, "structure_max": 12.0,
+        "structure_gate": False,
+    },
+    "structure_primary": {
+        "fib": 0.0, "htf": 0.0, "cost": 1.0, "rsi_div": 0.0,
+        "volume": 0.0, "structure": 0.0, "fib_1h": 0.0,
+        "adx": 0.0, "ema_slope": 0.0,
+        "cost_max": 20.0, "structure_max": 0.0,
+        "structure_gate": True,  # structure is a hard gate, not a scored component
+    },
+}
+
 
 @dataclass
 class SignalScore:
-    """Composite quality score for a signal with breakdown."""
-    total_score: float  # 0-130
-    smc_quality: float  # 0-25
+    """Composite quality score for a signal with breakdown.
+
+    Two scorer versions (selected via config.scorer_version):
+    - phase_ad: 8-component ~100pt scale (legacy, fib+htf+cost+vol+struct+fib_1h)
+    - structure_primary: structure is a hard gate (pass/fail), scored total is
+      cost_efficiency only (0-20pt scale). All other components computed for
+      logging but excluded from total. Validated by 400-day forward return
+      analysis showing structure confirmation positive across all symbols.
+    """
+    total_score: float  # 0-100
+    smc_quality: float  # 0-25 (computed for logging, NOT in total)
     fib_confluence: float  # 0-20
     htf_alignment: float  # 0-20
-    trend_confirmation: float  # 0-12 (structure confirmation replaces ADX)
-    cost_efficiency: float  # 0-20
-    volume_confirmation: float = 0.0  # 0-15 (volume replaces EMA slope)
-    rsi_divergence: float = 0.0  # 0-10 (bonus when RSI divergence aligns with signal)
-    fib_1h_confluence: float = 0.0  # 0-8 (multi-TF Fib overlap bonus)
-    adx_gradient: float = 0.0  # 0-6 (ADX gradient bonus)
+    trend_confirmation: float  # 0-12 (structure confirmation)
+    cost_efficiency: float  # 0-25 (signal quality composite — cluster representative)
+    volume_confirmation: float = 0.0  # 0-15
+    rsi_divergence: float = 0.0  # 0-10 (currently zeroed, kept for re-evaluation)
+    fib_1h_confluence: float = 0.0  # 0-8
+    adx_gradient: float = 0.0  # 0-6 (computed for logging, NOT in total)
     # Backward compat aliases (deprecated, read-only)
     adx_strength: float = 0.0
     ema_slope: float = 0.0
-    
+    scorer_version: str = "phase_ad"
+
     def get_grade(self) -> str:
         """Convert score to letter grade."""
-        if self.total_score >= 80:
+        if self.scorer_version == "structure_primary":
+            # 20-point scale (cost only): A≥16, B≥12, C≥8, D≥5
+            if self.total_score >= 16:
+                return "A"
+            elif self.total_score >= 12:
+                return "B"
+            elif self.total_score >= 8:
+                return "C"
+            elif self.total_score >= 5:
+                return "D"
+            else:
+                return "F"
+        # phase_ad: 100-point scale
+        if self.total_score >= 65:
             return "A"
-        elif self.total_score >= 65:
-            return "B"
         elif self.total_score >= 50:
-            return "C"
+            return "B"
         elif self.total_score >= 35:
+            return "C"
+        elif self.total_score >= 25:
             return "D"
         else:
             return "F"
@@ -65,7 +104,11 @@ class SignalScorer:
             config: Strategy configuration for thresholds
         """
         self.config = config
-        logger.info("SignalScorer initialized", 
+        version_override = os.getenv("REPLAY_OVERRIDE_SCORER_VERSION")
+        self._scorer_version = version_override or getattr(config, "scorer_version", "phase_ad")
+        self._weights = SCORER_WEIGHTS.get(self._scorer_version, SCORER_WEIGHTS["phase_ad"])
+        logger.info("SignalScorer initialized",
+                    scorer_version=self._scorer_version,
                     tight_aligned=config.min_score_tight_smc_aligned,
                     wide_aligned=config.min_score_wide_structure_aligned)
     
@@ -99,30 +142,38 @@ class SignalScorer:
         Returns:
             SignalScore with total and component scores
         """
+        w = self._weights
+
+        # Compute all components (always, for logging regardless of version)
         smc_score = self._score_smc_quality(structures)
         fib_score = self._score_fib_confluence(signal, fib_levels)
         htf_score = self._score_htf_alignment(signal, bias)
-        cost_score = self._score_cost_efficiency(signal, cost_bps)
+        cost_score = self._score_cost_efficiency(signal, cost_bps, max_points=w["cost_max"])
         rsi_div_score = self._score_rsi_divergence(signal, rsi_divergence)
-
-        # Volume confirmation replaces EMA slope; structure confirmation replaces ADX
         vol_score = self._score_volume_confirmation(volume_ratio)
-        struct_score = self._score_structure_confirmation(signal, market_structure_state)
-
-        # 1H Fib confluence bonus
+        # Always compute structure at its natural scale (12pts) for logging and gate checks.
+        # In structure_primary mode, it's a hard gate not a scored component — weight is 0.
+        struct_score = self._score_structure_confirmation(signal, market_structure_state, max_points=12.0)
         fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
-
-        # ADX gradient bonus (always on — free dynamic range from data we already have)
         adx_gradient = self._score_adx_gradient(adx)
 
         # Legacy fallbacks (enabled via config flags for A/B testing)
         adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
         ema_slope_score = self._score_ema_slope(signal) if not getattr(self.config, "volume_score_enabled", True) else 0.0
 
+        # Apply version weights — structure_primary zeros everything except
+        # structure + cost; phase_ad keeps all components at weight 1.0.
+        # SMC and adx_gradient are always excluded from total (redundant cluster).
         total = (
-            smc_score + fib_score + htf_score + cost_score + rsi_div_score
-            + vol_score + struct_score + fib_1h_score + adx_gradient
-            + adx_score + ema_slope_score
+            w["fib"] * fib_score
+            + w["htf"] * htf_score
+            + w["cost"] * cost_score
+            + w["rsi_div"] * rsi_div_score
+            + w["volume"] * vol_score
+            + w["structure"] * struct_score
+            + w["fib_1h"] * fib_1h_score
+            + w["adx"] * adx_score
+            + w["ema_slope"] * ema_slope_score
         )
 
         score = SignalScore(
@@ -138,11 +189,13 @@ class SignalScorer:
             adx_gradient=adx_gradient,
             adx_strength=adx_score,
             ema_slope=ema_slope_score,
+            scorer_version=self._scorer_version,
         )
 
         logger.debug(
             "Signal scored",
             symbol=signal.symbol,
+            scorer_version=self._scorer_version,
             total=f"{total:.1f}",
             grade=score.get_grade(),
             breakdown={
@@ -159,19 +212,28 @@ class SignalScorer:
 
         return score
     
-    def check_score_gate(self, score: float, setup_type: str, bias: str) -> Tuple[bool, float]:
+    def check_score_gate(self, score: float, setup_type: str, bias: str, structure_confirmed: bool = True) -> Tuple[bool, float]:
         """
         Check if signal score passes the hard gate.
-        
+
         Returns:
             (passed: bool, threshold: float)
         """
         from src.domain.models import SetupType
 
+        # Structure-primary: structure confirmation is a hard gate
+        if self._weights.get("structure_gate") and not structure_confirmed:
+            return False, 0.0
+
         is_aligned = bias != "neutral"
 
-        # Unified regime: single threshold pair for all setup types
-        if getattr(self.config, "unified_regime_enabled", True):
+        # Structure-primary scorer: cost-only thresholds (0-20 scale)
+        if self._scorer_version == "structure_primary":
+            if is_aligned:
+                threshold = getattr(self.config, "min_score_structure_primary_aligned", 10.0)
+            else:
+                threshold = getattr(self.config, "min_score_structure_primary_neutral", 12.0)
+        elif getattr(self.config, "unified_regime_enabled", True):
             if is_aligned:
                 threshold = getattr(self.config, "min_score_smc_aligned", 60.0)
             else:
@@ -355,17 +417,16 @@ class SignalScorer:
         else:
             return 0.0
     
-    def _score_cost_efficiency(self, signal: Signal, cost_bps: Decimal) -> float:
-        """
-        Score cost efficiency (0-20 points).
+    def _score_cost_efficiency(self, signal: Signal, cost_bps: Decimal, max_points: float = 25.0) -> float:
+        """Score signal quality via cost efficiency.
 
-        Linear scale: 0 bps = 20 pts, 50 bps = 0 pts.
-        Spreads signals out instead of clustering at step boundaries.
+        Collapsed cluster representative for SMC/cost/adx_grad (Phase 2).
+        Linear scale: 0 bps = max_points, 50 bps = 0 pts.
         """
         cost_float = float(cost_bps)
         if cost_float >= 50.0:
             return 0.0
-        return max(0.0, 20.0 * (1.0 - cost_float / 50.0))
+        return max(0.0, max_points * (1.0 - cost_float / 50.0))
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).
@@ -416,20 +477,20 @@ class SignalScorer:
             return 8.0
         return 0.0
 
-    def _score_structure_confirmation(self, signal: Signal, market_structure_state: str) -> float:
-        """Score market structure confirmation (0-12 points).
+    def _score_structure_confirmation(self, signal: Signal, market_structure_state: str, max_points: float = 12.0) -> float:
+        """Score market structure confirmation.
 
         Awards points when MarketStructureTracker state (HH/HL or LH/LL)
         confirms the signal direction. Replaces ADX as trend filter.
+        max_points is set by the scorer weight profile (12 for phase_ad, 50 for structure_primary).
         """
         if not getattr(self.config, "structure_confirmation_score_enabled", True):
             return 0.0
-        points = getattr(self.config, "structure_confirmation_score_points", 12.0)
         is_long = signal.signal_type == SignalType.LONG
         if (market_structure_state == "bullish" and is_long) or (
             market_structure_state == "bearish" and not is_long
         ):
-            return points
+            return max_points
         return 0.0
 
     def _score_rsi_divergence(self, signal: Signal, divergence: str) -> float:

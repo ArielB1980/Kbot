@@ -1187,11 +1187,13 @@ class SMCEngine:
                             f"📊 1H fallback score premium: -{fallback_premium:.0f} points"
                         )
 
-                    # GATE: Check score
-                    passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias)
+                    # GATE: Check score (structure_confirmed feeds the hard gate in structure_primary mode)
+                    structure_confirmed = score_obj.trend_confirmation > 0
+                    passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias, structure_confirmed=structure_confirmed)
                     
                     if not passed:
                         score_breakdown = {
+
                             "smc": float(score_obj.smc_quality),
                             "fib": float(score_obj.fib_confluence),
                             "htf": float(score_obj.htf_alignment),
@@ -1238,6 +1240,7 @@ class SMCEngine:
                         conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
                         if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
                             score_breakdown = {
+    
                                 "smc": float(score_obj.smc_quality),
                                 "fib": float(score_obj.fib_confluence),
                                 "htf": float(score_obj.htf_alignment),
@@ -1327,6 +1330,7 @@ class SMCEngine:
                             tp_candidates=tp_candidates,
                             score=score_obj.total_score,
                             score_breakdown={
+    
                                 "smc": score_obj.smc_quality,
                                 "fib": score_obj.fib_confluence,
                                 "htf": score_obj.htf_alignment,
