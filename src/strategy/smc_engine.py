@@ -1752,14 +1752,23 @@ class SMCEngine:
                         else:  # high_low (legacy)
                             entry_price = cand.high
 
-                        # Phase 1: scan post-formation candles for touch history
+                        # Phase 1: scan post-formation candles against wick zone
+                        # and body zone (Moneytaur institutional zone, per user feedback)
+                        body_low = min(cand.open, cand.close)
+                        body_high = max(cand.open, cand.close)
                         touch_types: List[str] = []
+                        body_touch_types: List[str] = []
                         for j in range(i + 2, len(candles)):
                             tc = SMCEngine._classify_zone_touch(
                                 candles[j], cand.high, cand.low, "bullish"
                             )
                             if tc is not None:
                                 touch_types.append(tc)
+                            btc = SMCEngine._classify_zone_touch(
+                                candles[j], body_high, body_low, "bullish"
+                            )
+                            if btc is not None:
+                                body_touch_types.append(btc)
 
                         return {
                             "type": "bullish",
@@ -1768,11 +1777,14 @@ class SMCEngine:
                             "low": cand.low,
                             "high": cand.high,
                             "price": entry_price,
-                            "body_low": min(cand.open, cand.close),
-                            "body_high": max(cand.open, cand.close),
+                            "body_low": body_low,
+                            "body_high": body_high,
                             "freshness": SMCEngine._compute_freshness(touch_types),
                             "touch_count": len(touch_types),
                             "touch_types": touch_types,
+                            "body_freshness": SMCEngine._compute_freshness(body_touch_types),
+                            "body_touch_count": len(body_touch_types),
+                            "body_touch_types": body_touch_types,
                             "age_candles": len(candles) - 1 - i,
                             # TODO(Phase 2): make dynamic when multi-TF detection lands
                             "timeframe_origin": "4h",
@@ -1795,14 +1807,23 @@ class SMCEngine:
                         else:  # high_low (legacy)
                             entry_price = cand.low
 
-                        # Phase 1: scan post-formation candles for touch history
+                        # Phase 1: scan post-formation candles against wick zone
+                        # and body zone (Moneytaur institutional zone, per user feedback)
+                        body_low = min(cand.open, cand.close)
+                        body_high = max(cand.open, cand.close)
                         touch_types: List[str] = []
+                        body_touch_types: List[str] = []
                         for j in range(i + 2, len(candles)):
                             tc = SMCEngine._classify_zone_touch(
                                 candles[j], cand.high, cand.low, "bearish"
                             )
                             if tc is not None:
                                 touch_types.append(tc)
+                            btc = SMCEngine._classify_zone_touch(
+                                candles[j], body_high, body_low, "bearish"
+                            )
+                            if btc is not None:
+                                body_touch_types.append(btc)
 
                         return {
                             "type": "bearish",
@@ -1811,11 +1832,14 @@ class SMCEngine:
                             "low": cand.low,
                             "high": cand.high,
                             "price": entry_price,
-                            "body_low": min(cand.open, cand.close),
-                            "body_high": max(cand.open, cand.close),
+                            "body_low": body_low,
+                            "body_high": body_high,
                             "freshness": SMCEngine._compute_freshness(touch_types),
                             "touch_count": len(touch_types),
                             "touch_types": touch_types,
+                            "body_freshness": SMCEngine._compute_freshness(body_touch_types),
+                            "body_touch_count": len(body_touch_types),
+                            "body_touch_types": body_touch_types,
                             "age_candles": len(candles) - 1 - i,
                             # TODO(Phase 2): make dynamic when multi-TF detection lands
                             "timeframe_origin": "4h",

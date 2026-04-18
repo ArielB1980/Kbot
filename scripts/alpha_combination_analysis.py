@@ -991,6 +991,8 @@ async def generate_decision_data(
                     "ob_freshness": ob.get("freshness"),
                     "ob_touch_count": ob.get("touch_count"),
                     "ob_age_candles": ob.get("age_candles"),
+                    "ob_body_freshness": ob.get("body_freshness"),
+                    "ob_body_touch_count": ob.get("body_touch_count"),
                     "fvg_freshness": fvg.get("freshness"),
                     "fvg_touch_count": fvg.get("touch_count"),
                     "fvg_age_candles": fvg.get("age_candles"),
@@ -1103,6 +1105,7 @@ async def generate_decision_data(
         fi = sig.get("freshness_info", {}) or {}
         for key in (
             "ob_freshness", "ob_touch_count", "ob_age_candles",
+            "ob_body_freshness", "ob_body_touch_count",
             "fvg_freshness", "fvg_touch_count", "fvg_age_candles",
             "fvg_mitigation_depth",
         ):
