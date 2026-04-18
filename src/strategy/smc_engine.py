@@ -4,7 +4,7 @@ SMC (Smart Money Concepts) signal generation engine.
 Design lock enforced: Operates on spot market data ONLY.
 No futures prices, funding data, or order book data may be accessed.
 """
-from typing import Any, List, Optional, Dict, Tuple, Literal
+from typing import Any, ClassVar, List, Optional, Dict, Tuple, Literal
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -318,6 +318,94 @@ class SMCEngine:
 
         weekly: List[Candle] = []
         for _, week_rows in sorted(grouped.items(), key=lambda item: item[0]):
+            week_rows = sorted(week_rows, key=lambda c: c.timestamp)
+            first = week_rows[0]
+            last = week_rows[-1]
+            weekly.append(
+                Candle(
+                    timestamp=first.timestamp,
+                    symbol=first.symbol,
+                    timeframe="1w",
+                    open=first.open,
+                    high=max(c.high for c in week_rows),
+                    low=min(c.low for c in week_rows),
+                    close=last.close,
+                    volume=sum((c.volume for c in week_rows), Decimal("0")),
+                )
+            )
+        return weekly
+
+    # --- Phase 2A: lookahead-safe HTF slicing helpers -------------------------
+    # Candle.timestamp is bar open-time (CCXT convention). Close-time = timestamp
+    # + duration. For multi-TF OB detection, a candle is "completed" at cutoff T
+    # iff timestamp + duration <= T. Using an in-progress HTF bar in OB detection
+    # would inject future information into signals at time T and silently break
+    # the Phase 2A validation.
+
+    _TIMEFRAME_DURATIONS: ClassVar[Dict[str, timedelta]] = {
+        "1m": timedelta(minutes=1),
+        "5m": timedelta(minutes=5),
+        "15m": timedelta(minutes=15),
+        "30m": timedelta(minutes=30),
+        "1h": timedelta(hours=1),
+        "4h": timedelta(hours=4),
+        "8h": timedelta(hours=8),
+        "12h": timedelta(hours=12),
+        "1d": timedelta(days=1),
+        "1w": timedelta(weeks=1),
+    }
+
+    @staticmethod
+    def _candle_duration(timeframe: str) -> timedelta:
+        """Return the nominal duration of one bar at the given timeframe."""
+        try:
+            return SMCEngine._TIMEFRAME_DURATIONS[timeframe]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported timeframe: {timeframe!r}") from exc
+
+    @staticmethod
+    def _slice_completed_candles(candles: List[Candle], cutoff: datetime) -> List[Candle]:
+        """Return only candles whose close_time is <= cutoff.
+
+        Excludes the in-progress bar (the one whose open_time <= cutoff but whose
+        close_time > cutoff). Required before running OB/FVG detection on an HTF
+        candle series when the signal timestamp falls mid-bar on that HTF.
+        """
+        if not candles:
+            return []
+        out: List[Candle] = []
+        for c in candles:
+            duration = SMCEngine._candle_duration(c.timeframe)
+            if c.timestamp + duration <= cutoff:
+                out.append(c)
+        return out
+
+    @staticmethod
+    def _to_weekly_candles_completed(
+        daily_candles: List[Candle], cutoff: datetime
+    ) -> List[Candle]:
+        """Aggregate 1D candles into completed 1W candles only.
+
+        Differs from _to_weekly_candles in that the ISO week containing the cutoff
+        is excluded unless it has 7 completed daily bars. Used by Phase 2A's
+        multi-TF OB detection to guarantee no partial-week bar influences the
+        weekly zone at signal time.
+        """
+        if not daily_candles:
+            return []
+        completed_daily = SMCEngine._slice_completed_candles(daily_candles, cutoff)
+        if not completed_daily:
+            return []
+
+        grouped: Dict[Tuple[int, int], List[Candle]] = {}
+        for candle in completed_daily:
+            iso = candle.timestamp.isocalendar()
+            grouped.setdefault((iso.year, iso.week), []).append(candle)
+
+        weekly: List[Candle] = []
+        for _, week_rows in sorted(grouped.items(), key=lambda item: item[0]):
+            if len(week_rows) < 7:
+                continue  # partial week — drop to avoid lookahead
             week_rows = sorted(week_rows, key=lambda c: c.timestamp)
             first = week_rows[0]
             last = week_rows[-1]
