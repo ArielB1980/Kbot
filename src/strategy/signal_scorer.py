@@ -163,7 +163,7 @@ class SignalScorer:
         fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
         adx_gradient = self._score_adx_gradient(adx)
         freshness_score = self._score_level_freshness(
-            structures, max_points=w.get("freshness_max", 10.0)
+            structures, max_points=w.get("freshness_max", 10.0), symbol=signal.symbol
         )
 
         # Legacy fallbacks (enabled via config flags for A/B testing)
@@ -441,7 +441,12 @@ class SignalScorer:
             return 0.0
         return max(0.0, max_points * (1.0 - cost_float / 50.0))
 
-    def _score_level_freshness(self, structures: Dict, max_points: float = 10.0) -> float:
+    def _score_level_freshness(
+        self,
+        structures: Dict,
+        max_points: float = 10.0,
+        symbol: Optional[str] = None,
+    ) -> float:
         """Score level freshness (Phase 1: Gap 1 — untouched levels outperform tested).
 
         Calibrated from 400-day replay (N=626 signals, FVG mode=full):
@@ -455,11 +460,21 @@ class SignalScorer:
         FVG freshness is still captured in structure_info for Phase 2 multi-TF
         research but contributes 0 to the live score.
 
+        Per-symbol kill-switch: freshness_disabled_symbols holds symbols where
+        the per-symbol IC check failed (the aggregate edge does not hold).
+        SOL/USD inverts the signal (IC −0.064; tested +3.07% > untouched +1.81%);
+        likely a volatility/zone-width interaction to be diagnosed before Phase 2.
+        Disabled symbols return 0.0 (neutral) rather than mis-scoring.
+
         Per-level base:
             fully_untouched      → 1.0
             partially_mitigated  → 0.85  (slightly lower mean return, higher hit rate)
             fully_tested         → 0.0
         """
+        disabled = set(getattr(self.config, "freshness_disabled_symbols", []) or [])
+        if symbol and symbol in disabled:
+            return 0.0
+
         age_threshold = int(getattr(self.config, "freshness_age_bonus_threshold", 10))
         age_multiplier = float(getattr(self.config, "freshness_age_bonus_multiplier", 1.2))
 

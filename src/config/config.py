@@ -528,6 +528,12 @@ class StrategyConfig(BaseSettings):
         default=1.2, ge=1.0, le=2.0,
         description="Multiplier for untouched levels older than the age threshold",
     )
+    freshness_disabled_symbols: List[str] = Field(
+        default_factory=lambda: ["SOL/USD"],
+        description="Symbols where freshness scoring is forced to 0 (neutral) "
+                    "because per-symbol IC check fails. SOL inverts the signal "
+                    "(IC -0.064); diagnose before re-enabling.",
+    )
 
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
