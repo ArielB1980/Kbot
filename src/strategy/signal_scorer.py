@@ -22,6 +22,8 @@ SCORER_WEIGHTS = {
         "adx": 1.0, "ema_slope": 1.0,
         "cost_max": 25.0, "structure_max": 12.0,
         "structure_gate": False,
+        # Phase 1: freshness scoring disabled under phase_ad (backward compat)
+        "freshness": 0.0, "freshness_max": 10.0,
     },
     "structure_primary": {
         "fib": 0.0, "htf": 0.0, "cost": 1.0, "rsi_div": 0.0,
@@ -29,6 +31,8 @@ SCORER_WEIGHTS = {
         "adx": 0.0, "ema_slope": 0.0,
         "cost_max": 20.0, "structure_max": 0.0,
         "structure_gate": True,  # structure is a hard gate, not a scored component
+        # Phase 1: level freshness adds a second scored dimension (0-30pt total)
+        "freshness": 1.0, "freshness_max": 10.0,
     },
 }
 
@@ -54,6 +58,8 @@ class SignalScore:
     rsi_divergence: float = 0.0  # 0-10 (currently zeroed, kept for re-evaluation)
     fib_1h_confluence: float = 0.0  # 0-8
     adx_gradient: float = 0.0  # 0-6 (computed for logging, NOT in total)
+    # Phase 1: level freshness quality (0-10 in structure_primary; unused in phase_ad)
+    level_freshness: float = 0.0
     # Backward compat aliases (deprecated, read-only)
     adx_strength: float = 0.0
     ema_slope: float = 0.0
@@ -62,14 +68,14 @@ class SignalScore:
     def get_grade(self) -> str:
         """Convert score to letter grade."""
         if self.scorer_version == "structure_primary":
-            # 20-point scale (cost only): A≥16, B≥12, C≥8, D≥5
-            if self.total_score >= 16:
+            # 30-point scale (cost + freshness): A≥24, B≥18, C≥12, D≥7
+            if self.total_score >= 24:
                 return "A"
-            elif self.total_score >= 12:
+            elif self.total_score >= 18:
                 return "B"
-            elif self.total_score >= 8:
+            elif self.total_score >= 12:
                 return "C"
-            elif self.total_score >= 5:
+            elif self.total_score >= 7:
                 return "D"
             else:
                 return "F"
@@ -156,13 +162,17 @@ class SignalScorer:
         struct_score = self._score_structure_confirmation(signal, market_structure_state, max_points=12.0)
         fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
         adx_gradient = self._score_adx_gradient(adx)
+        freshness_score = self._score_level_freshness(
+            structures, max_points=w.get("freshness_max", 10.0)
+        )
 
         # Legacy fallbacks (enabled via config flags for A/B testing)
         adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
         ema_slope_score = self._score_ema_slope(signal) if not getattr(self.config, "volume_score_enabled", True) else 0.0
 
         # Apply version weights — structure_primary zeros everything except
-        # structure + cost; phase_ad keeps all components at weight 1.0.
+        # structure + cost + freshness; phase_ad keeps all components at weight 1.0
+        # (freshness still 0 under phase_ad for backward compat).
         # SMC and adx_gradient are always excluded from total (redundant cluster).
         total = (
             w["fib"] * fib_score
@@ -174,6 +184,7 @@ class SignalScorer:
             + w["fib_1h"] * fib_1h_score
             + w["adx"] * adx_score
             + w["ema_slope"] * ema_slope_score
+            + w.get("freshness", 0.0) * freshness_score
         )
 
         score = SignalScore(
@@ -187,6 +198,7 @@ class SignalScorer:
             rsi_divergence=rsi_div_score,
             fib_1h_confluence=fib_1h_score,
             adx_gradient=adx_gradient,
+            level_freshness=freshness_score,
             adx_strength=adx_score,
             ema_slope=ema_slope_score,
             scorer_version=self._scorer_version,
@@ -207,6 +219,7 @@ class SignalScorer:
                 "structure": f"{struct_score:.1f}",
                 "cost": f"{cost_score:.1f}",
                 "rsi_div": f"{rsi_div_score:.1f}",
+                "freshness": f"{freshness_score:.1f}",
             }
         )
 
@@ -427,6 +440,53 @@ class SignalScorer:
         if cost_float >= 50.0:
             return 0.0
         return max(0.0, max_points * (1.0 - cost_float / 50.0))
+
+    def _score_level_freshness(self, structures: Dict, max_points: float = 10.0) -> float:
+        """Score level freshness (Phase 1: Gap 1 — untouched levels outperform tested).
+
+        Per-level base from freshness grade:
+            fully_untouched      → 1.0
+            partially_mitigated  → 0.5   (wick-only touches)
+            fully_tested         → 0.0   (body closed through)
+
+        Age bonus: untouched levels older than the configured threshold receive
+        a multiplier (capped at 1.0) — older untouched levels are higher conviction.
+
+        Combination:
+            both OB and FVG present  → 0.6 * OB + 0.4 * FVG
+            only one                 → that level's score
+            neither                  → 0.0
+        """
+        age_threshold = int(getattr(self.config, "freshness_age_bonus_threshold", 20))
+        age_multiplier = float(getattr(self.config, "freshness_age_bonus_multiplier", 1.2))
+
+        def level_score(level: Optional[Dict]) -> Optional[float]:
+            if not level or not isinstance(level, dict):
+                return None
+            grade = level.get("freshness", "fully_untouched")
+            base = {
+                "fully_untouched": 1.0,
+                "partially_mitigated": 0.5,
+                "fully_tested": 0.0,
+            }.get(grade, 0.0)
+            age = int(level.get("age_candles", 0) or 0)
+            if grade == "fully_untouched" and age >= age_threshold:
+                base = min(1.0, base * age_multiplier)
+            return base
+
+        ob_score = level_score(structures.get("order_block"))
+        fvg_score = level_score(structures.get("fvg"))
+
+        if ob_score is not None and fvg_score is not None:
+            combined = 0.6 * ob_score + 0.4 * fvg_score
+        elif ob_score is not None:
+            combined = ob_score
+        elif fvg_score is not None:
+            combined = fvg_score
+        else:
+            combined = 0.0
+
+        return combined * max_points
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).

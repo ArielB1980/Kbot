@@ -510,6 +510,24 @@ class StrategyConfig(BaseSettings):
     fvg_mitigation_mode: Literal["touched", "partial", "full"] = "touched"
     fvg_partial_fill_pct: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    # Level Freshness (Phase 1: Gap 1 — untouched levels outperform tested)
+    freshness_scoring_enabled: bool = Field(
+        default=True,
+        description="Enable level freshness scoring component (structure_primary mode)",
+    )
+    freshness_max_points: float = Field(
+        default=10.0, ge=0.0, le=20.0,
+        description="Maximum points awarded for level freshness component",
+    )
+    freshness_age_bonus_threshold: int = Field(
+        default=20, ge=5, le=100,
+        description="Candles of age before untouched levels receive the age bonus",
+    )
+    freshness_age_bonus_multiplier: float = Field(
+        default=1.2, ge=1.0, le=2.0,
+        description="Multiplier for untouched levels older than the age threshold",
+    )
+
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
     allow_counter_trend: bool = Field(

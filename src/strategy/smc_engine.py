@@ -27,6 +27,17 @@ import uuid
 logger = get_logger(__name__)
 
 
+# Zone touch classification (Phase 1: body/wick distinction)
+TOUCH_WICK_ONLY = "wick_only"
+TOUCH_BODY_PARTIAL = "body_partial"
+TOUCH_BODY_FULL = "body_full"
+
+# Level freshness grades (Phase 1: level freshness tracking)
+FRESHNESS_UNTOUCHED = "fully_untouched"
+FRESHNESS_PARTIAL = "partially_mitigated"
+FRESHNESS_TESTED = "fully_tested"
+
+
 @dataclass
 class HigherTFContext:
     weekly_fib_zone_low: Optional[Decimal] = None
@@ -1203,6 +1214,7 @@ class SMCEngine:
                             "fib_1h": float(score_obj.fib_1h_confluence),
                             "adx_grad": float(score_obj.adx_gradient),
                             "cost": float(score_obj.cost_efficiency),
+                            "freshness": float(score_obj.level_freshness),
                             "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                             "higher_tf_penalty": float(higher_tf_penalty),
                             "thesis_conviction": float(thesis_snapshot.get("conviction", 0.0)) if thesis_snapshot else 0.0,
@@ -1240,7 +1252,7 @@ class SMCEngine:
                         conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
                         if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
                             score_breakdown = {
-    
+
                                 "smc": float(score_obj.smc_quality),
                                 "fib": float(score_obj.fib_confluence),
                                 "htf": float(score_obj.htf_alignment),
@@ -1249,6 +1261,7 @@ class SMCEngine:
                                 "rsi_div": float(score_obj.rsi_divergence),
                                 "fib_1h": float(score_obj.fib_1h_confluence),
                                 "cost": float(score_obj.cost_efficiency),
+                                "freshness": float(score_obj.level_freshness),
                                 "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                                 "higher_tf_penalty": float(higher_tf_penalty),
                                 "thesis_conviction": conviction_val,
@@ -1330,7 +1343,7 @@ class SMCEngine:
                             tp_candidates=tp_candidates,
                             score=score_obj.total_score,
                             score_breakdown={
-    
+
                                 "smc": score_obj.smc_quality,
                                 "fib": score_obj.fib_confluence,
                                 "htf": score_obj.htf_alignment,
@@ -1340,6 +1353,7 @@ class SMCEngine:
                                 "fib_1h": score_obj.fib_1h_confluence,
                                 "adx_grad": score_obj.adx_gradient,
                                 "cost": score_obj.cost_efficiency,
+                                "freshness": score_obj.level_freshness,
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
                                 "higher_tf_penalty": higher_tf_penalty,
                                 "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else 0.0,
@@ -1737,14 +1751,31 @@ class SMCEngine:
                             entry_price = cand.low + (cand.high - cand.low) * discount_pct
                         else:  # high_low (legacy)
                             entry_price = cand.high
-                        
+
+                        # Phase 1: scan post-formation candles for touch history
+                        touch_types: List[str] = []
+                        for j in range(i + 2, len(candles)):
+                            tc = SMCEngine._classify_zone_touch(
+                                candles[j], cand.high, cand.low, "bullish"
+                            )
+                            if tc is not None:
+                                touch_types.append(tc)
+
                         return {
                             "type": "bullish",
                             "index": i,
                             "timestamp": cand.timestamp,
                             "low": cand.low,
                             "high": cand.high,
-                            "price": entry_price
+                            "price": entry_price,
+                            "body_low": min(cand.open, cand.close),
+                            "body_high": max(cand.open, cand.close),
+                            "freshness": SMCEngine._compute_freshness(touch_types),
+                            "touch_count": len(touch_types),
+                            "touch_types": touch_types,
+                            "age_candles": len(candles) - 1 - i,
+                            # TODO(Phase 2): make dynamic when multi-TF detection lands
+                            "timeframe_origin": "4h",
                         }
             else: # bearish
                 # 1. Origin must be a bullish candle
@@ -1763,17 +1794,80 @@ class SMCEngine:
                             entry_price = cand.high - (cand.high - cand.low) * discount_pct
                         else:  # high_low (legacy)
                             entry_price = cand.low
-                        
+
+                        # Phase 1: scan post-formation candles for touch history
+                        touch_types: List[str] = []
+                        for j in range(i + 2, len(candles)):
+                            tc = SMCEngine._classify_zone_touch(
+                                candles[j], cand.high, cand.low, "bearish"
+                            )
+                            if tc is not None:
+                                touch_types.append(tc)
+
                         return {
                             "type": "bearish",
                             "index": i,
                             "timestamp": cand.timestamp,
                             "low": cand.low,
                             "high": cand.high,
-                            "price": entry_price
+                            "price": entry_price,
+                            "body_low": min(cand.open, cand.close),
+                            "body_high": max(cand.open, cand.close),
+                            "freshness": SMCEngine._compute_freshness(touch_types),
+                            "touch_count": len(touch_types),
+                            "touch_types": touch_types,
+                            "age_candles": len(candles) - 1 - i,
+                            # TODO(Phase 2): make dynamic when multi-TF detection lands
+                            "timeframe_origin": "4h",
                         }
         return None
-    
+
+    @staticmethod
+    def _classify_zone_touch(
+        candle: Candle,
+        zone_top: Decimal,
+        zone_bottom: Decimal,
+        bias: str,
+    ) -> Optional[str]:
+        """Classify how a candle interacted with a price zone.
+
+        Returns None if the candle did not reach the zone at all.
+        Otherwise returns one of TOUCH_WICK_ONLY, TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL.
+
+        "Close through" (body_full) is directional: for a bullish zone (support),
+        body_low must be at or below zone_bottom; for a bearish zone (resistance),
+        body_high must be at or above zone_top.
+        """
+        body_high = max(candle.open, candle.close)
+        body_low = min(candle.open, candle.close)
+
+        # Wick did not reach the zone
+        if candle.high < zone_bottom or candle.low > zone_top:
+            return None
+
+        # Wick reached but body stayed outside the zone
+        if body_low > zone_top or body_high < zone_bottom:
+            return TOUCH_WICK_ONLY
+
+        # Body entered the zone — partial or full?
+        if bias == "bullish":
+            if body_low <= zone_bottom:
+                return TOUCH_BODY_FULL
+            return TOUCH_BODY_PARTIAL
+        # bearish
+        if body_high >= zone_top:
+            return TOUCH_BODY_FULL
+        return TOUCH_BODY_PARTIAL
+
+    @staticmethod
+    def _compute_freshness(touch_types: List[str]) -> str:
+        """Derive freshness grade from ordered touch history."""
+        if not touch_types:
+            return FRESHNESS_UNTOUCHED
+        if any(t in (TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL) for t in touch_types):
+            return FRESHNESS_TESTED
+        return FRESHNESS_PARTIAL
+
     def _find_fair_value_gap(
         self,
         candles: List[Candle],
@@ -1807,21 +1901,44 @@ class SMCEngine:
                 if gap_size_pct < min_gap_size_pct:
                     continue
 
-                # Check for mitigation by any candle AFTER the gap formation (from i+3 to end)
-                # If any candle's wick enters the gap, it is mitigated.
-                mitigated = False
+                # Phase 1: graduated mitigation — classify each post-formation touch
+                touch_types: List[str] = []
                 for j in range(i + 3, len(candles)):
-                    fc = candles[j]
-                    if bias == "bullish":
-                        if fc.low <= gap_zone[1]: # Price returned to or below gap top
-                            mitigated = True
-                            break
-                    else:
-                        if fc.high >= gap_zone[0]: # Price returned to or above gap bottom
-                            mitigated = True
-                            break
-                
+                    tc = SMCEngine._classify_zone_touch(
+                        candles[j], gap_zone[1], gap_zone[0], bias
+                    )
+                    if tc is not None:
+                        touch_types.append(tc)
+
+                freshness = SMCEngine._compute_freshness(touch_types)
+
+                # Mitigation filter — default "touched" preserves legacy behavior
+                mode = getattr(self.config, "fvg_mitigation_mode", "touched")
+                fvg_mode_override = os.getenv("REPLAY_OVERRIDE_FVG_MITIGATION_MODE")
+                if fvg_mode_override:
+                    mode = fvg_mode_override
+
+                if mode == "touched":
+                    mitigated = len(touch_types) > 0
+                elif mode == "partial":
+                    mitigated = any(
+                        t in (TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL) for t in touch_types
+                    )
+                elif mode == "full":
+                    mitigated = any(t == TOUCH_BODY_FULL for t in touch_types)
+                else:
+                    mitigated = len(touch_types) > 0  # unknown mode → safe default
+
                 if not mitigated:
+                    if not touch_types:
+                        mitigation_depth = "none"
+                    elif all(t == TOUCH_WICK_ONLY for t in touch_types):
+                        mitigation_depth = "wick_tested"
+                    elif any(t == TOUCH_BODY_FULL for t in touch_types):
+                        mitigation_depth = "body_full"
+                    else:
+                        mitigation_depth = "body_partial"
+
                     return {
                         "type": "bullish" if bias == "bullish" else "bearish",
                         "index": i,
@@ -1829,7 +1946,14 @@ class SMCEngine:
                         "bottom": gap_zone[0],
                         "top": gap_zone[1],
                         "size": gap_zone[1] - gap_zone[0],
-                        "price": gap_zone[1] if bias == "bullish" else gap_zone[0]
+                        "price": gap_zone[1] if bias == "bullish" else gap_zone[0],
+                        "freshness": freshness,
+                        "touch_count": len(touch_types),
+                        "touch_types": touch_types,
+                        "age_candles": len(candles) - 1 - i,
+                        "mitigation_depth": mitigation_depth,
+                        # TODO(Phase 2): make dynamic when multi-TF detection lands
+                        "timeframe_origin": "4h",
                     }
         return None
     

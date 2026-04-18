@@ -59,7 +59,7 @@ log = logging.getLogger("alpha_combination")
 
 RANDOM_SEED = 42
 
-# 11 score breakdown features from smc_engine.py:1329-1343
+# Score breakdown features from smc_engine.py score_breakdown dicts
 SCORE_FEATURES = [
     "smc",
     "fib",
@@ -70,6 +70,7 @@ SCORE_FEATURES = [
     "rsi_div",
     "fib_1h",
     "adx_grad",
+    "freshness",
     "higher_tf_bonus",
     "higher_tf_penalty",
 ]
@@ -981,11 +982,26 @@ async def generate_decision_data(
         if result is not None and hasattr(result, "score_breakdown"):
             bd = getattr(result, "score_breakdown", None)
             if bd and isinstance(bd, dict) and bd.get("smc") is not None:
+                # Pull freshness grade strings + touch metadata from structure_info.
+                # These live on the enriched OB/FVG dicts populated by smc_engine.
+                si = getattr(result, "structure_info", {}) or {}
+                ob = si.get("order_block") or {}
+                fvg = si.get("fvg") or {}
+                freshness_info = {
+                    "ob_freshness": ob.get("freshness"),
+                    "ob_touch_count": ob.get("touch_count"),
+                    "ob_age_candles": ob.get("age_candles"),
+                    "fvg_freshness": fvg.get("freshness"),
+                    "fvg_touch_count": fvg.get("touch_count"),
+                    "fvg_age_candles": fvg.get("age_candles"),
+                    "fvg_mitigation_depth": fvg.get("mitigation_depth"),
+                }
                 captured_signals.append({
                     "timestamp": str(getattr(result, "timestamp", datetime.now(UTC).isoformat())),
                     "symbol": getattr(result, "symbol", ""),
                     "event": "Signal accepted",
                     "score_breakdown": {k: float(v) if v is not None else 0.0 for k, v in bd.items()},
+                    "freshness_info": freshness_info,
                     "setup": str(getattr(result, "setup_type", "")),
                     "signal_type": str(getattr(result, "signal_type", "")),
                     "entry": float(getattr(result, "entry_price", 0)),
@@ -1083,6 +1099,14 @@ async def generate_decision_data(
             row[key] = float(bd.get(key, 0.0))
         row["total_score"] = float(bd.get("total", sum(row[k] for k in SCORE_FEATURES)))
         row["threshold"] = float(bd.get("threshold", 0.0))
+        # Flatten freshness_info (grade strings + touch metadata for bucketing)
+        fi = sig.get("freshness_info", {}) or {}
+        for key in (
+            "ob_freshness", "ob_touch_count", "ob_age_candles",
+            "fvg_freshness", "fvg_touch_count", "fvg_age_candles",
+            "fvg_mitigation_depth",
+        ):
+            row[key] = fi.get(key)
         rows.append(row)
 
     # Write JSONL
