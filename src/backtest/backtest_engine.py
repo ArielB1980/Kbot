@@ -229,9 +229,9 @@ class BacktestEngine:
         # V2: Multi-asset support - use specified symbol or default to first spot market
         self.symbol = symbol if symbol else config.exchange.spot_markets[0]
         
-        # Starting capital
+        # Starting capital — always Decimal for consistent arithmetic
         if starting_equity:
-            self.starting_equity = starting_equity
+            self.starting_equity = Decimal(str(starting_equity)) if not isinstance(starting_equity, Decimal) else starting_equity
         else:
             self.starting_equity = Decimal(str(config.backtest.starting_equity))
         

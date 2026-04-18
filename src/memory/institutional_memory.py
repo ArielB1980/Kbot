@@ -189,9 +189,24 @@ class InstitutionalMemoryManager:
 
         previous_status = thesis.status
         previous_conviction = float(thesis.current_conviction)
-        time_decay = min(max_time_decay, (hours_old / max(decay_window, 1.0)) * max_time_decay)
+
+        # Structural invalidation: zone breach kills thesis immediately (no gradual decay)
+        structural_mode = bool(getattr(self.config, "thesis_structural_invalidation_enabled", True))
+        time_decay_enabled = bool(getattr(self.config, "thesis_time_decay_enabled", not structural_mode))
+
+        if time_decay_enabled:
+            time_decay = min(max_time_decay, (hours_old / max(decay_window, 1.0)) * max_time_decay)
+        else:
+            time_decay = 0.0
+
         inside_zone = thesis.weekly_zone_low <= current_price <= thesis.weekly_zone_high
-        zone_rejection = 0.0 if inside_zone else zone_penalty_val
+
+        if structural_mode and not inside_zone:
+            # Structural invalidation: price closed outside zone → immediate kill
+            zone_rejection = 100.0  # Overwhelm any floor
+        else:
+            zone_rejection = 0.0 if inside_zone else zone_penalty_val
+
         volume_fade = 0.0
         if thesis.original_volume_avg is not None and current_volume_avg is not None:
             if current_volume_avg < thesis.original_volume_avg:

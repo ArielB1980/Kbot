@@ -34,23 +34,29 @@ def test_score_components(scorer):
     assert scorer._score_cost_efficiency(Mock(), Decimal("5")) == 20.0 # <= 10 bps
     assert scorer._score_cost_efficiency(Mock(), Decimal("100")) == 0.0 # > 50 bps
 
-def test_score_gate_tight(scorer):
-    """Test scoring gates for tight_smc regime."""
-    # Aligned (Threshold 75)
-    passed, thresh = scorer.check_score_gate(76.0, SetupType.OB, "bullish")
+def test_score_gate_unified(scorer):
+    """Test scoring gates with unified regime (default)."""
+    # Unified regime uses min_score_smc_aligned=60 / min_score_smc_neutral=65
+    # Aligned (Threshold 60)
+    passed, thresh = scorer.check_score_gate(61.0, SetupType.OB, "bullish")
     assert passed
-    assert thresh == 75.0
-    
-    passed, thresh = scorer.check_score_gate(74.0, SetupType.OB, "bullish")
+    assert thresh == 60.0
+
+    passed, thresh = scorer.check_score_gate(59.0, SetupType.OB, "bullish")
     assert not passed
-    
-    # Neutral (Threshold 80)
-    passed, thresh = scorer.check_score_gate(78.0, SetupType.OB, "neutral")
+
+    # Neutral (Threshold 65)
+    passed, thresh = scorer.check_score_gate(63.0, SetupType.OB, "neutral")
     assert not passed
-    assert thresh == 80.0
-    
-    passed, thresh = scorer.check_score_gate(81.0, SetupType.OB, "neutral")
+    assert thresh == 65.0
+
+    passed, thresh = scorer.check_score_gate(66.0, SetupType.OB, "neutral")
     assert passed
+
+    # BOS uses same unified thresholds
+    passed, thresh = scorer.check_score_gate(61.0, SetupType.BOS, "bearish")
+    assert passed
+    assert thresh == 60.0
 
 def test_fib_confluence_scoring(scorer):
     """Test fib confluence scoring logic."""

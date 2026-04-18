@@ -64,16 +64,24 @@ def metrics_from_backtest(metrics: BacktestMetrics, starting_equity: Decimal) ->
 class ScoreWeights:
     """Weights for composite short-horizon candidate scoring."""
 
-    return_weight: float = 1.0
-    drawdown_weight: float = 0.8
-    sharpe_weight: float = 0.35
-    win_rate_weight: float = 0.1
-    trade_count_weight: float = 0.01
+    return_weight: float = 0.5
+    drawdown_weight: float = 1.2
+    sharpe_weight: float = 0.8
+    win_rate_weight: float = 0.3
+    trade_count_weight: float = 0.15
+    min_trade_floor: int = 5
 
 
 def score_candidate(metrics: CandidateMetrics, weights: ScoreWeights | None = None) -> float:
-    """Compute a composite score for ranking candidates."""
+    """Compute a composite score for ranking candidates.
+
+    Returns -inf when trade count is below the minimum floor to prevent
+    the optimizer from converging on ultra-rare setups (2-5 trades) that
+    produce meaningless win rates.
+    """
     w = weights or ScoreWeights()
+    if metrics.trade_count < w.min_trade_floor:
+        return float("-inf")
     sortino_component = metrics.sortino if metrics.sortino is not None else metrics.sharpe
     return (
         metrics.net_return_pct * w.return_weight

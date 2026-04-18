@@ -39,7 +39,7 @@ LIVE_RESEARCH_RISK_BOUNDS: dict[str, tuple[float, float]] = {
     "max_position_size_usd": (1000.0, 1000000.0),
     "tight_smc_cost_cap_bps": (10.0, 50.0),
     "tight_smc_min_rr_multiple": (1.5, 5.0),
-    "wide_structure_max_distortion_pct": (0.10, 0.25),
+    "wide_structure_max_distortion_pct": (0.10, 0.40),
 }
 
 class ExchangeConfig(BaseSettings):
@@ -114,7 +114,7 @@ class RiskSymbolOverride(BaseSettings):
     max_position_size_usd: Optional[float] = Field(default=None, ge=1000.0, le=1000000.0)
     tight_smc_cost_cap_bps: Optional[float] = Field(default=None, ge=10.0, le=50.0)
     tight_smc_min_rr_multiple: Optional[float] = Field(default=None, ge=1.5, le=5.0)
-    wide_structure_max_distortion_pct: Optional[float] = Field(default=None, ge=0.10, le=0.25)
+    wide_structure_max_distortion_pct: Optional[float] = Field(default=None, ge=0.10, le=0.40)
 
 
 class RiskConfig(BaseSettings):
@@ -176,11 +176,11 @@ class RiskConfig(BaseSettings):
     auction_max_per_cluster: int = Field(default=8, ge=1, le=50)  # Balanced for 25 positions (was 12)
     auction_max_per_symbol: int = Field(default=1, ge=1, le=5)
     auction_swap_threshold: float = Field(default=10.0, ge=0.0, le=50.0)
-    auction_min_hold_minutes: int = Field(default=15, ge=0, le=480)
+    auction_min_hold_minutes: int = Field(default=15, ge=0, le=2880)
     auction_min_hold_high_conviction_minutes: int = Field(
         default=120,
         ge=0,
-        le=480,
+        le=2880,
         description="Minimum hold for high-conviction positions before strategic auction closes",
     )
     auction_min_hold_high_conviction_threshold: float = Field(
@@ -333,7 +333,7 @@ class RiskConfig(BaseSettings):
     funding_cost_threshold_pct: float | None = Field(default=0.02, ge=0.0, le=0.10)
     # Deterministic edge-vs-cost gate (TP1 proxy)
     fee_edge_guard_enabled: bool = Field(default=False)
-    fee_edge_multiple_k: float = Field(default=5.0, ge=1.0, le=20.0)
+    fee_edge_multiple_k: float = Field(default=3.0, ge=1.0, le=20.0)
     fee_edge_use_conservative_taker: bool = Field(default=True)
     fee_edge_slippage_bps_est: float = Field(default=4.0, ge=0.0, le=50.0)
     fee_edge_funding_floor_bps: float = Field(default=2.0, ge=0.0, le=50.0)
@@ -346,7 +346,7 @@ class RiskConfig(BaseSettings):
     tight_smc_avg_hold_hours: float = Field(default=6.0, ge=1.0, le=24.0)  # For funding calc
     
     # Wide-stop structure regime (BOS/TREND): 1.5-3.0% stops
-    wide_structure_max_distortion_pct: float = Field(default=0.15, ge=0.10, le=0.25)  # R:R distortion
+    wide_structure_max_distortion_pct: float = Field(default=0.25, ge=0.10, le=0.40)  # R:R distortion — relaxed to let BTC/SOL signals through
     wide_structure_avg_hold_hours: float = Field(default=36.0, ge=12.0, le=72.0)  # For funding calc
     wide_structure_funding_hard_cap_bps: float = Field(
         default=15.0, ge=0.0, le=80.0, description="Hard reject wide-structure entries when projected funding burden exceeds this bps cap"
@@ -421,10 +421,16 @@ class StrategyConfig(BaseSettings):
     adx_threshold: float = Field(default=20.0, ge=10.0, le=40.0)
     atr_period: int = Field(default=14, ge=7, le=30)
     
-    # Stop buffering (Regime specific ranges - adjusted for 4H ATR)
-    # 4H ATR is ~2-3x larger than 1H ATR, so multipliers are reduced
-    # tight_smc: 0.15-0.30 ATR (4H) - was 0.3-0.6 on 1H
-    # wide_structure: 0.50-0.60 ATR (4H) - was 1.0-1.2 on 1H
+    # Unified regime: single regime with setup-type-based stop sizing
+    unified_regime_enabled: bool = Field(default=True, description="Collapse tight_smc/wide_structure into single 'smc' regime")
+    smc_atr_stop_ob: float = Field(default=0.3, ge=0.1, le=1.5, description="ATR stop multiplier for Order Block setups")
+    smc_atr_stop_fvg: float = Field(default=0.4, ge=0.1, le=1.5, description="ATR stop multiplier for FVG setups")
+    smc_atr_stop_bos: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for BOS setups")
+    smc_atr_stop_trend: float = Field(default=0.6, ge=0.2, le=2.0, description="ATR stop multiplier for trend setups")
+    min_score_smc_aligned: float = Field(default=30.0, ge=0.0, le=100.0, description="Score gate for unified regime, aligned bias (Phase 2: recalibrated for ~100pt range)")
+    min_score_smc_neutral: float = Field(default=35.0, ge=0.0, le=100.0, description="Score gate for unified regime, neutral bias (Phase 2: recalibrated for ~100pt range)")
+
+    # Legacy regime-specific stop ranges (used when unified_regime_enabled=False)
     tight_smc_atr_stop_min: float = Field(default=0.15, ge=0.05, le=1.0)
     tight_smc_atr_stop_max: float = Field(default=0.30, ge=0.05, le=1.0)
     wide_structure_atr_stop_min: float = Field(default=0.50, ge=0.2, le=2.0)
@@ -457,7 +463,13 @@ class StrategyConfig(BaseSettings):
     
     rsi_period: int = Field(default=14, ge=7, le=30)
 
-    rsi_divergence_enabled: bool = False  # Single flag for RSI divergence (removed duplicate rsi_divergence_check)
+    rsi_divergence_enabled: bool = True
+    rsi_divergence_score_bonus: float = Field(
+        default=0.0, ge=0.0, le=20.0,
+        description="Score bonus when 1H RSI divergence aligns with signal direction. "
+        "Phase 2: zeroed — anti-predictive on BTC/SOL/LINK (IC -0.27/-0.42/-0.17). "
+        "Detection code intact for re-evaluation at 90+ days.",
+    )
     
     # SMC Parameters
     orderblock_lookback: int = Field(default=50, ge=20, le=200)
@@ -485,15 +497,43 @@ class StrategyConfig(BaseSettings):
     bos_confirmation_candles: int = Field(default=3, ge=1, le=10)
     require_bos_confirmation: bool = Field(default=False)  # Optional filter for higher quality
     bos_volume_confirmation_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Require break candle volume > threshold × avg volume for BOS",
     )
     bos_volume_threshold_mult: float = Field(
         default=1.5, ge=1.0, le=5.0,
         description="Break candle volume must exceed this multiple of 20-period avg volume",
     )
+    # Fib hard gate (disabled by default — scoring handles confluence instead)
+    fib_hard_gate_enabled: bool = Field(default=False, description="Hard-reject OB/FVG signals not in OTE/key Fib level")
+
     fvg_mitigation_mode: Literal["touched", "partial", "full"] = "touched"
     fvg_partial_fill_pct: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    # Level Freshness (Phase 1: Gap 1 — untouched levels outperform tested)
+    freshness_scoring_enabled: bool = Field(
+        default=True,
+        description="Enable level freshness scoring component (structure_primary mode)",
+    )
+    freshness_max_points: float = Field(
+        default=10.0, ge=0.0, le=20.0,
+        description="Maximum points awarded for level freshness component",
+    )
+    freshness_age_bonus_threshold: int = Field(
+        default=10, ge=5, le=100,
+        description="Candles of age before untouched levels receive the age bonus "
+                    "(calibrated from 400-day replay — lift begins at age 10-20)",
+    )
+    freshness_age_bonus_multiplier: float = Field(
+        default=1.2, ge=1.0, le=2.0,
+        description="Multiplier for untouched levels older than the age threshold",
+    )
+    freshness_disabled_symbols: List[str] = Field(
+        default_factory=lambda: ["SOL/USD"],
+        description="Symbols where freshness scoring is forced to 0 (neutral) "
+                    "because per-symbol IC check fails. SOL inverts the signal "
+                    "(IC -0.064); diagnose before re-enabling.",
+    )
 
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
@@ -537,13 +577,40 @@ class StrategyConfig(BaseSettings):
     weekly_fib_confluence_weight: float = Field(default=0.25, ge=0.0, le=1.0)
     daily_bias_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     min_weekly_zone_width_pct: float = Field(default=1.5, ge=0.1, le=20.0)
-    higher_tf_penalty_outside_zone: float = Field(default=-18.0)
+    higher_tf_penalty_outside_zone: float = Field(default=0.0)
+    higher_tf_penalty_bonus_only: bool = Field(
+        default=True,
+        description="When True, clamp higher-TF adjustment to non-negative (bonus only, never penalty)",
+    )
 
-    # EMA slope scoring bonus
+    # EMA slope scoring bonus (legacy, replaced by volume_score)
     ema_slope_bonus: float = Field(
         default=0.0, ge=0.0, le=15.0,
         description="Bonus points when EMA200 slope aligns with signal direction (0=disabled)",
     )
+
+    # Volume confirmation scoring (replaces EMA slope)
+    volume_score_enabled: bool = Field(default=True, description="Enable volume confirmation scoring (replaces EMA slope)")
+    volume_score_high_mult: float = Field(default=1.5, ge=0.8, le=3.0, description="Volume ratio for full 15pt bonus")
+    volume_score_low_mult: float = Field(default=1.2, ge=0.5, le=2.0, description="Volume ratio for 8pt bonus")
+
+    # Structure confirmation scoring (replaces ADX)
+    structure_confirmation_score_enabled: bool = Field(default=True, description="Enable HH/HL structure scoring (replaces ADX)")
+    structure_confirmation_score_points: float = Field(default=12.0, ge=0.0, le=20.0, description="Points for confirmed structure alignment")
+    adx_scoring_enabled: bool = Field(default=False, description="Legacy ADX scoring (disabled when structure confirmation is on)")
+
+    # Scorer version: phase_ad (legacy 100pt) or structure_primary (structure hard gate + cost 0-20)
+    scorer_version: str = "structure_primary"
+    # Structure-primary scorer: cost-only gate thresholds (0-20 scale)
+    # Signals must first pass the structure hard gate (market structure confirmed),
+    # then the cost score must exceed these thresholds.
+    min_score_structure_primary_aligned: float = 10.0
+    min_score_structure_primary_neutral: float = 12.0
+
+    # 1H Fibonacci confluence scoring
+    fib_1h_confluence_enabled: bool = Field(default=True, description="Enable 1H Fib confluence bonus scoring")
+    fib_1h_confluence_bonus: float = Field(default=8.0, ge=4.0, le=15.0, description="Bonus points for 4H-1H Fib overlap")
+    fib_multi_tf_tolerance_bps: float = Field(default=30.0, ge=10.0, le=100.0, description="Tolerance in bps for multi-TF Fib overlap")
 
     # Persistent institutional memory (thesis + conviction decay)
     memory_enabled: bool = Field(default=False, description="Enable thesis memory tracking")
@@ -551,6 +618,12 @@ class StrategyConfig(BaseSettings):
     thesis_score_enabled: bool = Field(default=False, description="Apply conviction score adjustment")
     thesis_management_enabled: bool = Field(default=False, description="Apply conviction-driven position management")
     thesis_canary_symbols: List[str] = Field(default_factory=list, description="Optional symbol allowlist for thesis behaviors")
+    thesis_structural_invalidation_enabled: bool = Field(
+        default=True, description="Kill thesis on zone breach instead of gradual time decay",
+    )
+    thesis_time_decay_enabled: bool = Field(
+        default=False, description="Enable gradual time-based conviction decay (legacy, overridden by structural mode)",
+    )
     thesis_time_decay_max_points: float = Field(default=45.0, ge=0.0, le=100.0)
     thesis_time_decay_window_hours: float = Field(default=12.0, ge=1.0, le=168.0)
     thesis_zone_breach_penalty_points: float = Field(default=35.0, ge=0.0, le=100.0)
@@ -803,11 +876,11 @@ class MultiTPConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     enabled: bool = False
-    tp1_r_multiple: float = Field(default=1.0, ge=0.5, le=5.0)
-    tp1_close_pct: float = Field(default=0.40, ge=0.1, le=0.6)
-    tp2_r_multiple: float = Field(default=2.5, ge=1.0, le=10.0)
-    tp2_close_pct: float = Field(default=0.40, ge=0.1, le=0.6)
-    runner_pct: float = Field(default=0.20, ge=0.05, le=0.5)
+    tp1_r_multiple: float = Field(default=0.5, ge=0.3, le=5.0)
+    tp1_close_pct: float = Field(default=0.60, ge=0.1, le=0.8)
+    tp2_r_multiple: float = Field(default=1.5, ge=0.5, le=10.0)
+    tp2_close_pct: float = Field(default=0.25, ge=0.1, le=0.6)
+    runner_pct: float = Field(default=0.15, ge=0.05, le=0.5)
     move_sl_to_be_after_tp1: bool = True
     trailing_stop_enabled: bool = True
     trailing_stop_atr_multiplier: float = Field(default=1.5, ge=1.0, le=3.0)

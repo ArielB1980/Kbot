@@ -1,5 +1,4 @@
-"""
-BacktestRunner — Orchestrates LiveTrading in replay mode.
+"""BacktestRunner — Orchestrates LiveTrading in replay mode.
 
 Runs the real LiveTrading._tick() method step-by-step with:
 - Simulated clock (SimClock)

@@ -27,6 +27,17 @@ import uuid
 logger = get_logger(__name__)
 
 
+# Zone touch classification (Phase 1: body/wick distinction)
+TOUCH_WICK_ONLY = "wick_only"
+TOUCH_BODY_PARTIAL = "body_partial"
+TOUCH_BODY_FULL = "body_full"
+
+# Level freshness grades (Phase 1: level freshness tracking)
+FRESHNESS_UNTOUCHED = "fully_untouched"
+FRESHNESS_PARTIAL = "partially_mitigated"
+FRESHNESS_TESTED = "fully_tested"
+
+
 @dataclass
 class HigherTFContext:
     weekly_fib_zone_low: Optional[Decimal] = None
@@ -505,6 +516,7 @@ class SMCEngine:
             adx_value = cached_indicators['adx']
             atr_value = cached_indicators['atr']
             fib_levels = cached_indicators['fib_levels']
+            fib_levels_1h = cached_indicators.get('fib_levels_1h')
         else:
             # ADX on 1H for faster response to trend changes (refinement layer)
             adx_df = self.indicators.calculate_adx(refine_candles_1h, self.config.adx_period)
@@ -523,12 +535,18 @@ class SMCEngine:
             
             # Fib Levels on decision TF for consistency
             fib_levels = self.fibonacci_engine.calculate_levels(effective_decision_candles, decision_tf)
-            
+
+            # 1H Fib levels for multi-TF confluence scoring
+            fib_levels_1h = None
+            if getattr(self.config, "fib_1h_confluence_enabled", True) and refine_candles_1h and len(refine_candles_1h) >= 20:
+                fib_levels_1h = self.fibonacci_engine.calculate_levels(refine_candles_1h, "1h")
+
             # Store in cache
             self.indicator_cache[cache_key] = {
                 'adx': adx_value,
                 'atr': atr_value,
-                'fib_levels': fib_levels
+                'fib_levels': fib_levels,
+                'fib_levels_1h': fib_levels_1h,
             }
             
             # Periodic cleanup
@@ -781,10 +799,22 @@ class SMCEngine:
             ablate_wait_structure_break = os.getenv("REPLAY_ABLATE_DISABLE_WAIT_STRUCTURE_BREAK", "0") == "1"
             ablate_reconfirmation = os.getenv("REPLAY_ABLATE_DISABLE_RECONFIRMATION", "0") == "1"
 
+            rsi_divergence_state = "none"
+            # RSI Divergence Check - unconditional, on 1H for faster response
+            if self.config.rsi_divergence_enabled and refine_candles_1h:
+                rsi_values = self.indicators.calculate_rsi(refine_candles_1h, self.config.rsi_period)
+                rsi_divergence_state = self.indicators.detect_rsi_divergence(refine_candles_1h, rsi_values, self.config.rsi_divergence_lookback)
+
+                if rsi_divergence_state != "none":
+                    if bias == "bullish" and rsi_divergence_state == "bearish":
+                        reasoning_parts.append("⚠️ Bearish RSI Divergence detected against Bullish bias")
+                    elif bias == "bearish" and rsi_divergence_state == "bullish":
+                        reasoning_parts.append("⚠️ Bullish RSI Divergence detected against Bearish bias")
+
             if ms_change:
                 # Structure change detected - check confirmation (on 4H)
                 confirmed = self.ms_tracker.check_confirmation(
-                    symbol, 
+                    symbol,
                     effective_decision_candles,  # Use decision TF for confirmation
                     ms_change,
                     required_candles=required_candles # Dynamic
@@ -796,30 +826,11 @@ class SMCEngine:
                     )
                     reasoning_parts.append("🧪 Ablation: bypass market-structure confirmation gate")
                     confirmed = True
-                
                 if confirmed:
                     # Structure already detected on 4H in Step 1.5
                     # Use structure_4h (already set above) - no need to re-detect on 1H
                     # structure_signal is already set to structure_4h
-                    
-                    # V4: RSI Divergence Check (Gate before Reconfirmation) - on 1H for faster response
-                    if self.config.rsi_divergence_enabled:
-                         rsi_values = self.indicators.calculate_rsi(refine_candles_1h, self.config.rsi_period)
-                         divergence = self.indicators.detect_rsi_divergence(refine_candles_1h, rsi_values, self.config.rsi_divergence_lookback)
-                         
-                         if divergence != "none":
-                             # If Bias is Bullish but Bearish Divergence -> Weakness
-                             if bias == "bullish" and divergence == "bearish":
-                                 reasoning_parts.append(f"⚠️ Bearish RSI Divergence detected against Bullish bias")
-                                 # We could reject or reduce size. For now, strict:
-                                 # signal = self._no_signal(symbol, reasoning_parts, refine_candles_1h[-1]) 
-                                 # Let's just log it for scoring to penalize
-                             
-                             elif bias == "bearish" and divergence == "bullish":
-                                 reasoning_parts.append(f"⚠️ Bullish RSI Divergence detected against Bearish bias")
 
-
-                    
                     entry_zone = None
                     if structure_signal:
                         # Extract entry zone from 4H structure (order block or FVG)
@@ -985,11 +996,13 @@ class SMCEngine:
                 
                 # Step 5: Fib Validation (Gate for tight_smc) - use cached 4H fib_levels
                 fib_valid = True
-                
+
                 setup_type = classification_info['setup_type']
                 regime = classification_info['regime']
-                
-                if regime == "tight_smc":
+
+                # Fib hard gate disabled by default (scoring handles confluence instead)
+                _fib_hard_gate = getattr(self.config, "fib_hard_gate_enabled", False)
+                if _fib_hard_gate and regime in ("tight_smc", "smc") and setup_type in (SetupType.OB, SetupType.FVG):
                     # HARD REQUIREMENT: Must be in OTE or near key level
                     if fib_levels:
                         # Check OTE
@@ -1076,6 +1089,12 @@ class SMCEngine:
                     
                     # Create TEMP signal for scoring
                     # Ensure ADX and ATR are Decimal types
+                    # Check if price is inside the weekly Fib zone
+                    _inside_weekly = (
+                        higher_tf_context is not None
+                        and higher_tf_context.allowed_entry
+                        and higher_tf_context.weekly_fib_zone_low is not None
+                    )
                     temp_signal = Signal(
                         timestamp=timestamp,
                         symbol=symbol,
@@ -1090,6 +1109,7 @@ class SMCEngine:
                         adx=Decimal(str(adx_value)),
                         atr=atr_value if isinstance(atr_value, Decimal) else Decimal(str(atr_value)),
                         atr_ratio=atr_ratio,
+                        inside_weekly_zone=_inside_weekly,
                         ema200_slope=ema200_slope,
                         tp_candidates=tp_candidates
                     )
@@ -1097,6 +1117,21 @@ class SMCEngine:
                     # Estimate cost (rough bps)
                     cost_bps = Decimal("15.0") # Baseline assumption
                     
+                    # Compute volume ratio for scoring (breakout candle vs 20-period avg)
+                    _vol_ratio = 0.0
+                    if len(effective_decision_candles) >= 21:
+                        _avg_vol = sum(c.volume for c in effective_decision_candles[-21:-1]) / 20
+                        if _avg_vol > 0:
+                            _vol_ratio = float(effective_decision_candles[-1].volume / _avg_vol)
+
+                    # Multi-TF Fib confluence check (4H OTE overlaps 1H retracement)
+                    _fib_1h_overlap = False
+                    if fib_levels and fib_levels_1h:
+                        _fib_1h_overlap = self.fibonacci_engine.check_multi_tf_confluence(
+                            fib_levels, fib_levels_1h,
+                            tolerance_bps=getattr(self.config, "fib_multi_tf_tolerance_bps", 30.0),
+                        )
+
                     # Score
                     score_obj = self.signal_scorer.score_signal(
                         temp_signal,
@@ -1104,7 +1139,11 @@ class SMCEngine:
                         fib_levels,
                         adx_value,
                         cost_bps,
-                        bias
+                        bias,
+                        rsi_divergence=rsi_divergence_state,
+                        volume_ratio=_vol_ratio,
+                        market_structure_state=ms_state.value if hasattr(ms_state, "value") else str(ms_state),
+                        fib_1h_overlap=_fib_1h_overlap,
                     )
                     if getattr(self.config, "higher_tf_enabled", False) and higher_tf_context:
                         score_obj.total_score += higher_tf_context.weekly_confluence_bonus
@@ -1112,10 +1151,13 @@ class SMCEngine:
                             f"📊 Higher-TF bonus applied: +{higher_tf_context.weekly_confluence_bonus:.2f}"
                         )
                     if getattr(self.config, "higher_tf_enabled", False) and higher_tf_penalty != 0.0:
-                        score_obj.total_score += higher_tf_penalty
-                        reasoning_parts.append(
-                            f"📊 Higher-TF penalty applied: {higher_tf_penalty:.2f}"
-                        )
+                        if getattr(self.config, "higher_tf_penalty_bonus_only", True):
+                            higher_tf_penalty = max(0.0, higher_tf_penalty)
+                        if higher_tf_penalty != 0.0:
+                            score_obj.total_score += higher_tf_penalty
+                            reasoning_parts.append(
+                                f"📊 Higher-TF penalty applied: {higher_tf_penalty:.2f}"
+                            )
                     if (
                         self._memory_manager
                         and bool(getattr(self.config, "thesis_score_enabled", False))
@@ -1156,16 +1198,23 @@ class SMCEngine:
                             f"📊 1H fallback score premium: -{fallback_premium:.0f} points"
                         )
 
-                    # GATE: Check score
-                    passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias)
+                    # GATE: Check score (structure_confirmed feeds the hard gate in structure_primary mode)
+                    structure_confirmed = score_obj.trend_confirmation > 0
+                    passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias, structure_confirmed=structure_confirmed)
                     
                     if not passed:
                         score_breakdown = {
+
                             "smc": float(score_obj.smc_quality),
                             "fib": float(score_obj.fib_confluence),
                             "htf": float(score_obj.htf_alignment),
-                            "adx": float(score_obj.adx_strength),
+                            "volume": float(score_obj.volume_confirmation),
+                            "structure": float(score_obj.trend_confirmation),
+                            "rsi_div": float(score_obj.rsi_divergence),
+                            "fib_1h": float(score_obj.fib_1h_confluence),
+                            "adx_grad": float(score_obj.adx_gradient),
                             "cost": float(score_obj.cost_efficiency),
+                            "freshness": float(score_obj.level_freshness),
                             "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                             "higher_tf_penalty": float(higher_tf_penalty),
                             "thesis_conviction": float(thesis_snapshot.get("conviction", 0.0)) if thesis_snapshot else 0.0,
@@ -1203,11 +1252,16 @@ class SMCEngine:
                         conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
                         if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
                             score_breakdown = {
+
                                 "smc": float(score_obj.smc_quality),
                                 "fib": float(score_obj.fib_confluence),
                                 "htf": float(score_obj.htf_alignment),
-                                "adx": float(score_obj.adx_strength),
+                                "volume": float(score_obj.volume_confirmation),
+                                "structure": float(score_obj.trend_confirmation),
+                                "rsi_div": float(score_obj.rsi_divergence),
+                                "fib_1h": float(score_obj.fib_1h_confluence),
                                 "cost": float(score_obj.cost_efficiency),
+                                "freshness": float(score_obj.level_freshness),
                                 "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                                 "higher_tf_penalty": float(higher_tf_penalty),
                                 "thesis_conviction": conviction_val,
@@ -1289,12 +1343,17 @@ class SMCEngine:
                             tp_candidates=tp_candidates,
                             score=score_obj.total_score,
                             score_breakdown={
+
                                 "smc": score_obj.smc_quality,
                                 "fib": score_obj.fib_confluence,
                                 "htf": score_obj.htf_alignment,
-                                "adx": score_obj.adx_strength,
+                                "volume": score_obj.volume_confirmation,
+                                "structure": score_obj.trend_confirmation,
+                                "rsi_div": score_obj.rsi_divergence,
+                                "fib_1h": score_obj.fib_1h_confluence,
+                                "adx_grad": score_obj.adx_gradient,
                                 "cost": score_obj.cost_efficiency,
-                                "ema_slope": score_obj.ema_slope,
+                                "freshness": score_obj.level_freshness,
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
                                 "higher_tf_penalty": higher_tf_penalty,
                                 "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else 0.0,
@@ -1478,18 +1537,19 @@ class SMCEngine:
         """
         from src.domain.models import SetupType
         
-        if structures.get("order_block"):  # Fixed: was "orderblock"
-            return (SetupType.OB, "tight_smc")
-        
+        unified = getattr(self.config, "unified_regime_enabled", True)
+
+        if structures.get("order_block"):
+            return (SetupType.OB, "smc" if unified else "tight_smc")
+
         elif structures.get("fvg"):
-            return (SetupType.FVG, "tight_smc")
-        
-        elif structures.get("bos"):  # Fixed: was "bos_confirmed"
-            return (SetupType.BOS, "wide_structure")
-        
+            return (SetupType.FVG, "smc" if unified else "tight_smc")
+
+        elif structures.get("bos"):
+            return (SetupType.BOS, "smc" if unified else "wide_structure")
+
         else:
-            # HTF trend following only
-            return (SetupType.TREND, "wide_structure")
+            return (SetupType.TREND, "smc" if unified else "wide_structure")
     
     def _classify_regime_from_structure(self, structure: dict) -> str:
         """
@@ -1507,6 +1567,9 @@ class SMCEngine:
         3. If Break of Structure confirmed → "wide_structure"
         4. Else (HTF trend only) → "wide_structure"
         """
+        unified = getattr(self.config, "unified_regime_enabled", True)
+        if unified:
+            return "smc"
         if structure.get("order_block"):
             return "tight_smc"
         elif structure.get("fvg"):
@@ -1514,7 +1577,6 @@ class SMCEngine:
         elif structure.get("bos"):
             return "wide_structure"
         else:
-            # HTF trend following only
             return "wide_structure"
     
     def _determine_bias(
@@ -1689,14 +1751,43 @@ class SMCEngine:
                             entry_price = cand.low + (cand.high - cand.low) * discount_pct
                         else:  # high_low (legacy)
                             entry_price = cand.high
-                        
+
+                        # Phase 1: scan post-formation candles against wick zone
+                        # and body zone (Moneytaur institutional zone, per user feedback)
+                        body_low = min(cand.open, cand.close)
+                        body_high = max(cand.open, cand.close)
+                        touch_types: List[str] = []
+                        body_touch_types: List[str] = []
+                        for j in range(i + 2, len(candles)):
+                            tc = SMCEngine._classify_zone_touch(
+                                candles[j], cand.high, cand.low, "bullish"
+                            )
+                            if tc is not None:
+                                touch_types.append(tc)
+                            btc = SMCEngine._classify_zone_touch(
+                                candles[j], body_high, body_low, "bullish"
+                            )
+                            if btc is not None:
+                                body_touch_types.append(btc)
+
                         return {
                             "type": "bullish",
                             "index": i,
                             "timestamp": cand.timestamp,
                             "low": cand.low,
                             "high": cand.high,
-                            "price": entry_price
+                            "price": entry_price,
+                            "body_low": body_low,
+                            "body_high": body_high,
+                            "freshness": SMCEngine._compute_freshness(touch_types),
+                            "touch_count": len(touch_types),
+                            "touch_types": touch_types,
+                            "body_freshness": SMCEngine._compute_freshness(body_touch_types),
+                            "body_touch_count": len(body_touch_types),
+                            "body_touch_types": body_touch_types,
+                            "age_candles": len(candles) - 1 - i,
+                            # TODO(Phase 2): make dynamic when multi-TF detection lands
+                            "timeframe_origin": "4h",
                         }
             else: # bearish
                 # 1. Origin must be a bullish candle
@@ -1715,17 +1806,92 @@ class SMCEngine:
                             entry_price = cand.high - (cand.high - cand.low) * discount_pct
                         else:  # high_low (legacy)
                             entry_price = cand.low
-                        
+
+                        # Phase 1: scan post-formation candles against wick zone
+                        # and body zone (Moneytaur institutional zone, per user feedback)
+                        body_low = min(cand.open, cand.close)
+                        body_high = max(cand.open, cand.close)
+                        touch_types: List[str] = []
+                        body_touch_types: List[str] = []
+                        for j in range(i + 2, len(candles)):
+                            tc = SMCEngine._classify_zone_touch(
+                                candles[j], cand.high, cand.low, "bearish"
+                            )
+                            if tc is not None:
+                                touch_types.append(tc)
+                            btc = SMCEngine._classify_zone_touch(
+                                candles[j], body_high, body_low, "bearish"
+                            )
+                            if btc is not None:
+                                body_touch_types.append(btc)
+
                         return {
                             "type": "bearish",
                             "index": i,
                             "timestamp": cand.timestamp,
                             "low": cand.low,
                             "high": cand.high,
-                            "price": entry_price
+                            "price": entry_price,
+                            "body_low": body_low,
+                            "body_high": body_high,
+                            "freshness": SMCEngine._compute_freshness(touch_types),
+                            "touch_count": len(touch_types),
+                            "touch_types": touch_types,
+                            "body_freshness": SMCEngine._compute_freshness(body_touch_types),
+                            "body_touch_count": len(body_touch_types),
+                            "body_touch_types": body_touch_types,
+                            "age_candles": len(candles) - 1 - i,
+                            # TODO(Phase 2): make dynamic when multi-TF detection lands
+                            "timeframe_origin": "4h",
                         }
         return None
-    
+
+    @staticmethod
+    def _classify_zone_touch(
+        candle: Candle,
+        zone_top: Decimal,
+        zone_bottom: Decimal,
+        bias: str,
+    ) -> Optional[str]:
+        """Classify how a candle interacted with a price zone.
+
+        Returns None if the candle did not reach the zone at all.
+        Otherwise returns one of TOUCH_WICK_ONLY, TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL.
+
+        "Close through" (body_full) is directional: for a bullish zone (support),
+        body_low must be at or below zone_bottom; for a bearish zone (resistance),
+        body_high must be at or above zone_top.
+        """
+        body_high = max(candle.open, candle.close)
+        body_low = min(candle.open, candle.close)
+
+        # Wick did not reach the zone
+        if candle.high < zone_bottom or candle.low > zone_top:
+            return None
+
+        # Wick reached but body stayed outside the zone
+        if body_low > zone_top or body_high < zone_bottom:
+            return TOUCH_WICK_ONLY
+
+        # Body entered the zone — partial or full?
+        if bias == "bullish":
+            if body_low <= zone_bottom:
+                return TOUCH_BODY_FULL
+            return TOUCH_BODY_PARTIAL
+        # bearish
+        if body_high >= zone_top:
+            return TOUCH_BODY_FULL
+        return TOUCH_BODY_PARTIAL
+
+    @staticmethod
+    def _compute_freshness(touch_types: List[str]) -> str:
+        """Derive freshness grade from ordered touch history."""
+        if not touch_types:
+            return FRESHNESS_UNTOUCHED
+        if any(t in (TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL) for t in touch_types):
+            return FRESHNESS_TESTED
+        return FRESHNESS_PARTIAL
+
     def _find_fair_value_gap(
         self,
         candles: List[Candle],
@@ -1759,21 +1925,44 @@ class SMCEngine:
                 if gap_size_pct < min_gap_size_pct:
                     continue
 
-                # Check for mitigation by any candle AFTER the gap formation (from i+3 to end)
-                # If any candle's wick enters the gap, it is mitigated.
-                mitigated = False
+                # Phase 1: graduated mitigation — classify each post-formation touch
+                touch_types: List[str] = []
                 for j in range(i + 3, len(candles)):
-                    fc = candles[j]
-                    if bias == "bullish":
-                        if fc.low <= gap_zone[1]: # Price returned to or below gap top
-                            mitigated = True
-                            break
-                    else:
-                        if fc.high >= gap_zone[0]: # Price returned to or above gap bottom
-                            mitigated = True
-                            break
-                
+                    tc = SMCEngine._classify_zone_touch(
+                        candles[j], gap_zone[1], gap_zone[0], bias
+                    )
+                    if tc is not None:
+                        touch_types.append(tc)
+
+                freshness = SMCEngine._compute_freshness(touch_types)
+
+                # Mitigation filter — default "touched" preserves legacy behavior
+                mode = getattr(self.config, "fvg_mitigation_mode", "touched")
+                fvg_mode_override = os.getenv("REPLAY_OVERRIDE_FVG_MITIGATION_MODE")
+                if fvg_mode_override:
+                    mode = fvg_mode_override
+
+                if mode == "touched":
+                    mitigated = len(touch_types) > 0
+                elif mode == "partial":
+                    mitigated = any(
+                        t in (TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL) for t in touch_types
+                    )
+                elif mode == "full":
+                    mitigated = any(t == TOUCH_BODY_FULL for t in touch_types)
+                else:
+                    mitigated = len(touch_types) > 0  # unknown mode → safe default
+
                 if not mitigated:
+                    if not touch_types:
+                        mitigation_depth = "none"
+                    elif all(t == TOUCH_WICK_ONLY for t in touch_types):
+                        mitigation_depth = "wick_tested"
+                    elif any(t == TOUCH_BODY_FULL for t in touch_types):
+                        mitigation_depth = "body_full"
+                    else:
+                        mitigation_depth = "body_partial"
+
                     return {
                         "type": "bullish" if bias == "bullish" else "bearish",
                         "index": i,
@@ -1781,7 +1970,14 @@ class SMCEngine:
                         "bottom": gap_zone[0],
                         "top": gap_zone[1],
                         "size": gap_zone[1] - gap_zone[0],
-                        "price": gap_zone[1] if bias == "bullish" else gap_zone[0]
+                        "price": gap_zone[1] if bias == "bullish" else gap_zone[0],
+                        "freshness": freshness,
+                        "touch_count": len(touch_types),
+                        "touch_types": touch_types,
+                        "age_candles": len(candles) - 1 - i,
+                        "mitigation_depth": mitigation_depth,
+                        # TODO(Phase 2): make dynamic when multi-TF detection lands
+                        "timeframe_origin": "4h",
                     }
         return None
     
@@ -1868,32 +2064,40 @@ class SMCEngine:
         order_block = structure['order_block']
         fvg = structure['fvg']
         bos = structure['bos']
-        
+
         # 1. Classify Setup Type & Regime First
+        unified = getattr(self.config, "unified_regime_enabled", True)
         setup_type = SetupType.TREND
-        regime = "wide_structure"
-        
+        regime = "smc" if unified else "wide_structure"
+
         if order_block:
             setup_type = SetupType.OB
-            regime = "tight_smc"
+            regime = "smc" if unified else "tight_smc"
         elif fvg:
             setup_type = SetupType.FVG
-            regime = "tight_smc"
+            regime = "smc" if unified else "tight_smc"
         elif bos:
             setup_type = SetupType.BOS
-            regime = "wide_structure"
-            
+            regime = "smc" if unified else "wide_structure"
+
         # 2. Get ATR from decision timeframe - use cached if available
         if atr_value is None:
             atr_values = self.indicators.calculate_atr(decision_candles, self.config.atr_period)
             atr = Decimal(str(atr_values.iloc[-1])) if not atr_values.empty else Decimal("0")
         else:
-            atr = Decimal(str(atr_value))  # Use cached decision TF ATR value, ensure Decimal
-        
-        # 3. Determine Stop Multiplier based on Regime
-        if regime == "tight_smc":
-            # Randomize or fixed? Use average or min for now to be safe.
-            # Config has ranges: low/high. Let's use AVG of range for standard execution
+            atr = Decimal(str(atr_value))
+
+        # 3. Determine Stop Multiplier based on setup type (unified) or regime (legacy)
+        if unified:
+            # Setup-type-based ATR stop lookup (single regime, different stops per structure)
+            _stop_map = {
+                SetupType.OB: getattr(self.config, "smc_atr_stop_ob", 0.3),
+                SetupType.FVG: getattr(self.config, "smc_atr_stop_fvg", 0.4),
+                SetupType.BOS: getattr(self.config, "smc_atr_stop_bos", 0.6),
+                SetupType.TREND: getattr(self.config, "smc_atr_stop_trend", 0.6),
+            }
+            stop_mult = Decimal(str(_stop_map.get(setup_type, 0.5)))
+        elif regime == "tight_smc":
             stop_mult = Decimal(str((self.config.tight_smc_atr_stop_min + self.config.tight_smc_atr_stop_max) / 2))
         else:
             stop_mult = Decimal(str((self.config.wide_structure_atr_stop_min + self.config.wide_structure_atr_stop_max) / 2))

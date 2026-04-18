@@ -199,6 +199,42 @@ class FibonacciEngine:
             return ext_1_272
         return ext_1_618
     
+    def check_multi_tf_confluence(
+        self,
+        fib_4h: FibonacciLevels,
+        fib_1h: FibonacciLevels,
+        tolerance_bps: float = 30.0,
+    ) -> bool:
+        """Check if 4H OTE zone overlaps with 1H retracement zone.
+
+        Per EmperorBTC scalping cheat sheet: draw Fibs on 4H swing, draw
+        Fibs on 1H swing, find the confluence. Signal is stronger when
+        both timeframes agree on the entry zone.
+
+        Args:
+            fib_4h: Fibonacci levels from 4H candles.
+            fib_1h: Fibonacci levels from 1H candles.
+            tolerance_bps: Allowed gap in basis points for "overlap".
+
+        Returns:
+            True if the 4H OTE zone overlaps the 1H 0.618-0.786 zone.
+        """
+        tol = Decimal(str(tolerance_bps / 10000))
+        # 4H OTE zone: 0.705 - 0.79
+        ote_low_4h = fib_4h.ote_low
+        ote_high_4h = fib_4h.ote_high
+        # 1H retracement zone: 0.618 - 0.786
+        ret_low_1h = fib_1h.fib_0_618
+        ret_high_1h = fib_1h.fib_0_786
+
+        # Expand both zones by tolerance
+        tol_4h = fib_4h.range_size * tol
+        tol_1h = fib_1h.range_size * tol
+
+        return (ote_low_4h - tol_4h) <= (ret_high_1h + tol_1h) and (
+            ret_low_1h - tol_1h
+        ) <= (ote_high_4h + tol_4h)
+
     def _find_swing_points(
         self,
         candles: List[Candle],

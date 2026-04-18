@@ -15,27 +15,78 @@ from src.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
 
+SCORER_WEIGHTS = {
+    "phase_ad": {
+        "fib": 1.0, "htf": 1.0, "cost": 1.0, "rsi_div": 1.0,
+        "volume": 1.0, "structure": 1.0, "fib_1h": 1.0,
+        "adx": 1.0, "ema_slope": 1.0,
+        "cost_max": 25.0, "structure_max": 12.0,
+        "structure_gate": False,
+        # Phase 1: freshness scoring disabled under phase_ad (backward compat)
+        "freshness": 0.0, "freshness_max": 10.0,
+    },
+    "structure_primary": {
+        "fib": 0.0, "htf": 0.0, "cost": 1.0, "rsi_div": 0.0,
+        "volume": 0.0, "structure": 0.0, "fib_1h": 0.0,
+        "adx": 0.0, "ema_slope": 0.0,
+        "cost_max": 20.0, "structure_max": 0.0,
+        "structure_gate": True,  # structure is a hard gate, not a scored component
+        # Phase 1: level freshness adds a second scored dimension (0-30pt total)
+        "freshness": 1.0, "freshness_max": 10.0,
+    },
+}
+
 
 @dataclass
 class SignalScore:
-    """Composite quality score for a signal with breakdown."""
+    """Composite quality score for a signal with breakdown.
+
+    Two scorer versions (selected via config.scorer_version):
+    - phase_ad: 8-component ~100pt scale (legacy, fib+htf+cost+vol+struct+fib_1h)
+    - structure_primary: structure is a hard gate (pass/fail), scored total is
+      cost_efficiency only (0-20pt scale). All other components computed for
+      logging but excluded from total. Validated by 400-day forward return
+      analysis showing structure confirmation positive across all symbols.
+    """
     total_score: float  # 0-100
-    smc_quality: float  # 0-25
+    smc_quality: float  # 0-25 (computed for logging, NOT in total)
     fib_confluence: float  # 0-20
     htf_alignment: float  # 0-20
-    adx_strength: float  # 0-15
-    cost_efficiency: float  # 0-20
-    ema_slope: float = 0.0  # 0-15 (bonus when slope aligns with direction)
-    
+    trend_confirmation: float  # 0-12 (structure confirmation)
+    cost_efficiency: float  # 0-25 (signal quality composite — cluster representative)
+    volume_confirmation: float = 0.0  # 0-15
+    rsi_divergence: float = 0.0  # 0-10 (currently zeroed, kept for re-evaluation)
+    fib_1h_confluence: float = 0.0  # 0-8
+    adx_gradient: float = 0.0  # 0-6 (computed for logging, NOT in total)
+    # Phase 1: level freshness quality (0-10 in structure_primary; unused in phase_ad)
+    level_freshness: float = 0.0
+    # Backward compat aliases (deprecated, read-only)
+    adx_strength: float = 0.0
+    ema_slope: float = 0.0
+    scorer_version: str = "phase_ad"
+
     def get_grade(self) -> str:
         """Convert score to letter grade."""
-        if self.total_score >= 80:
+        if self.scorer_version == "structure_primary":
+            # 30-point scale (cost + freshness): A≥24, B≥18, C≥12, D≥7
+            if self.total_score >= 24:
+                return "A"
+            elif self.total_score >= 18:
+                return "B"
+            elif self.total_score >= 12:
+                return "C"
+            elif self.total_score >= 7:
+                return "D"
+            else:
+                return "F"
+        # phase_ad: 100-point scale
+        if self.total_score >= 65:
             return "A"
-        elif self.total_score >= 65:
-            return "B"
         elif self.total_score >= 50:
-            return "C"
+            return "B"
         elif self.total_score >= 35:
+            return "C"
+        elif self.total_score >= 25:
             return "D"
         else:
             return "F"
@@ -59,7 +110,11 @@ class SignalScorer:
             config: Strategy configuration for thresholds
         """
         self.config = config
-        logger.info("SignalScorer initialized", 
+        version_override = os.getenv("REPLAY_OVERRIDE_SCORER_VERSION")
+        self._scorer_version = version_override or getattr(config, "scorer_version", "phase_ad")
+        self._weights = SCORER_WEIGHTS.get(self._scorer_version, SCORER_WEIGHTS["phase_ad"])
+        logger.info("SignalScorer initialized",
+                    scorer_version=self._scorer_version,
                     tight_aligned=config.min_score_tight_smc_aligned,
                     wide_aligned=config.min_score_wide_structure_aligned)
     
@@ -70,82 +125,145 @@ class SignalScorer:
         fib_levels: Optional[FibonacciLevels],
         adx: float,
         cost_bps: Decimal,
-        bias: str
+        bias: str,
+        rsi_divergence: str = "none",
+        volume_ratio: float = 0.0,
+        market_structure_state: str = "neutral",
+        fib_1h_overlap: bool = False,
     ) -> SignalScore:
-        """
-        Calculate composite quality score for a signal.
-        
+        """Calculate composite quality score for a signal.
+
         Args:
             signal: Generated signal
             structures: SMC structures dict (OB, FVG, BOS)
             fib_levels: Fibonacci levels (if available)
-            adx: ADX value for trend strength
+            adx: ADX value for trend strength (legacy, used when adx_scoring_enabled=True)
             cost_bps: Estimated cost in basis points
             bias: HTF bias (bullish/bearish/neutral)
-        
+            rsi_divergence: RSI divergence state ("bullish", "bearish", or "none")
+            volume_ratio: Breakout volume / 20-period avg volume (0 = no data)
+            market_structure_state: From MarketStructureTracker ("bullish", "bearish", "neutral")
+            fib_1h_overlap: True if 4H OTE overlaps 1H retracement zone
+
         Returns:
             SignalScore with total and component scores
         """
-        # Score each component
+        w = self._weights
+
+        # Compute all components (always, for logging regardless of version)
         smc_score = self._score_smc_quality(structures)
         fib_score = self._score_fib_confluence(signal, fib_levels)
         htf_score = self._score_htf_alignment(signal, bias)
-        adx_score = self._score_adx_strength(adx)
-        cost_score = self._score_cost_efficiency(signal, cost_bps)
-        ema_slope_score = self._score_ema_slope(signal)
+        cost_score = self._score_cost_efficiency(signal, cost_bps, max_points=w["cost_max"])
+        rsi_div_score = self._score_rsi_divergence(signal, rsi_divergence)
+        vol_score = self._score_volume_confirmation(volume_ratio)
+        # Always compute structure at its natural scale (12pts) for logging and gate checks.
+        # In structure_primary mode, it's a hard gate not a scored component — weight is 0.
+        struct_score = self._score_structure_confirmation(signal, market_structure_state, max_points=12.0)
+        fib_1h_score = self._score_fib_1h_confluence(fib_1h_overlap)
+        adx_gradient = self._score_adx_gradient(adx)
+        freshness_score = self._score_level_freshness(
+            structures, max_points=w.get("freshness_max", 10.0), symbol=signal.symbol
+        )
 
-        total = smc_score + fib_score + htf_score + adx_score + cost_score + ema_slope_score
+        # Legacy fallbacks (enabled via config flags for A/B testing)
+        adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
+        ema_slope_score = self._score_ema_slope(signal) if not getattr(self.config, "volume_score_enabled", True) else 0.0
+
+        # Apply version weights — structure_primary zeros everything except
+        # structure + cost + freshness; phase_ad keeps all components at weight 1.0
+        # (freshness still 0 under phase_ad for backward compat).
+        # SMC and adx_gradient are always excluded from total (redundant cluster).
+        total = (
+            w["fib"] * fib_score
+            + w["htf"] * htf_score
+            + w["cost"] * cost_score
+            + w["rsi_div"] * rsi_div_score
+            + w["volume"] * vol_score
+            + w["structure"] * struct_score
+            + w["fib_1h"] * fib_1h_score
+            + w["adx"] * adx_score
+            + w["ema_slope"] * ema_slope_score
+            + w.get("freshness", 0.0) * freshness_score
+        )
 
         score = SignalScore(
             total_score=total,
             smc_quality=smc_score,
             fib_confluence=fib_score,
             htf_alignment=htf_score,
-            adx_strength=adx_score,
+            trend_confirmation=struct_score,
             cost_efficiency=cost_score,
+            volume_confirmation=vol_score,
+            rsi_divergence=rsi_div_score,
+            fib_1h_confluence=fib_1h_score,
+            adx_gradient=adx_gradient,
+            level_freshness=freshness_score,
+            adx_strength=adx_score,
             ema_slope=ema_slope_score,
+            scorer_version=self._scorer_version,
         )
 
         logger.debug(
             "Signal scored",
             symbol=signal.symbol,
+            scorer_version=self._scorer_version,
             total=f"{total:.1f}",
             grade=score.get_grade(),
             breakdown={
                 "smc": f"{smc_score:.1f}",
                 "fib": f"{fib_score:.1f}",
+                "fib_1h": f"{fib_1h_score:.1f}",
                 "htf": f"{htf_score:.1f}",
-                "adx": f"{adx_score:.1f}",
+                "volume": f"{vol_score:.1f}",
+                "structure": f"{struct_score:.1f}",
                 "cost": f"{cost_score:.1f}",
-                "ema_slope": f"{ema_slope_score:.1f}",
+                "rsi_div": f"{rsi_div_score:.1f}",
+                "freshness": f"{freshness_score:.1f}",
             }
         )
-        
+
         return score
     
-    def check_score_gate(self, score: float, setup_type: str, bias: str) -> Tuple[bool, float]:
+    def check_score_gate(self, score: float, setup_type: str, bias: str, structure_confirmed: bool = True) -> Tuple[bool, float]:
         """
         Check if signal score passes the hard gate.
-        
+
         Returns:
             (passed: bool, threshold: float)
         """
         from src.domain.models import SetupType
-        
-        # Determine strictness based on regime/bias
-        is_tight = setup_type in [SetupType.OB, SetupType.FVG]
+
+        # Structure-primary: structure confirmation is a hard gate
+        if self._weights.get("structure_gate") and not structure_confirmed:
+            return False, 0.0
+
         is_aligned = bias != "neutral"
-        
-        if is_tight:
+
+        # Structure-primary scorer: cost-only thresholds (0-20 scale)
+        if self._scorer_version == "structure_primary":
             if is_aligned:
-                threshold = self.config.min_score_tight_smc_aligned
+                threshold = getattr(self.config, "min_score_structure_primary_aligned", 10.0)
             else:
-                threshold = self.config.min_score_tight_smc_neutral
-        else: # wide_structure (BOS/TREND)
+                threshold = getattr(self.config, "min_score_structure_primary_neutral", 12.0)
+        elif getattr(self.config, "unified_regime_enabled", True):
             if is_aligned:
-                threshold = self.config.min_score_wide_structure_aligned
+                threshold = getattr(self.config, "min_score_smc_aligned", 60.0)
             else:
-                threshold = self.config.min_score_wide_structure_neutral
+                threshold = getattr(self.config, "min_score_smc_neutral", 65.0)
+        else:
+            # Legacy: tight_smc vs wide_structure thresholds
+            is_tight = setup_type in [SetupType.OB, SetupType.FVG]
+            if is_tight:
+                if is_aligned:
+                    threshold = self.config.min_score_tight_smc_aligned
+                else:
+                    threshold = self.config.min_score_tight_smc_neutral
+            else:
+                if is_aligned:
+                    threshold = self.config.min_score_wide_structure_aligned
+                else:
+                    threshold = self.config.min_score_wide_structure_neutral
 
         override = os.getenv("REPLAY_OVERRIDE_SCORE_GATE_THRESHOLD")
         if override is not None and override.strip():
@@ -159,24 +277,32 @@ class SignalScorer:
     def _score_smc_quality(self, structures: Dict) -> float:
         """
         Score SMC structure quality (0-25 points).
-        
-        Scoring:
-        - Order Block present: +10
-        - FVG present: +8
-        - BOS confirmed: +7
-        - Max: 25 (all structures)
+
+        Continuous scoring based on structure strength:
+        - Order Block: 7.5–15 scaled by displacement ratio
+        - FVG: 5–12 scaled by gap size
+        - BOS: 5–10 scaled by confirmation strength
+        - Max: 25 (capped)
         """
         score = 0.0
-        
-        if structures.get("order_block"):
-            score += 10.0
-        
-        if structures.get("fvg"):
-            score += 8.0
-        
-        if structures.get("bos"):
-            score += 7.0
-        
+
+        ob = structures.get("order_block")
+        if ob:
+            displacement = ob.get("displacement_ratio", 1.5) if isinstance(ob, dict) else 1.5
+            # Scale: 1.5x displacement = 7.5 pts, 3.0x = 15 pts
+            score += min(10.0 * displacement / 2.0, 15.0)
+
+        fvg = structures.get("fvg")
+        if fvg:
+            gap_pct = fvg.get("gap_size_pct", 0.001) if isinstance(fvg, dict) else 0.001
+            # Scale: 0.07% = 5 pts, 0.3% = 12 pts
+            score += min(5.0 + gap_pct * 2333.0, 12.0)
+
+        bos = structures.get("bos")
+        if bos:
+            confirmation = bos.get("confirmation_strength", 1.0) if isinstance(bos, dict) else 1.0
+            score += min(5.0 + confirmation * 2.5, 10.0)
+
         return min(score, 25.0)
     
     def _effective_fib_proximity_bps(self, signal: Signal) -> float:
@@ -246,7 +372,8 @@ class SignalScorer:
         Score HTF alignment (-penalty to +20 points).
 
         Logic:
-        - Direction aligned with Bias: +20
+        - Direction aligned with Bias AND inside weekly zone: +20
+        - Direction aligned with Bias, outside weekly zone: +12
         - Bias Neutral: +10
         - Counter-trend: -counter_trend_score_penalty (default -5)
         """
@@ -259,12 +386,28 @@ class SignalScorer:
         is_long = signal.signal_type == SignalType.LONG
 
         if (is_bullish and is_long) or (not is_bullish and not is_long):
-            return 20.0
+            # Aligned — check if inside weekly zone for full bonus
+            inside_zone = getattr(signal, "inside_weekly_zone", None)
+            if inside_zone:
+                return 20.0
+            return 12.0  # Aligned but outside weekly zone
 
         # Counter-trend: apply negative penalty so signal must score higher elsewhere
         penalty = getattr(self.config, "counter_trend_score_penalty", 5.0)
         return -penalty
     
+    def _score_adx_gradient(self, adx: float) -> float:
+        """ADX gradient bonus (0-6 points).
+
+        Uses ADX data already computed for the hard gate to add dynamic range.
+        ADX 20-25: 0, ADX 25-35: +3, ADX 35+: +6.
+        """
+        if adx >= 35.0:
+            return 6.0
+        if adx >= 25.0:
+            return 3.0
+        return 0.0
+
     def _score_adx_strength(self, adx: float) -> float:
         """
         Score ADX trend strength (0-15 points).
@@ -287,22 +430,69 @@ class SignalScorer:
         else:
             return 0.0
     
-    def _score_cost_efficiency(self, signal: Signal, cost_bps: Decimal) -> float:
-        """
-        Score cost efficiency (0-20 points).
+    def _score_cost_efficiency(self, signal: Signal, cost_bps: Decimal, max_points: float = 25.0) -> float:
+        """Score signal quality via cost efficiency.
 
-        Lower cost relative to potential reward = higher score.
+        Collapsed cluster representative for SMC/cost/adx_grad (Phase 2).
+        Linear scale: 0 bps = max_points, 50 bps = 0 pts.
         """
-        if cost_bps <= Decimal("10"):
-            return 20.0
-        elif cost_bps <= Decimal("20"):
-            return 15.0
-        elif cost_bps <= Decimal("30"):
-            return 10.0
-        elif cost_bps <= Decimal("50"):
-            return 5.0
-        else:
+        cost_float = float(cost_bps)
+        if cost_float >= 50.0:
             return 0.0
+        return max(0.0, max_points * (1.0 - cost_float / 50.0))
+
+    def _score_level_freshness(
+        self,
+        structures: Dict,
+        max_points: float = 10.0,
+        symbol: Optional[str] = None,
+    ) -> float:
+        """Score level freshness (Phase 1: Gap 1 — untouched levels outperform tested).
+
+        Calibrated from 400-day replay (N=626 signals, FVG mode=full):
+          - OB body_freshness (Moneytaur institutional zone) shows monotonic
+            forward-return ordering: untouched +2.80%, partial +2.59%, tested +1.48%
+          - OB wick_freshness showed a partial>untouched inversion driven by zone
+            misclassification (39/92 wick-partial entries were body-untouched)
+          - FVG freshness was non-monotonic (noise): +2.24% / +1.98% / +2.32%
+
+        Scorer therefore reads OB body_freshness and drops FVG from the blend.
+        FVG freshness is still captured in structure_info for Phase 2 multi-TF
+        research but contributes 0 to the live score.
+
+        Per-symbol kill-switch: freshness_disabled_symbols holds symbols where
+        the per-symbol IC check failed (the aggregate edge does not hold).
+        SOL/USD inverts the signal (IC −0.064; tested +3.07% > untouched +1.81%);
+        likely a volatility/zone-width interaction to be diagnosed before Phase 2.
+        Disabled symbols return 0.0 (neutral) rather than mis-scoring.
+
+        Per-level base:
+            fully_untouched      → 1.0
+            partially_mitigated  → 0.85  (slightly lower mean return, higher hit rate)
+            fully_tested         → 0.0
+        """
+        disabled = set(getattr(self.config, "freshness_disabled_symbols", []) or [])
+        if symbol and symbol in disabled:
+            return 0.0
+
+        age_threshold = int(getattr(self.config, "freshness_age_bonus_threshold", 10))
+        age_multiplier = float(getattr(self.config, "freshness_age_bonus_multiplier", 1.2))
+
+        ob = structures.get("order_block")
+        if not ob or not isinstance(ob, dict):
+            return 0.0
+
+        grade = ob.get("body_freshness") or ob.get("freshness", "fully_untouched")
+        base = {
+            "fully_untouched": 1.0,
+            "partially_mitigated": 0.85,
+            "fully_tested": 0.0,
+        }.get(grade, 0.0)
+        age = int(ob.get("age_candles", 0) or 0)
+        if grade == "fully_untouched" and age >= age_threshold:
+            base = min(1.0, base * age_multiplier)
+
+        return base * max_points
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).
@@ -321,6 +511,66 @@ class SignalScorer:
 
         is_long = signal.signal_type == SignalType.LONG
         if (slope == "up" and is_long) or (slope == "down" and not is_long):
+            return bonus
+
+        return 0.0
+
+    def _score_fib_1h_confluence(self, fib_1h_overlap: bool) -> float:
+        """Score 1H Fibonacci confluence with 4H OTE (0-8 points).
+
+        Awards bonus when 4H OTE zone overlaps 1H retracement zone,
+        per EmperorBTC's multi-TF Fibonacci methodology.
+        """
+        if not getattr(self.config, "fib_1h_confluence_enabled", True):
+            return 0.0
+        if fib_1h_overlap:
+            return getattr(self.config, "fib_1h_confluence_bonus", 8.0)
+        return 0.0
+
+    def _score_volume_confirmation(self, volume_ratio: float) -> float:
+        """Score breakout volume confirmation (0-15 points).
+
+        Volume ratio is breakout candle volume / 20-period average volume.
+        Thresholds from MoneyTaur: strong (1.5x) and moderate (1.2x).
+        """
+        if not getattr(self.config, "volume_score_enabled", True):
+            return 0.0
+        high_mult = getattr(self.config, "volume_score_high_mult", 1.5)
+        low_mult = getattr(self.config, "volume_score_low_mult", 1.2)
+        if volume_ratio >= high_mult:
+            return 15.0
+        if volume_ratio >= low_mult:
+            return 8.0
+        return 0.0
+
+    def _score_structure_confirmation(self, signal: Signal, market_structure_state: str, max_points: float = 12.0) -> float:
+        """Score market structure confirmation.
+
+        Awards points when MarketStructureTracker state (HH/HL or LH/LL)
+        confirms the signal direction. Replaces ADX as trend filter.
+        max_points is set by the scorer weight profile (12 for phase_ad, 50 for structure_primary).
+        """
+        if not getattr(self.config, "structure_confirmation_score_enabled", True):
+            return 0.0
+        is_long = signal.signal_type == SignalType.LONG
+        if (market_structure_state == "bullish" and is_long) or (
+            market_structure_state == "bearish" and not is_long
+        ):
+            return max_points
+        return 0.0
+
+    def _score_rsi_divergence(self, signal: Signal, divergence: str) -> float:
+        """Score RSI divergence alignment with signal direction (0 to rsi_divergence_score_bonus).
+
+        Awards bonus when 1H RSI divergence confirms signal direction:
+        bullish divergence + LONG = bonus, bearish divergence + SHORT = bonus.
+        """
+        bonus = getattr(self.config, "rsi_divergence_score_bonus", 10.0)
+        if bonus <= 0 or divergence == "none":
+            return 0.0
+
+        is_long = signal.signal_type == SignalType.LONG
+        if (divergence == "bullish" and is_long) or (divergence == "bearish" and not is_long):
             return bonus
 
         return 0.0

@@ -135,7 +135,7 @@ risk:
   tight_stop_threshold_pct: 0.015  # Definition of "tight stop" (1.5%)
   funding_cost_threshold_pct: 0.02  # Optional: block entries if projected funding > 2%
   fee_edge_guard_enabled: true  # Deterministic TP1 edge-vs-cost gate to prevent fee-dominated entries
-  fee_edge_multiple_k: 5.0  # Require edge_bps >= fee_bps_rt * k
+  fee_edge_multiple_k: 3.0  # Require edge_bps >= fee_bps_rt * k (5x too aggressive for perps)
   fee_edge_use_conservative_taker: true  # Assume taker-like roundtrip cost for conservative gating
   fee_edge_slippage_bps_est: 4.0
   fee_edge_funding_floor_bps: 2.0
@@ -163,7 +163,7 @@ risk:
   tight_smc_cost_cap_bps: 25.0
   tight_smc_min_rr_multiple: 2.0
   tight_smc_avg_hold_hours: 6.0
-  wide_structure_max_distortion_pct: 0.15
+  wide_structure_max_distortion_pct: 0.35  # Raised from 0.25 — 29-30% distortion was blocking all aligned signals
   wide_structure_avg_hold_hours: 36.0
   wide_structure_funding_hard_cap_bps: 15.0
   
@@ -210,7 +210,7 @@ strategy:
   atr_period: 14
   atr_multiplier_stop: 1.5  # ATR multiplier for stop-loss buffer
   rsi_period: 14
-  rsi_divergence_enabled: false  # Optional confirmation only
+  rsi_divergence_enabled: true  # Wired into signal scoring per MoneyTaur methodology
   
   # SMC Parameters
   orderblock_lookback: 50
@@ -231,6 +231,8 @@ strategy:
 
   # V2.3 Scoring & Regimes (Slightly relaxed)
   ema_neutral_zone_bps: 10.0
+  min_score_smc_aligned: 45.0  # Unified regime — signals typically score 28-53; 60 was unreachable
+  min_score_smc_neutral: 50.0  # Neutral bias — slightly higher bar since no HTF alignment bonus
   min_score_tight_smc_aligned: 55.0  # Relaxed — aligned bias gives +20 HTF so ceiling is high
   min_score_tight_smc_neutral: 35.0  # Neutral bias caps HTF at 10 and kills EMA slope → max realistic ~60, must be low
   min_score_wide_structure_aligned: 50.0  # Wide structure has fewer SMC points
@@ -357,11 +359,11 @@ execution:
 ## Multi-TP Configuration (V2)
 multi_tp:
   enabled: true
-  tp1_r_multiple: 1.0   # Close 40% at 1R
-  tp1_close_pct: 0.40
-  tp2_r_multiple: 2.5   # Close 40% at 2.5R
-  tp2_close_pct: 0.40
-  runner_pct: 0.20      # Keep 20% as runner
+  tp1_r_multiple: 0.75  # Raised from 0.5R — zero-drawdown profile gives room to let winners run
+  tp1_close_pct: 0.50   # Reduced from 60% — less defensive on symbols showing edge
+  tp2_r_multiple: 1.5   # Close 25% at 1.5R — tighter TP2 so more trades reach it
+  tp2_close_pct: 0.25
+  runner_pct: 0.25      # Raised from 15% — more runner allocation on trend-following (50/25/25 split)
   move_sl_to_be_after_tp1: true  # Auto move to breakeven after TP1
   trailing_stop_enabled: true    # Enable trailing for runner
   trailing_stop_atr_multiplier: 1.5
@@ -384,18 +386,18 @@ multi_tp:
   # Regime-aware runner sizing: auto-adjust runner % based on market structure
   regime_runner_sizing_enabled: true
   regime_runner_overrides:
-    tight_smc:             # OB/FVG setups: smaller runner, bigger TP1/TP2
+    tight_smc:             # OB/FVG setups: take profit early, small runner
       runner_pct: 0.10
-      tp1_close_pct: 0.50
-      tp2_close_pct: 0.40
+      tp1_close_pct: 0.65
+      tp2_close_pct: 0.25
     wide_structure:        # BOS/TREND setups: bigger runner for trend capture
-      runner_pct: 0.30
-      tp1_close_pct: 0.35
-      tp2_close_pct: 0.35
-    consolidation:         # Ranging market: small runner, take profits quickly
-      runner_pct: 0.10
+      runner_pct: 0.25
       tp1_close_pct: 0.50
-      tp2_close_pct: 0.40
+      tp2_close_pct: 0.25
+    consolidation:         # Ranging market: take profit fast, tiny runner
+      runner_pct: 0.05
+      tp1_close_pct: 0.70
+      tp2_close_pct: 0.25
   # Hybrid exit mode (feature-flagged): choose runner vs fixed TP3 by regime
   hybrid_exit_mode_enabled: false
   hybrid_exit_canary_symbols: []  # Empty = all symbols when enabled

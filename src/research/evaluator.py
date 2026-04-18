@@ -6,6 +6,7 @@ import asyncio
 import csv
 import hashlib
 import os
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -265,6 +266,7 @@ class CandidateEvaluator:
                     end=end_date.isoformat(),
                     error=str(exc),
                     error_type=type(exc).__name__,
+                    traceback=traceback.format_exc(),
                 )
             finally:
                 if getattr(engine, "client", None):
@@ -713,6 +715,10 @@ def _apply_params(config: Config, params: dict[str, float]) -> None:
         if not tail:
             continue
         section = getattr(config, head)
+        # Coerce to int when the field is typed as int to avoid type mismatches
+        current = getattr(section, tail, None)
+        if isinstance(current, int) and not isinstance(current, bool):
+            value = int(round(value))
         setattr(section, tail, value)
 
 
