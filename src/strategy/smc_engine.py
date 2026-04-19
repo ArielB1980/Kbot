@@ -37,6 +37,11 @@ FRESHNESS_UNTOUCHED = "fully_untouched"
 FRESHNESS_PARTIAL = "partially_mitigated"
 FRESHNESS_TESTED = "fully_tested"
 
+# Multi-TF zone-body relation (Phase 2A: OB stacking)
+ZONE_RELATION_CONTAINED = "contained"
+ZONE_RELATION_OVERLAPPING = "overlapping"
+ZONE_RELATION_NONE = "none"
+
 
 @dataclass
 class HigherTFContext:
@@ -1979,6 +1984,30 @@ class SMCEngine:
         if any(t in (TOUCH_BODY_PARTIAL, TOUCH_BODY_FULL) for t in touch_types):
             return FRESHNESS_TESTED
         return FRESHNESS_PARTIAL
+
+    @staticmethod
+    def _compute_zone_relation(
+        inner_low: Decimal,
+        inner_high: Decimal,
+        outer_low: Decimal,
+        outer_high: Decimal,
+    ) -> str:
+        """Classify how an inner body range relates to an outer body range.
+
+        Pass body-range values only (min/max(open, close)). Direction/bias is
+        NOT checked here — callers check separately so bias-conflicted stacks
+        can be logged (not silently rejected).
+
+        Returns one of:
+          - ZONE_RELATION_CONTAINED   : inner fully inside outer (inclusive)
+          - ZONE_RELATION_OVERLAPPING : any overlap that isn't containment
+          - ZONE_RELATION_NONE        : disjoint ranges
+        """
+        if inner_high < outer_low or inner_low > outer_high:
+            return ZONE_RELATION_NONE
+        if inner_low >= outer_low and inner_high <= outer_high:
+            return ZONE_RELATION_CONTAINED
+        return ZONE_RELATION_OVERLAPPING
 
     def _find_fair_value_gap(
         self,

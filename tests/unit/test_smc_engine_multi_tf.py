@@ -149,6 +149,54 @@ def test_weekly_completed_drops_leading_partial_week():
     assert weekly[0].timestamp.isocalendar().week == 3
 
 
+# --- _compute_zone_relation ----------------------------------------------
+
+
+def test_zone_relation_contained():
+    # inner [100, 102] fully inside outer [99, 105]
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("100"), Decimal("102"), Decimal("99"), Decimal("105"),
+    )
+    assert rel == "contained"
+
+
+def test_zone_relation_contained_on_exact_boundary():
+    # inner exactly equal to outer — contained (inclusive bounds)
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("100"), Decimal("105"), Decimal("100"), Decimal("105"),
+    )
+    assert rel == "contained"
+
+
+def test_zone_relation_overlapping_from_below():
+    # inner [98, 101] overlaps outer [100, 105] from below
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("98"), Decimal("101"), Decimal("100"), Decimal("105"),
+    )
+    assert rel == "overlapping"
+
+
+def test_zone_relation_overlapping_from_above():
+    # inner [103, 107] overlaps outer [100, 105] from above
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("103"), Decimal("107"), Decimal("100"), Decimal("105"),
+    )
+    assert rel == "overlapping"
+
+
+def test_zone_relation_none():
+    # inner entirely above outer
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("110"), Decimal("115"), Decimal("100"), Decimal("105"),
+    )
+    assert rel == "none"
+    # inner entirely below outer
+    rel = SMCEngine._compute_zone_relation(
+        Decimal("90"), Decimal("95"), Decimal("100"), Decimal("105"),
+    )
+    assert rel == "none"
+
+
 # --- integration guard: legacy _to_weekly_candles is unchanged -----------
 
 
