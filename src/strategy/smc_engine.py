@@ -4,7 +4,7 @@ SMC (Smart Money Concepts) signal generation engine.
 Design lock enforced: Operates on spot market data ONLY.
 No futures prices, funding data, or order book data may be accessed.
 """
-from typing import Any, ClassVar, List, Optional, Dict, Tuple, Literal
+from typing import Any, ClassVar, List, Optional, Dict, Tuple, Literal, cast
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -1296,6 +1296,7 @@ class SMCEngine:
                     passed, threshold = self.signal_scorer.check_score_gate(score_obj.total_score, setup_type, bias, structure_confirmed=structure_confirmed)
                     
                     if not passed:
+                        _stack_rej = cast(Dict[str, Any], (structure_signal or {}).get("tf_stack") or {})
                         score_breakdown = {
 
                             "smc": float(score_obj.smc_quality),
@@ -1308,6 +1309,10 @@ class SMCEngine:
                             "adx_grad": float(score_obj.adx_gradient),
                             "cost": float(score_obj.cost_efficiency),
                             "freshness": float(score_obj.level_freshness),
+                            "tf_stack_depth_contained": float(_stack_rej.get("tf_stack_depth_contained", 0)),
+                            "tf_stack_depth_overlapping": float(_stack_rej.get("tf_stack_depth_overlapping", 0)),
+                            "tf_stack_bias_conflict": float(bool(_stack_rej.get("tf_stack_bias_conflict", False))),
+                            "tf_stack_score": float(score_obj.tf_stack_score),
                             "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                             "higher_tf_penalty": float(higher_tf_penalty),
                             "thesis_conviction": float(thesis_snapshot.get("conviction", 0.0)) if thesis_snapshot else 0.0,
@@ -1344,6 +1349,7 @@ class SMCEngine:
                         conviction_min_for_entry = self._resolve_conviction_min_for_entry(symbol)
                         conviction_val = float(thesis_snapshot.get("conviction", 100.0)) if thesis_snapshot else 100.0
                         if conviction_entry_gate_enabled and conviction_val < conviction_min_for_entry:
+                            _stack_conv = cast(Dict[str, Any], (structure_signal or {}).get("tf_stack") or {})
                             score_breakdown = {
 
                                 "smc": float(score_obj.smc_quality),
@@ -1355,6 +1361,10 @@ class SMCEngine:
                                 "fib_1h": float(score_obj.fib_1h_confluence),
                                 "cost": float(score_obj.cost_efficiency),
                                 "freshness": float(score_obj.level_freshness),
+                                "tf_stack_depth_contained": float(_stack_conv.get("tf_stack_depth_contained", 0)),
+                                "tf_stack_depth_overlapping": float(_stack_conv.get("tf_stack_depth_overlapping", 0)),
+                                "tf_stack_bias_conflict": float(bool(_stack_conv.get("tf_stack_bias_conflict", False))),
+                                "tf_stack_score": float(score_obj.tf_stack_score),
                                 "higher_tf_bonus": float(higher_tf_context.weekly_confluence_bonus) if higher_tf_context else 0.0,
                                 "higher_tf_penalty": float(higher_tf_penalty),
                                 "thesis_conviction": conviction_val,
@@ -1415,9 +1425,10 @@ class SMCEngine:
                                     )
 
                         reasoning_parts.append(f"✓ Score Passed: {score_obj.total_score:.1f} >= {threshold}")
-                        
+
                         # Create FINAL signal
                         # Ensure ADX and ATR are Decimal types
+                        _stack_final = cast(Dict[str, Any], (structure_signal or {}).get("tf_stack") or {})
                         signal = Signal(
                             timestamp=timestamp,
                             symbol=symbol,
@@ -1447,6 +1458,10 @@ class SMCEngine:
                                 "adx_grad": score_obj.adx_gradient,
                                 "cost": score_obj.cost_efficiency,
                                 "freshness": score_obj.level_freshness,
+                                "tf_stack_depth_contained": float(_stack_final.get("tf_stack_depth_contained", 0)),
+                                "tf_stack_depth_overlapping": float(_stack_final.get("tf_stack_depth_overlapping", 0)),
+                                "tf_stack_bias_conflict": float(bool(_stack_final.get("tf_stack_bias_conflict", False))),
+                                "tf_stack_score": float(score_obj.tf_stack_score),
                                 "higher_tf_bonus": higher_tf_context.weekly_confluence_bonus if higher_tf_context else 0.0,
                                 "higher_tf_penalty": higher_tf_penalty,
                                 "thesis_conviction": thesis_snapshot.get("conviction") if thesis_snapshot else 0.0,

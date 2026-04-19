@@ -24,6 +24,8 @@ SCORER_WEIGHTS = {
         "structure_gate": False,
         # Phase 1: freshness scoring disabled under phase_ad (backward compat)
         "freshness": 0.0, "freshness_max": 10.0,
+        # Phase 2A: stacking scaffold disabled under phase_ad (backward compat)
+        "stacking": 0.0, "stacking_max": 10.0,
     },
     "structure_primary": {
         "fib": 0.0, "htf": 0.0, "cost": 1.0, "rsi_div": 0.0,
@@ -33,6 +35,9 @@ SCORER_WEIGHTS = {
         "structure_gate": True,  # structure is a hard gate, not a scored component
         # Phase 1: level freshness adds a second scored dimension (0-30pt total)
         "freshness": 1.0, "freshness_max": 10.0,
+        # Phase 2A v1: stacking wired with weight 0 (logging only). Calibrate
+        # the formula inside _score_tf_stacking and flip to 1.0 post-validation.
+        "stacking": 0.0, "stacking_max": 10.0,
     },
 }
 
@@ -60,6 +65,8 @@ class SignalScore:
     adx_gradient: float = 0.0  # 0-6 (computed for logging, NOT in total)
     # Phase 1: level freshness quality (0-10 in structure_primary; unused in phase_ad)
     level_freshness: float = 0.0
+    # Phase 2A: multi-TF OB stacking score (0-10 in structure_primary v2; scaffold returns 0 in v1)
+    tf_stack_score: float = 0.0
     # Backward compat aliases (deprecated, read-only)
     adx_strength: float = 0.0
     ema_slope: float = 0.0
@@ -165,6 +172,9 @@ class SignalScorer:
         freshness_score = self._score_level_freshness(
             structures, max_points=w.get("freshness_max", 10.0), symbol=signal.symbol
         )
+        tf_stack_score = self._score_tf_stacking(
+            structures, max_points=w.get("stacking_max", 10.0), symbol=signal.symbol
+        )
 
         # Legacy fallbacks (enabled via config flags for A/B testing)
         adx_score = self._score_adx_strength(adx) if getattr(self.config, "adx_scoring_enabled", False) else 0.0
@@ -185,6 +195,7 @@ class SignalScorer:
             + w["adx"] * adx_score
             + w["ema_slope"] * ema_slope_score
             + w.get("freshness", 0.0) * freshness_score
+            + w.get("stacking", 0.0) * tf_stack_score
         )
 
         score = SignalScore(
@@ -199,6 +210,7 @@ class SignalScorer:
             fib_1h_confluence=fib_1h_score,
             adx_gradient=adx_gradient,
             level_freshness=freshness_score,
+            tf_stack_score=tf_stack_score,
             adx_strength=adx_score,
             ema_slope=ema_slope_score,
             scorer_version=self._scorer_version,
@@ -220,6 +232,7 @@ class SignalScorer:
                 "cost": f"{cost_score:.1f}",
                 "rsi_div": f"{rsi_div_score:.1f}",
                 "freshness": f"{freshness_score:.1f}",
+                "tf_stack": f"{tf_stack_score:.1f}",
             }
         )
 
@@ -493,6 +506,42 @@ class SignalScorer:
             base = min(1.0, base * age_multiplier)
 
         return base * max_points
+
+    def _score_tf_stacking(
+        self,
+        structures: Dict,
+        max_points: float = 10.0,
+        symbol: Optional[str] = None,
+    ) -> float:
+        """Score multi-TF OB stacking (Phase 2A: scaffold — returns 0 in v1).
+
+        Detection, metadata capture, and logging are wired in v1 so the 400-day
+        replay can produce tf_stack_depth_contained, tf_stack_depth_overlapping,
+        and tf_stack_bias_conflict distributions for forward-return analysis.
+        The formula here stays at 0.0 until that analysis validates the edge;
+        post-validation this is where calibration lives (weighted blend of
+        depth_contained vs overlapping, bias_conflict penalty, etc.).
+
+        Per-symbol kill-switch mirrors the freshness pattern: symbols listed in
+        stacking_disabled_symbols short-circuit to 0.0 once a per-symbol check
+        fails the aggregate edge.
+        """
+        if not getattr(self.config, "stacking_scoring_enabled", True):
+            return 0.0
+        disabled = set(getattr(self.config, "stacking_disabled_symbols", []) or [])
+        if symbol and symbol in disabled:
+            return 0.0
+
+        stack = structures.get("tf_stack") if isinstance(structures, dict) else None
+        if not stack or not isinstance(stack, dict):
+            return 0.0
+
+        # v1 scaffold — calibration lives here post-validation.
+        # Reference: stack.get("tf_stack_depth_contained"),
+        #            stack.get("tf_stack_depth_overlapping"),
+        #            stack.get("tf_stack_bias_conflict"),
+        #            max_points
+        return 0.0
 
     def _score_ema_slope(self, signal: Signal) -> float:
         """Score EMA200 slope alignment with signal direction (0 to ema_slope_bonus points).
