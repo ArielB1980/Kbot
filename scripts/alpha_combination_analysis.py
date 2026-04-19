@@ -71,6 +71,10 @@ SCORE_FEATURES = [
     "fib_1h",
     "adx_grad",
     "freshness",
+    "tf_stack_depth_contained",
+    "tf_stack_depth_overlapping",
+    "tf_stack_bias_conflict",
+    "tf_stack_score",
     "higher_tf_bonus",
     "higher_tf_penalty",
 ]
@@ -998,12 +1002,23 @@ async def generate_decision_data(
                     "fvg_age_candles": fvg.get("age_candles"),
                     "fvg_mitigation_depth": fvg.get("mitigation_depth"),
                 }
+                # Phase 2A: multi-TF OB stacking metadata. The per-TF dicts inside
+                # tf_stack carry raw zone_relation + bias for re-bucketing.
+                tf_stack = si.get("tf_stack") or {}
+                stacking_info = {
+                    "tf_stack_depth_contained": tf_stack.get("tf_stack_depth_contained"),
+                    "tf_stack_depth_overlapping": tf_stack.get("tf_stack_depth_overlapping"),
+                    "tf_stack_bias_conflict": tf_stack.get("tf_stack_bias_conflict"),
+                    "tf_stack_1d": tf_stack.get("tf_stack_1d"),
+                    "tf_stack_1w": tf_stack.get("tf_stack_1w"),
+                }
                 captured_signals.append({
                     "timestamp": str(getattr(result, "timestamp", datetime.now(UTC).isoformat())),
                     "symbol": getattr(result, "symbol", ""),
                     "event": "Signal accepted",
                     "score_breakdown": {k: float(v) if v is not None else 0.0 for k, v in bd.items()},
                     "freshness_info": freshness_info,
+                    "stacking_info": stacking_info,
                     "setup": str(getattr(result, "setup_type", "")),
                     "signal_type": str(getattr(result, "signal_type", "")),
                     "entry": float(getattr(result, "entry_price", 0)),
@@ -1110,6 +1125,13 @@ async def generate_decision_data(
             "fvg_mitigation_depth",
         ):
             row[key] = fi.get(key)
+        # Flatten stacking_info (Phase 2A multi-TF OB metadata). Scalar fields
+        # already surface via score_breakdown; the nested per-TF dicts carry
+        # zone_relation + bias for post-hoc bucketing beyond the two-bucket
+        # depth_contained / depth_overlapping cut.
+        sti = sig.get("stacking_info", {}) or {}
+        row["tf_stack_1d"] = sti.get("tf_stack_1d")
+        row["tf_stack_1w"] = sti.get("tf_stack_1w")
         rows.append(row)
 
     # Write JSONL
