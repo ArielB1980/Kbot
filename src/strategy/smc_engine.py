@@ -1797,12 +1797,104 @@ class SMCEngine:
                 )
                 return None
 
+        # Phase 2A: multi-TF level detection (logging only in v1 — scoring weight is 0).
+        # Signal timestamp = close time of the last decision candle.
+        last_dec = candles_1h[-1]
+        try:
+            signal_ts = last_dec.timestamp + SMCEngine._candle_duration(last_dec.timeframe)
+        except ValueError:
+            signal_ts = last_dec.timestamp
+        decision_tf_str = last_dec.timeframe
+        htf_levels = self._detect_multi_tf_levels(
+            symbol=symbol or "",
+            signal_timestamp=signal_ts,
+            decision_tf=decision_tf_str,
+        )
+
         return {
             'order_block': order_block,
             'fvg': fvg,
             'bos': bos,
+            '_htf_levels': htf_levels,
         }
-    
+
+    def _detect_multi_tf_levels(
+        self,
+        symbol: str,
+        signal_timestamp: datetime,
+        decision_tf: str,
+    ) -> Dict[str, Dict[str, Optional[dict]]]:
+        """Run OB/FVG detection on HTFs strictly higher than the decision TF.
+
+        Returns {"1d": {"order_block": ob_or_None, "fvg": fvg_or_None}, "1w": ...}.
+        A TF entry is omitted if no HTF candles are cached or the TF is not
+        strictly higher than the decision TF. HTF candle slices are lookahead-
+        safe (in-progress bars and partial ISO weeks are dropped at the cutoff).
+        """
+        if not symbol:
+            return {}
+        ctx = self._higher_tf_candle_context.get(symbol, {})
+        if not ctx:
+            return {}
+
+        try:
+            decision_duration = SMCEngine._candle_duration(decision_tf)
+        except ValueError:
+            return {}
+
+        result: Dict[str, Dict[str, Optional[dict]]] = {}
+        daily = ctx.get("1d") or []
+
+        # 1D detection
+        if daily and SMCEngine._candle_duration("1d") > decision_duration:
+            daily_completed = SMCEngine._slice_completed_candles(daily, signal_timestamp)
+            if daily_completed:
+                result["1d"] = self._detect_levels_on_series(
+                    daily_completed, symbol=symbol, timeframe_origin="1d",
+                )
+
+        # 1W detection (re-derived from daily with partial-week trim)
+        if daily and SMCEngine._candle_duration("1w") > decision_duration:
+            weekly_completed = SMCEngine._to_weekly_candles_completed(daily, signal_timestamp)
+            if weekly_completed:
+                result["1w"] = self._detect_levels_on_series(
+                    weekly_completed, symbol=symbol, timeframe_origin="1w",
+                )
+
+        return result
+
+    def _detect_levels_on_series(
+        self,
+        candles: List[Candle],
+        symbol: Optional[str],
+        timeframe_origin: str,
+    ) -> Dict[str, Optional[dict]]:
+        """Scan a candle series for the most recent OB and FVG of either bias.
+
+        Used for HTF level detection (1D, 1W). Overrides the hard-coded
+        "4h" timeframe_origin in the returned dicts so downstream logging
+        attributes levels to their true source TF.
+        """
+        ob_bull = self._find_order_block(candles, "bullish")
+        ob_bear = self._find_order_block(candles, "bearish")
+        if ob_bull and ob_bear:
+            order_block = ob_bull if ob_bull["index"] >= ob_bear["index"] else ob_bear
+        else:
+            order_block = ob_bull or ob_bear
+        if order_block is not None:
+            order_block["timeframe_origin"] = timeframe_origin
+
+        fvg_bull = self._find_fair_value_gap(candles, "bullish", symbol=symbol)
+        fvg_bear = self._find_fair_value_gap(candles, "bearish", symbol=symbol)
+        if fvg_bull and fvg_bear:
+            fvg = fvg_bull if fvg_bull["index"] >= fvg_bear["index"] else fvg_bear
+        else:
+            fvg = fvg_bull or fvg_bear
+        if fvg is not None:
+            fvg["timeframe_origin"] = timeframe_origin
+
+        return {"order_block": order_block, "fvg": fvg}
+
     def _find_order_block(self, candles: List[Candle], bias: str) -> Optional[dict]:
         """
         Find SMC-style Order Block:

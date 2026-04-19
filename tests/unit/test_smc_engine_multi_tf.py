@@ -16,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 
+from src.config.config import StrategyConfig
 from src.domain.models import Candle
 from src.strategy.smc_engine import SMCEngine
 
@@ -195,6 +196,99 @@ def test_zone_relation_none():
         Decimal("90"), Decimal("95"), Decimal("100"), Decimal("105"),
     )
     assert rel == "none"
+
+
+# --- _detect_multi_tf_levels wrapper gating ------------------------------
+
+
+def _make_engine() -> SMCEngine:
+    return SMCEngine(StrategyConfig())
+
+
+def test_detect_multi_tf_levels_empty_context_returns_empty():
+    engine = _make_engine()
+    out = engine._detect_multi_tf_levels(
+        symbol="BTC/USD",
+        signal_timestamp=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        decision_tf="4h",
+    )
+    assert out == {}
+
+
+def test_detect_multi_tf_levels_no_symbol_returns_empty():
+    engine = _make_engine()
+    engine._higher_tf_candle_context["BTC/USD"] = {
+        "1d": [_mk_candle("1d", datetime(2026, 1, 1, tzinfo=timezone.utc))]
+    }
+    out = engine._detect_multi_tf_levels(
+        symbol="",
+        signal_timestamp=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        decision_tf="4h",
+    )
+    assert out == {}
+
+
+def test_detect_multi_tf_levels_unknown_decision_tf_returns_empty():
+    engine = _make_engine()
+    engine._higher_tf_candle_context["BTC/USD"] = {
+        "1d": [_mk_candle("1d", datetime(2026, 1, 1, tzinfo=timezone.utc))]
+    }
+    out = engine._detect_multi_tf_levels(
+        symbol="BTC/USD",
+        signal_timestamp=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        decision_tf="3d",  # unsupported
+    )
+    assert out == {}
+
+
+def test_detect_multi_tf_levels_skips_tfs_not_strictly_higher():
+    # decision_tf = 1d → 1d is not strictly higher than itself; only 1w qualifies.
+    engine = _make_engine()
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)  # Monday, ISO week 2
+    daily = [_mk_candle("1d", base + timedelta(days=i)) for i in range(14)]
+    engine._higher_tf_candle_context["BTC/USD"] = {"1d": daily}
+    cutoff = base + timedelta(days=14)  # all 14 days complete
+    out = engine._detect_multi_tf_levels(
+        symbol="BTC/USD",
+        signal_timestamp=cutoff,
+        decision_tf="1d",
+    )
+    assert "1d" not in out
+    # 14 days span weeks 2 + 3, both full → 1w entry exists.
+    assert "1w" in out
+
+
+def test_detect_multi_tf_levels_includes_1d_for_4h_decision():
+    engine = _make_engine()
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    daily = [_mk_candle("1d", base + timedelta(days=i)) for i in range(14)]
+    engine._higher_tf_candle_context["BTC/USD"] = {"1d": daily}
+    cutoff = base + timedelta(days=14)
+    out = engine._detect_multi_tf_levels(
+        symbol="BTC/USD",
+        signal_timestamp=cutoff,
+        decision_tf="4h",
+    )
+    assert "1d" in out
+    # Structure of each TF entry: both OB and FVG keys present (values may be None).
+    assert set(out["1d"].keys()) == {"order_block", "fvg"}
+    assert "1w" in out
+    assert set(out["1w"].keys()) == {"order_block", "fvg"}
+
+
+def test_detect_multi_tf_levels_skips_1w_when_decision_is_1w():
+    engine = _make_engine()
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    daily = [_mk_candle("1d", base + timedelta(days=i)) for i in range(14)]
+    engine._higher_tf_candle_context["BTC/USD"] = {"1d": daily}
+    cutoff = base + timedelta(days=14)
+    out = engine._detect_multi_tf_levels(
+        symbol="BTC/USD",
+        signal_timestamp=cutoff,
+        decision_tf="1w",
+    )
+    # Neither 1d (< 1w) nor 1w (not strictly higher than itself) qualifies.
+    assert out == {}
 
 
 # --- integration guard: legacy _to_weekly_candles is unchanged -----------
