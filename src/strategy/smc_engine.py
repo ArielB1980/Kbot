@@ -1810,12 +1810,13 @@ class SMCEngine:
             signal_timestamp=signal_ts,
             decision_tf=decision_tf_str,
         )
+        tf_stack = self._compute_tf_stack(order_block, htf_levels)
 
         return {
             'order_block': order_block,
             'fvg': fvg,
             'bos': bos,
-            '_htf_levels': htf_levels,
+            'tf_stack': tf_stack,
         }
 
     def _detect_multi_tf_levels(
@@ -1894,6 +1895,119 @@ class SMCEngine:
             fvg["timeframe_origin"] = timeframe_origin
 
         return {"order_block": order_block, "fvg": fvg}
+
+    @staticmethod
+    def _compute_tf_stack(
+        four_h_ob: Optional[Dict[str, Any]],
+        htf_levels: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Compute multi-TF OB stacking metadata against the 4H OB.
+
+        Rules (per Phase 2A design memo §5 and implementation plan §3):
+          - depth_contained: HTFs where body relation is "contained" AND bias matches.
+          - depth_overlapping: HTFs where body relation is "overlapping" (bias-agnostic).
+          - Bias-conflicted CONTAINED stacks are downgraded to "none" (not counted),
+            because bias-mismatch dilutes the confluence thesis. Bias-conflicted
+            OVERLAPPING stacks stay in depth_overlapping — ambiguous already.
+          - Bias-conflict bool is True if any HTF OB has an opposite bias.
+          - If no 4H OB, returns zero/None defaults throughout.
+
+        Body-range only — wick ranges are never passed here.
+        """
+        tfs: Tuple[str, ...] = ("1d", "1w")
+        relation: Dict[str, str] = {tf: ZONE_RELATION_NONE for tf in tfs}
+        ob_bias: Dict[str, Optional[str]] = {tf: None for tf in tfs}
+        ob_freshness: Dict[str, Optional[str]] = {tf: None for tf in tfs}
+        ob_body_freshness: Dict[str, Optional[str]] = {tf: None for tf in tfs}
+        ob_age: Dict[str, Optional[int]] = {tf: None for tf in tfs}
+        fvg_freshness: Dict[str, Optional[str]] = {tf: None for tf in tfs}
+        fvg_age: Dict[str, Optional[int]] = {tf: None for tf in tfs}
+
+        def _empty_result(conflict: bool = False) -> Dict[str, Any]:
+            return {
+                "tf_stack_relation": relation,
+                "tf_stack_depth_contained": 0,
+                "tf_stack_depth_overlapping": 0,
+                "tf_stack_bias_conflict": conflict,
+                "htf_ob_bias": ob_bias,
+                "htf_ob_freshness": ob_freshness,
+                "htf_ob_body_freshness": ob_body_freshness,
+                "htf_ob_age_candles": ob_age,
+                "htf_fvg_freshness": fvg_freshness,
+                "htf_fvg_age_candles": fvg_age,
+            }
+
+        if not four_h_ob:
+            return _empty_result()
+
+        inner_low = four_h_ob.get("body_low")
+        inner_high = four_h_ob.get("body_high")
+        four_h_bias = four_h_ob.get("type")
+
+        depth_contained = 0
+        depth_overlapping = 0
+        bias_conflict = False
+
+        for tf in tfs:
+            tf_entry = htf_levels.get(tf) or {}
+            ob = tf_entry.get("order_block")
+            fvg = tf_entry.get("fvg")
+
+            if ob is not None:
+                outer_low = ob.get("body_low")
+                outer_high = ob.get("body_high")
+                ob_type = ob.get("type")
+                ob_bias[tf] = ob_type
+                ob_freshness[tf] = ob.get("freshness")
+                ob_body_freshness[tf] = ob.get("body_freshness")
+                ob_age[tf] = ob.get("age_candles")
+
+                if (
+                    inner_low is not None and inner_high is not None
+                    and outer_low is not None and outer_high is not None
+                ):
+                    body_rel = SMCEngine._compute_zone_relation(
+                        inner_low, inner_high, outer_low, outer_high
+                    )
+                else:
+                    body_rel = ZONE_RELATION_NONE
+
+                bias_mismatch = (
+                    ob_type is not None
+                    and four_h_bias is not None
+                    and ob_type != four_h_bias
+                )
+                if bias_mismatch:
+                    bias_conflict = True
+
+                if body_rel == ZONE_RELATION_CONTAINED:
+                    if bias_mismatch:
+                        # Bias-conflict contained → exclude from counts (logged as none).
+                        relation[tf] = ZONE_RELATION_NONE
+                    else:
+                        relation[tf] = ZONE_RELATION_CONTAINED
+                        depth_contained += 1
+                elif body_rel == ZONE_RELATION_OVERLAPPING:
+                    relation[tf] = ZONE_RELATION_OVERLAPPING
+                    depth_overlapping += 1
+                # body_rel == NONE → relation already "none"
+
+            if fvg is not None:
+                fvg_freshness[tf] = fvg.get("freshness")
+                fvg_age[tf] = fvg.get("age_candles")
+
+        return {
+            "tf_stack_relation": relation,
+            "tf_stack_depth_contained": depth_contained,
+            "tf_stack_depth_overlapping": depth_overlapping,
+            "tf_stack_bias_conflict": bias_conflict,
+            "htf_ob_bias": ob_bias,
+            "htf_ob_freshness": ob_freshness,
+            "htf_ob_body_freshness": ob_body_freshness,
+            "htf_ob_age_candles": ob_age,
+            "htf_fvg_freshness": fvg_freshness,
+            "htf_fvg_age_candles": fvg_age,
+        }
 
     def _find_order_block(self, candles: List[Candle], bias: str) -> Optional[dict]:
         """

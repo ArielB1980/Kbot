@@ -291,6 +291,132 @@ def test_detect_multi_tf_levels_skips_1w_when_decision_is_1w():
     assert out == {}
 
 
+# --- _compute_tf_stack ---------------------------------------------------
+
+
+def _mk_ob(
+    tf_origin: str,
+    body_low: Decimal,
+    body_high: Decimal,
+    *,
+    ob_type: str = "bullish",
+    freshness: str = "fully_untouched",
+    body_freshness: str = "fully_untouched",
+    age_candles: int = 5,
+) -> dict:
+    return {
+        "type": ob_type,
+        "body_low": body_low,
+        "body_high": body_high,
+        "freshness": freshness,
+        "body_freshness": body_freshness,
+        "age_candles": age_candles,
+        "timeframe_origin": tf_origin,
+    }
+
+
+def _mk_fvg(
+    tf_origin: str, freshness: str = "fully_untouched", age_candles: int = 3
+) -> dict:
+    return {"freshness": freshness, "age_candles": age_candles, "timeframe_origin": tf_origin}
+
+
+def test_compute_tf_stack_no_4h_ob_returns_empty_defaults():
+    stack = SMCEngine._compute_tf_stack(None, {"1d": {"order_block": _mk_ob("1d", Decimal("90"), Decimal("120"))}})
+    assert stack["tf_stack_depth_contained"] == 0
+    assert stack["tf_stack_depth_overlapping"] == 0
+    assert stack["tf_stack_bias_conflict"] is False
+    assert stack["tf_stack_relation"] == {"1d": "none", "1w": "none"}
+    assert stack["htf_ob_bias"] == {"1d": None, "1w": None}
+
+
+def test_compute_tf_stack_contained_bias_match_counts_depth_contained():
+    four_h = _mk_ob("4h", Decimal("100"), Decimal("105"), ob_type="bullish")
+    htf = {
+        "1d": {
+            "order_block": _mk_ob("1d", Decimal("95"), Decimal("110"), ob_type="bullish"),
+            "fvg": None,
+        }
+    }
+    stack = SMCEngine._compute_tf_stack(four_h, htf)
+    assert stack["tf_stack_depth_contained"] == 1
+    assert stack["tf_stack_depth_overlapping"] == 0
+    assert stack["tf_stack_bias_conflict"] is False
+    assert stack["tf_stack_relation"]["1d"] == "contained"
+    assert stack["htf_ob_bias"]["1d"] == "bullish"
+
+
+def test_compute_tf_stack_bias_conflict_contained_downgraded_to_none():
+    # 4H bullish contained inside a bearish 1D OB — conflict downgrades to "none",
+    # bias_conflict flag flips true, depth_contained stays 0.
+    four_h = _mk_ob("4h", Decimal("100"), Decimal("105"), ob_type="bullish")
+    htf = {
+        "1d": {
+            "order_block": _mk_ob("1d", Decimal("95"), Decimal("110"), ob_type="bearish"),
+            "fvg": None,
+        }
+    }
+    stack = SMCEngine._compute_tf_stack(four_h, htf)
+    assert stack["tf_stack_depth_contained"] == 0
+    assert stack["tf_stack_depth_overlapping"] == 0
+    assert stack["tf_stack_relation"]["1d"] == "none"
+    assert stack["tf_stack_bias_conflict"] is True
+
+
+def test_compute_tf_stack_bias_conflict_overlapping_stays_in_overlap_bucket():
+    # 4H bullish overlaps (not contained) bearish 1D OB — keep in overlapping bucket.
+    four_h = _mk_ob("4h", Decimal("98"), Decimal("108"), ob_type="bullish")
+    htf = {
+        "1d": {
+            "order_block": _mk_ob("1d", Decimal("100"), Decimal("115"), ob_type="bearish"),
+            "fvg": None,
+        }
+    }
+    stack = SMCEngine._compute_tf_stack(four_h, htf)
+    assert stack["tf_stack_depth_contained"] == 0
+    assert stack["tf_stack_depth_overlapping"] == 1
+    assert stack["tf_stack_relation"]["1d"] == "overlapping"
+    assert stack["tf_stack_bias_conflict"] is True
+
+
+def test_compute_tf_stack_both_tfs_contained_depth_2():
+    four_h = _mk_ob("4h", Decimal("100"), Decimal("105"), ob_type="bullish")
+    htf = {
+        "1d": {
+            "order_block": _mk_ob("1d", Decimal("95"), Decimal("110"), ob_type="bullish"),
+            "fvg": _mk_fvg("1d", freshness="wick_tested"),
+        },
+        "1w": {
+            "order_block": _mk_ob("1w", Decimal("90"), Decimal("115"), ob_type="bullish", body_freshness="wick_tested", age_candles=12),
+            "fvg": None,
+        },
+    }
+    stack = SMCEngine._compute_tf_stack(four_h, htf)
+    assert stack["tf_stack_depth_contained"] == 2
+    assert stack["tf_stack_depth_overlapping"] == 0
+    assert stack["tf_stack_bias_conflict"] is False
+    assert stack["htf_ob_body_freshness"]["1w"] == "wick_tested"
+    assert stack["htf_ob_age_candles"]["1w"] == 12
+    assert stack["htf_fvg_freshness"]["1d"] == "wick_tested"
+
+
+def test_compute_tf_stack_no_htf_ob_leaves_tf_entry_as_none():
+    four_h = _mk_ob("4h", Decimal("100"), Decimal("105"), ob_type="bullish")
+    htf = {"1d": {"order_block": None, "fvg": None}}
+    stack = SMCEngine._compute_tf_stack(four_h, htf)
+    assert stack["tf_stack_depth_contained"] == 0
+    assert stack["tf_stack_relation"]["1d"] == "none"
+    assert stack["htf_ob_bias"]["1d"] is None
+
+
+def test_compute_tf_stack_missing_htf_tfs_default_none():
+    four_h = _mk_ob("4h", Decimal("100"), Decimal("105"), ob_type="bullish")
+    stack = SMCEngine._compute_tf_stack(four_h, {})  # no 1d or 1w entry
+    assert stack["tf_stack_relation"] == {"1d": "none", "1w": "none"}
+    assert stack["htf_ob_bias"] == {"1d": None, "1w": None}
+    assert stack["htf_ob_age_candles"] == {"1d": None, "1w": None}
+
+
 # --- integration guard: legacy _to_weekly_candles is unchanged -----------
 
 
