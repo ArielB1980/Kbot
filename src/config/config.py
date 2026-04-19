@@ -535,6 +535,23 @@ class StrategyConfig(BaseSettings):
                     "(IC -0.064); diagnose before re-enabling.",
     )
 
+    # Phase 2A: Multi-TF OB Stacking (scaffold — weight 0 until post-replay calibration)
+    stacking_scoring_enabled: bool = Field(
+        default=True,
+        description="Enable multi-TF OB stacking scoring component. Detection, "
+                    "metadata, and logging always run when True; the weight in "
+                    "SCORER_WEIGHTS controls whether the score contributes to total.",
+    )
+    stacking_max_points: float = Field(
+        default=10.0, ge=0.0, le=20.0,
+        description="Maximum points awarded for tf_stack component (post-calibration).",
+    )
+    stacking_disabled_symbols: List[str] = Field(
+        default_factory=list,
+        description="Per-symbol kill-switch mirroring freshness_disabled_symbols. "
+                    "Populated once per-symbol IC checks complete on the 400-day replay.",
+    )
+
     # Bias Logic
     ema_neutral_zone_bps: float = Field(default=10.0, ge=0.0, le=100.0)
     allow_counter_trend: bool = Field(
